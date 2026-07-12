@@ -20,7 +20,7 @@ from utils.unlimited_ocr import UnlimitedOCRClient
 from memory import MemoryManager, create_embedding_provider
 from database.models import DatabaseManager
 from skills import SkillRouter
-from core.mcp_client_enhanced import get_enhanced_mcp_client
+from core.mcp_client_unified import get_unified_mcp_client
 
 # 初始化日志系统
 logger = get_logger(__name__)
@@ -105,8 +105,8 @@ class ArtPMAgent:
         # Initialize skill router (works independently of LLM)
         self.router = SkillRouter(self.context)
 
-        # Initialize MCP client
-        self.mcp_client = get_enhanced_mcp_client()
+        # Initialize MCP client (统一入口：聚合本地工具 + 远程技能)
+        self.mcp_client = get_unified_mcp_client()
         if self.mcp_client.enabled:
             mcp_skills = self.mcp_client.list_skills()
             logger.info(f"本地工具已启用 - {len(mcp_skills)}个工具可用")
