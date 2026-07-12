@@ -20,6 +20,7 @@ from .cost_control_skill import CostControlSkill
 from .quote_scheduling_skill import QuoteSchedulingSkill
 from .progress_management_skill import ProgressManagementSkill
 from .delivery_skill import DeliverySkill
+from .retrospective_skill import RetrospectiveSkill
 from parsers.excel_parser import ExcelQuoteParser
 from utils.image_validation import MAX_IMAGE_FILE_SIZE, load_validated_image
 from utils.unlimited_ocr import UnlimitedOCRClient
@@ -735,6 +736,7 @@ SKILL_REGISTRY: Dict[str, type] = {
     "quote_scheduling": QuoteSchedulingSkill,
     "progress_management": ProgressManagementSkill,
     "delivery": DeliverySkill,
+    "retrospective": RetrospectiveSkill,
 }
 
 SKILL_METADATA = {
@@ -828,6 +830,14 @@ SKILL_METADATA = {
     },
     "delivery": {
         "description": "产品交付：交付清单、验收单、交付与版本记录",
+        "version": "1.0",
+        "requires_llm": False,
+        "risk": "low",
+        "read_only": False,
+        "requires_approval": False,
+    },
+    "retrospective": {
+        "description": "复盘总结：结项复盘报告、经验教训自动沉淀",
         "version": "1.0",
         "requires_llm": False,
         "risk": "low",
