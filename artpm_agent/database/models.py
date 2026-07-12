@@ -6,7 +6,10 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker, selecti
 from datetime import datetime
 from typing import List, Dict, Optional
 import json
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 
@@ -312,7 +315,16 @@ class DatabaseManager:
 
         # Validate existing shared tables before running any DDL.
         self._validate_existing_schema()
-        Base.metadata.create_all(self.engine)
+        # 优先通过 Alembic 管理 schema（幂等、可演进）；不可用时回退 create_all。
+        try:
+            from database.migrate import ensure_schema
+
+            ensure_schema(self.engine)
+        except Exception as exc:
+            logger.warning(
+                "Alembic 迁移不可用，回退至 Base.metadata.create_all: %s", exc
+            )
+            Base.metadata.create_all(self.engine)
 
     def get_session(self):
         """获取数据库会话"""
