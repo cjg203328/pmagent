@@ -1,45 +1,6 @@
-# ArtPM Copilot 依赖清单
-
-# Web框架
-streamlit>=1.44.0
-streamlit-option-menu>=0.3.6
-
-# 数据处理
-pandas>=2.0.0
-numpy>=1.24.0
-
-# 数据库
-sqlalchemy>=2.0.0
-
-# Excel处理
-openpyxl>=3.1.0
-xlrd>=2.0.1
-python-docx>=1.1.0
-
-# 可视化
-plotly>=5.18.0
-kaleido>=0.2.1
-
-# AI/LLM
-openai>=1.0.0
-anthropic>=0.8.0
-
-# OCR (可选)
-# paddleocr>=2.7.0
-# paddlepaddle>=2.5.0
-Pillow>=10.0.0
-
-# PDF处理
-pdfplumber>=0.10.0
-PyMuPDF>=1.24.0
-
-# 向量检索 (可选，离线模式使用确定性哈希向量)
-# faiss-cpu>=1.7.4
-
-# 工具
-python-dotenv>=1.0.0
-pydantic>=2.0.0
-requests>=2.31.0
-
-# 日期时间
-python-dateutil>=2.8.2
+# 依赖现由 pyproject.toml 的 [project].dependencies 统一管理（单一来源）。
+# 推荐安装方式：
+#   pip install -e .                 # 仅核心依赖
+#   pip install -e ".[ocr,vector]"   # 额外安装可选 OCR / 向量检索
+#   pip install -e ".[dev]"          # 额外安装开发/测试依赖
+-e .

@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "artpm-agent"
+version = "0.1.0"
+description = "面向游戏美术外包项目管理的 Streamlit AI 助手（离线优先）"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "streamlit>=1.44.0",
+    "streamlit-option-menu>=0.3.6",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "sqlalchemy>=2.0.0",
+    "openpyxl>=3.1.0",
+    "xlrd>=2.0.1",
+    "python-docx>=1.1.0",
+    "plotly>=5.18.0",
+    "kaleido>=0.2.1",
+    "openai>=1.0.0",
+    "anthropic>=0.8.0",
+    "Pillow>=10.0.0",
+    "pdfplumber>=0.10.0",
+    "PyMuPDF>=1.24.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "requests>=2.31.0",
+    "python-dateutil>=2.8.2",
+]
+
+[project.optional-dependencies]
+# OCR 报价单/扫描件解析（重依赖，按需安装）
+ocr = ["paddleocr>=2.7.0", "paddlepaddle>=2.5.0"]
+# FAISS 向量检索（离线模式下默认用确定性哈希向量降级）
+vector = ["faiss-cpu>=1.7.4"]
+# 开发/测试/质量门禁
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.15.0",
+    "mypy>=1.8.0",
+    "bandit>=1.7.0",
+    "safety>=3.0.0",
+]
+
+[tool.setuptools]
+# 代码实际位于 artpm_agent/ 子目录，将其设为可导入根
+py-modules = ["agent", "app", "config", "health_check", "main"]
+packages = [
+    "core",
+    "skills",
+    "utils",
+    "database",
+    "memory",
+    "parsers",
+    "workflows",
+    "visualization",
+    "profiles",
+    "artifacts",
+]
+
+[tool.setuptools.package-dir]
+"" = "artpm_agent"
