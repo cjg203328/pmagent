@@ -17,3 +17,7 @@ exclude = [
 "tests/test_basic.py" = ["F841"]
 "tests/test_mcp_enhanced.py" = ["F541", "F841"]
 "tests/test_mcp_simple.py" = ["F541"]
+# app.py 拆分之后的共享层/页面模块：使用 `from ui_helpers import *` 复用符号
+"artpm_agent/app.py" = ["F403", "F405"]
+"artpm_agent/ui_helpers.py" = ["F401"]
+"artpm_agent/pages/*.py" = ["F401", "F403", "F405"]

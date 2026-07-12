@@ -14,6 +14,7 @@ from typing import Dict, Any, List, Optional
 from .base_skill import BaseSkill
 from .smart_progress_tracker import SmartProgressTracker
 from .smart_task_allocator import SmartTaskAllocator
+from .quality_control_skill import QualityControlSkill
 from parsers.excel_parser import ExcelQuoteParser
 from utils.image_validation import MAX_IMAGE_FILE_SIZE, load_validated_image
 from utils.unlimited_ocr import UnlimitedOCRClient
@@ -723,6 +724,7 @@ SKILL_REGISTRY: Dict[str, type] = {
     "progress_tracker": ProgressTracker,
     "reminder_bot": ReminderBot,
     "reminder_dispatch": ReminderDispatch,
+    "quality_control": QualityControlSkill,
 }
 
 SKILL_METADATA = {
@@ -773,6 +775,14 @@ SKILL_METADATA = {
         "risk": "high",
         "read_only": False,
         "requires_approval": True,
+    },
+    "quality_control": {
+        "description": "美术外包质量把控：提交评审、通过/驳回/返工状态机、质量评分与质检报告",
+        "version": "1.0",
+        "requires_llm": False,
+        "risk": "low",
+        "read_only": False,
+        "requires_approval": False,
     },
 }
 

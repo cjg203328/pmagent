@@ -411,6 +411,40 @@ class DatabaseManager:
         finally:
             session.close()
 
+    def get_task(self, task_id: int) -> Optional[Task]:
+        """按ID获取任务"""
+        session = self.get_session()
+        try:
+            return session.query(Task).filter(Task.id == task_id).first()
+        finally:
+            session.close()
+
+    def get_tasks(self, project_id: Optional[int] = None) -> List[Task]:
+        """获取任务列表，可按项目过滤"""
+        session = self.get_session()
+        try:
+            query = session.query(Task)
+            if project_id is not None:
+                query = query.filter(Task.project_id == project_id)
+            return query.all()
+        finally:
+            session.close()
+
+    def update_task(self, task_id: int, **fields) -> bool:
+        """更新任务字段（如质量评分、状态、返工次数）"""
+        session = self.get_session()
+        try:
+            task = session.query(Task).filter(Task.id == task_id).first()
+            if task is None:
+                return False
+            for key, value in fields.items():
+                if hasattr(task, key):
+                    setattr(task, key, value)
+            session.commit()
+            return True
+        finally:
+            session.close()
+
     # ===== TeamMember CRUD =====
 
     def create_member(self, member_data: Dict) -> TeamMember:
