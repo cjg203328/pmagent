@@ -270,6 +270,36 @@ class KnowledgeBase(Base):
         }
 
 
+class Delivery(Base):
+    """交付记录表 - 产品交付阶段的每次交付包（草稿/已交付/已验收/已驳回）"""
+    __tablename__ = 'deliveries'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey('projects.id'), nullable=False, index=True)
+    delivery_no = Column(String(50), nullable=False, unique=True)
+    title = Column(String(200))
+    status = Column(String(30), default='草稿')
+    items_json = Column(Text)            # JSON: [{asset_id, asset_name, version, status}]
+    delivered_by = Column(String(100))
+    delivered_at = Column(DateTime)
+    accepted_at = Column(DateTime)
+    notes = Column(Text)
+    created_at = Column(DateTime, default=datetime.now)
+
+
+class AssetVersion(Base):
+    """资产版本表 - 单个资产的交付版本历史（待审核/已通过/已驳回）"""
+    __tablename__ = 'asset_versions'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    asset_id = Column(Integer, ForeignKey('assets.id'), nullable=False, index=True)
+    version = Column(String(20), nullable=False)
+    status = Column(String(30), default='待审核')
+    note = Column(Text)
+    file_ref = Column(String(500))
+    created_at = Column(DateTime, default=datetime.now)
+
+
 class DatabaseManager:
     """数据库管理器"""
 
@@ -442,6 +472,124 @@ class DatabaseManager:
                     setattr(task, key, value)
             session.commit()
             return True
+        finally:
+            session.close()
+
+    # ===== Document persistence (需求评估 intake→落库) =====
+
+    def save_document(self, project_id, document_type, file_name, parsed_data=None,
+                      file_path=None, file_type=None, file_size=None,
+                      confidence_score=None) -> "Document":
+        """持久化一份已解析的业务文档（如报价单），修复 intake→落库断层。"""
+        session = self.get_session()
+        try:
+            doc = Document(
+                project_id=project_id,
+                document_type=document_type,
+                file_name=file_name,
+                file_path=file_path,
+                file_type=file_type,
+                file_size=file_size,
+                parsed_data=json.dumps(parsed_data, ensure_ascii=False)
+                if isinstance(parsed_data, (dict, list)) else parsed_data,
+                confidence_score=confidence_score,
+                parsed_date=datetime.now() if parsed_data else None,
+            )
+            session.add(doc)
+            session.commit()
+            session.refresh(doc)
+            return doc
+        finally:
+            session.close()
+
+    def get_documents(self, project_id=None, document_type=None) -> List["Document"]:
+        """按项目/类型查询文档。"""
+        session = self.get_session()
+        try:
+            q = session.query(Document)
+            if project_id is not None:
+                q = q.filter(Document.project_id == project_id)
+            if document_type:
+                q = q.filter(Document.document_type == document_type)
+            return q.order_by(Document.upload_date.desc()).all()
+        finally:
+            session.close()
+
+    # ===== Knowledge base writes (复盘总结经验沉淀) =====
+
+    def add_knowledge(self, title, content, category="lessons", source=None,
+                      client=None, tags=None) -> "KnowledgeBase":
+        """写入一条知识库记录（如复盘经验教训），供后续 RAG 复用。"""
+        session = self.get_session()
+        try:
+            kb = KnowledgeBase(
+                title=title,
+                content=content,
+                category=category,
+                source=source,
+                client=client,
+                tags=json.dumps(tags, ensure_ascii=False) if isinstance(tags, list) else tags,
+            )
+            session.add(kb)
+            session.commit()
+            session.refresh(kb)
+            return kb
+        finally:
+            session.close()
+
+    # ===== Delivery & versions (产品交付) =====
+
+    def create_delivery(self, project_id, delivery_no, title=None, items=None,
+                        delivered_by=None, status="草稿") -> "Delivery":
+        """创建一次交付记录。"""
+        session = self.get_session()
+        try:
+            d = Delivery(
+                project_id=project_id,
+                delivery_no=delivery_no,
+                title=title,
+                items_json=json.dumps(items, ensure_ascii=False) if items else None,
+                delivered_by=delivered_by,
+                status=status,
+            )
+            session.add(d)
+            session.commit()
+            session.refresh(d)
+            return d
+        finally:
+            session.close()
+
+    def get_project_deliveries(self, project_id) -> List["Delivery"]:
+        session = self.get_session()
+        try:
+            return session.query(Delivery).filter(
+                Delivery.project_id == project_id
+            ).order_by(Delivery.created_at.desc()).all()
+        finally:
+            session.close()
+
+    def create_asset_version(self, asset_id, version, status="待审核",
+                             note=None, file_ref=None) -> "AssetVersion":
+        """记录某个资产的一个交付版本。"""
+        session = self.get_session()
+        try:
+            v = AssetVersion(
+                asset_id=asset_id, version=version, status=status,
+                note=note, file_ref=file_ref,
+            )
+            session.add(v)
+            session.commit()
+            session.refresh(v)
+            return v
+        finally:
+            session.close()
+
+    def get_asset_versions(self, asset_id) -> List["AssetVersion"]:
+        session = self.get_session()
+        try:
+            return session.query(AssetVersion).filter(
+                AssetVersion.asset_id == asset_id
+            ).order_by(AssetVersion.created_at.desc()).all()
         finally:
             session.close()
 

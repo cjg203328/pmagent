@@ -15,6 +15,7 @@ from .base_skill import BaseSkill
 from .smart_progress_tracker import SmartProgressTracker
 from .smart_task_allocator import SmartTaskAllocator
 from .quality_control_skill import QualityControlSkill
+from .requirements_assessment_skill import RequirementsAssessmentSkill
 from parsers.excel_parser import ExcelQuoteParser
 from utils.image_validation import MAX_IMAGE_FILE_SIZE, load_validated_image
 from utils.unlimited_ocr import UnlimitedOCRClient
@@ -725,6 +726,7 @@ SKILL_REGISTRY: Dict[str, type] = {
     "reminder_bot": ReminderBot,
     "reminder_dispatch": ReminderDispatch,
     "quality_control": QualityControlSkill,
+    "requirements_assessment": RequirementsAssessmentSkill,
 }
 
 SKILL_METADATA = {
@@ -778,6 +780,14 @@ SKILL_METADATA = {
     },
     "quality_control": {
         "description": "美术外包质量把控：提交评审、通过/驳回/返工状态机、质量评分与质检报告",
+        "version": "1.0",
+        "requires_llm": False,
+        "risk": "low",
+        "read_only": False,
+        "requires_approval": False,
+    },
+    "requirements_assessment": {
+        "description": "需求评估增强：资产复杂度判定、需求范围确认清单、报价解析自动建库",
         "version": "1.0",
         "requires_llm": False,
         "risk": "low",
