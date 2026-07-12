@@ -18,6 +18,7 @@ from .quality_control_skill import QualityControlSkill
 from .requirements_assessment_skill import RequirementsAssessmentSkill
 from .cost_control_skill import CostControlSkill
 from .quote_scheduling_skill import QuoteSchedulingSkill
+from .progress_management_skill import ProgressManagementSkill
 from parsers.excel_parser import ExcelQuoteParser
 from utils.image_validation import MAX_IMAGE_FILE_SIZE, load_validated_image
 from utils.unlimited_ocr import UnlimitedOCRClient
@@ -731,6 +732,7 @@ SKILL_REGISTRY: Dict[str, type] = {
     "requirements_assessment": RequirementsAssessmentSkill,
     "cost_control": CostControlSkill,
     "quote_scheduling": QuoteSchedulingSkill,
+    "progress_management": ProgressManagementSkill,
 }
 
 SKILL_METADATA = {
@@ -808,6 +810,14 @@ SKILL_METADATA = {
     },
     "quote_scheduling": {
         "description": "报价排期：人天估算引擎、排期时间线、里程碑计划",
+        "version": "1.0",
+        "requires_llm": False,
+        "risk": "low",
+        "read_only": False,
+        "requires_approval": False,
+    },
+    "progress_management": {
+        "description": "进度管理：里程碑视图、阻塞卡点、每日站会摘要",
         "version": "1.0",
         "requires_llm": False,
         "risk": "low",
