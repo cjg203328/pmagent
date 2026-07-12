@@ -1,0 +1,13 @@
+.env
+.cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+artpm_agent/logs/
+logs/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+.streamlit/
+temp/

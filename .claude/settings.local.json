@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(streamlit run *)",
+      "Bash(python -m streamlit run app.py --server.headless true)",
+      "Bash(chmod +x \"d:\\\\桌面\\\\pmagent\\\\start.sh\")",
+      "Bash(python launcher.py)",
+      "Bash(python launcher.py --help)",
+      "Bash(python -c \"import streamlit; print\\('streamlit version:', streamlit.__version__\\)\")",
+      "Bash(python -c \"from pathlib import Path; app_file = Path\\('artpm_agent/app_integrated.py'\\); print\\('File exists:', app_file.exists\\(\\)\\); print\\('Absolute path:', app_file.absolute\\(\\)\\)\")",
+      "Bash(timeout 5 python -m streamlit run artpm_agent/app_integrated.py --server.headless true)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, 'artpm_agent'\\); from app_integrated import *\")",
+      "Bash(pip install *)",
+      "Bash(timeout 5 python -m streamlit run artpm_agent/app_minimal.py --server.headless true)",
+      "Bash(timeout 5 python -m streamlit run artpm_agent/app.py --server.headless true)",
+      "Bash(python -c \"from artpm_agent.database.models import DatabaseManager; db = DatabaseManager\\(\\); print\\('Database recreated successfully'\\)\")",
+      "Bash(python -c \"import sqlite3; conn = sqlite3.connect\\('data/artpm.db'\\); cursor = conn.cursor\\(\\); cursor.execute\\('SELECT sql FROM sqlite_master WHERE type=\\\\\"table\\\\\" AND name=\\\\\"projects\\\\\"'\\); print\\(cursor.fetchone\\(\\)[0] if cursor.fetchone\\(\\) else 'No table'\\); conn.close\\(\\)\")",
+      "Bash(sqlite3 data/artpm.db \".schema projects\")",
+      "Bash(timeout 8 python -m streamlit run artpm_agent/app.py --server.headless true)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

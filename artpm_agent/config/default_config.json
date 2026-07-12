@@ -1,0 +1,88 @@
+{
+  "llm": {
+    "provider": "anthropic",
+    "model": "claude-3-5-sonnet-20241022",
+    "available_models": [],
+    "models_synced_at": null,
+    "temperature": 0.7,
+    "max_tokens": 4000,
+    "retry_max_attempts": 1,
+    "retry_backoff_factor": 2,
+    "request_timeout_seconds": 30,
+    "history_max_messages": 12,
+    "history_max_chars": 8000,
+    "intent_classification_enabled": false
+  },
+  "unlimited_ocr": {
+    "enabled": true,
+    "base_url": "http://127.0.0.1:10000",
+    "model": "Unlimited-OCR",
+    "timeout": 120,
+    "max_output": 32768,
+    "allow_remote": false,
+    "api_key": "",
+    "no_repeat_ngram_size": 35,
+    "ngram_window_single": 128,
+    "ngram_window_multi": 1024,
+    "custom_logit_processor": ""
+  },
+  "database": {
+    "db_path": "./data/artpm.db",
+    "memory_db_path": "./data/memory.db",
+    "conversation_db_path": "./data/conversations.db",
+    "vector_db_path": "./data/vector_store"
+  },
+  "cost_config": {
+    "staff_levels": {
+      "初级": {
+        "daily_cost": 300,
+        "min_days": 1
+      },
+      "中级": {
+        "daily_cost": 500,
+        "min_days": 1
+      },
+      "中高级": {
+        "daily_cost": 700,
+        "min_days": 1
+      },
+      "高级": {
+        "daily_cost": 1000,
+        "min_days": 1
+      },
+      "资深": {
+        "daily_cost": 1500,
+        "min_days": 1
+      }
+    },
+    "overhead_rate": 0.15,
+    "tax_rate": 0.06,
+    "currency": "CNY"
+  },
+  "wecom": {
+    "enabled": false,
+    "corp_id": "",
+    "agent_id": "",
+    "secret": "",
+    "webhook_url": "",
+    "note": "配置完成后设为true即可启用真实推送"
+  },
+  "file_processing": {
+    "max_file_size_mb": 50,
+    "supported_formats": ["xlsx", "xls", "et", "csv", "png", "jpg", "jpeg", "pdf", "txt", "md"],
+    "ocr_language": "ch"
+  },
+  "task_allocation": {
+    "max_load_per_person": 20,
+    "prefer_same_person": true
+  },
+  "progress_tracking": {
+    "warning_days_ahead": 1,
+    "check_interval_hours": 24
+  },
+  "memory": {
+    "embedding_model": "text-embedding-3-small",
+    "vector_top_k": 5,
+    "short_term_memory_days": 7
+  }
+}

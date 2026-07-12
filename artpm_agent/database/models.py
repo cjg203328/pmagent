@@ -1,0 +1,508 @@
+"""
+数据库模型设计 - SQLAlchemy ORM
+"""
+from sqlalchemy import create_engine, inspect, Column, Integer, String, Float, DateTime, Text, ForeignKey, Boolean, func
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker, selectinload
+from datetime import datetime
+from typing import List, Dict, Optional
+import json
+from pathlib import Path
+
+Base = declarative_base()
+
+
+class Project(Base):
+    """项目表"""
+    __tablename__ = 'projects'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_name = Column(String(200), nullable=False, index=True)
+    client = Column(String(100), nullable=False, index=True)
+    status = Column(String(50), default='待开始', index=True)  # 待开始, 进行中, 已完成, 已取消
+
+    # 金额信息
+    quote_amount = Column(Float, nullable=False)
+    cost = Column(Float)
+    gross_profit = Column(Float)
+    net_profit = Column(Float)
+    profit_rate = Column(Float)
+
+    # 时间信息
+    start_date = Column(DateTime)
+    deadline = Column(DateTime, index=True)
+    completed_date = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    # 联系信息
+    contact_person = Column(String(100))
+    contact_phone = Column(String(50))
+    contact_email = Column(String(100))
+
+    # 备注
+    notes = Column(Text)
+    risk_level = Column(String(20))  # low, medium, high
+
+    # 关联
+    assets = relationship("Asset", back_populates="project", cascade="all, delete-orphan")
+    tasks = relationship("Task", back_populates="project", cascade="all, delete-orphan")
+    documents = relationship("Document", back_populates="project", cascade="all, delete-orphan")
+
+    def to_dict(self) -> Dict:
+        """转换为字典"""
+        return {
+            "id": self.id,
+            "project_name": self.project_name,
+            "client": self.client,
+            "status": self.status,
+            "quote_amount": self.quote_amount,
+            "cost": self.cost,
+            "net_profit": self.net_profit,
+            "profit_rate": self.profit_rate,
+            "deadline": self.deadline.isoformat() if self.deadline else None,
+            "created_at": self.created_at.isoformat(),
+            "contact_person": self.contact_person,
+            "risk_level": self.risk_level
+        }
+
+
+class Asset(Base):
+    """资产表"""
+    __tablename__ = 'assets'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey('projects.id'), nullable=False, index=True)
+
+    # 资产信息
+    asset_name = Column(String(200), nullable=False)
+    asset_type = Column(String(50))  # 角色, 场景, 特效, 动画, UI等
+    quantity = Column(Integer, default=1)
+    unit_price = Column(Float)
+    total_price = Column(Float)
+
+    # 制作信息
+    status = Column(String(50), default='未开始')  # 未开始, 制作中, 待审核, 已完成
+    progress = Column(Integer, default=0)  # 0-100
+    complexity = Column(String(20))  # simple, medium, complex
+
+    # 要求
+    requirements = Column(Text)
+    reference_images = Column(Text)  # JSON array of image URLs
+
+    # 时间
+    estimated_hours = Column(Float)
+    actual_hours = Column(Float)
+    created_at = Column(DateTime, default=datetime.now)
+
+    # 关联
+    project = relationship("Project", back_populates="assets")
+    tasks = relationship("Task", back_populates="asset")
+
+    def to_dict(self) -> Dict:
+        return {
+            "id": self.id,
+            "project_id": self.project_id,
+            "asset_name": self.asset_name,
+            "asset_type": self.asset_type,
+            "quantity": self.quantity,
+            "unit_price": self.unit_price,
+            "total_price": self.total_price,
+            "status": self.status,
+            "progress": self.progress
+        }
+
+
+class TeamMember(Base):
+    """团队成员表"""
+    __tablename__ = 'team_members'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False, index=True)
+    role = Column(String(50))  # 建模师, 贴图师, 动画师, PM等
+
+    # 技能
+    skills = Column(Text)  # JSON array
+    skill_level = Column(String(20))  # junior, intermediate, senior
+
+    # 联系方式
+    phone = Column(String(50))
+    email = Column(String(100))
+    wechat = Column(String(100))
+
+    # 工作信息
+    employment_type = Column(String(20))  # full-time, part-time, freelance
+    hourly_rate = Column(Float)
+    is_active = Column(Boolean, default=True)
+
+    # 统计
+    total_projects = Column(Integer, default=0)
+    total_hours = Column(Float, default=0)
+    avg_quality_score = Column(Float)
+
+    created_at = Column(DateTime, default=datetime.now)
+
+    # 关联
+    tasks = relationship("Task", back_populates="assignee")
+
+    def to_dict(self) -> Dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "role": self.role,
+            "skills": json.loads(self.skills) if self.skills else [],
+            "skill_level": self.skill_level,
+            "is_active": self.is_active
+        }
+
+
+class Task(Base):
+    """任务表"""
+    __tablename__ = 'tasks'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey('projects.id'), nullable=False, index=True)
+    asset_id = Column(Integer, ForeignKey('assets.id'), index=True)
+    assignee_id = Column(Integer, ForeignKey('team_members.id'), index=True)
+
+    # 任务信息
+    task_name = Column(String(200), nullable=False)
+    task_type = Column(String(50))  # modeling, texturing, rigging, animation等
+    description = Column(Text)
+
+    # 状态
+    status = Column(String(50), default='未开始', index=True)  # 未开始, 进行中, 待审核, 已完成, 已取消
+    priority = Column(String(20), default='medium')  # low, medium, high, urgent
+    progress = Column(Integer, default=0)
+
+    # 时间
+    estimated_hours = Column(Float)
+    actual_hours = Column(Float)
+    start_date = Column(DateTime)
+    due_date = Column(DateTime, index=True)
+    completed_date = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now)
+
+    # 质量
+    quality_score = Column(Float)  # 1-5
+    revision_count = Column(Integer, default=0)
+
+    # 关联
+    project = relationship("Project", back_populates="tasks")
+    asset = relationship("Asset", back_populates="tasks")
+    assignee = relationship("TeamMember", back_populates="tasks", lazy="joined")
+
+    def to_dict(self) -> Dict:
+        return {
+            "id": self.id,
+            "task_name": self.task_name,
+            "status": self.status,
+            "progress": self.progress,
+            "assignee": self.assignee.name if self.assignee else None,
+            "due_date": self.due_date.isoformat() if self.due_date else None
+        }
+
+
+class Document(Base):
+    """文档表"""
+    __tablename__ = 'documents'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey('projects.id'), nullable=False, index=True)
+
+    # 文档信息
+    document_type = Column(String(50), nullable=False)  # 报价单, 合同, 验收单等
+    file_name = Column(String(200), nullable=False)
+    file_path = Column(String(500))
+    file_type = Column(String(20))  # excel, pdf, image等
+    file_size = Column(Integer)
+
+    # 解析结果
+    parsed_data = Column(Text)  # JSON
+    confidence_score = Column(Float)
+
+    # 时间
+    upload_date = Column(DateTime, default=datetime.now, nullable=False)
+    parsed_date = Column(DateTime)
+
+    # 关联
+    project = relationship("Project", back_populates="documents")
+
+    def to_dict(self) -> Dict:
+        return {
+            "id": self.id,
+            "document_type": self.document_type,
+            "file_name": self.file_name,
+            "upload_date": self.upload_date.isoformat(),
+            "parsed_data": json.loads(self.parsed_data) if self.parsed_data else None
+        }
+
+
+class KnowledgeBase(Base):
+    """知识库表 - 用于RAG"""
+    __tablename__ = 'knowledge_base'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # 知识内容
+    title = Column(String(200), nullable=False)
+    content = Column(Text, nullable=False)
+    category = Column(String(50), index=True)  # pricing, timeline, requirements等
+    source = Column(String(200))
+
+    # 向量化
+    embedding = Column(Text)  # JSON array
+
+    # 元数据
+    tags = Column(Text)  # JSON array
+    client = Column(String(100), index=True)
+    is_active = Column(Boolean, default=True)
+
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    def to_dict(self) -> Dict:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "content": self.content,
+            "category": self.category,
+            "source": self.source
+        }
+
+
+class DatabaseManager:
+    """数据库管理器"""
+
+    def __init__(self, db_url: str = None):
+        if db_url is None:
+            db_path = Path(__file__).resolve().parents[2] / "data" / "artpm.db"
+            db_url = f"sqlite:///{db_path.as_posix()}"
+        self.engine = create_engine(db_url, echo=False)
+        self.SessionLocal = sessionmaker(bind=self.engine, expire_on_commit=False)
+
+        # Validate existing shared tables before running any DDL.
+        self._validate_existing_schema()
+        Base.metadata.create_all(self.engine)
+
+    def get_session(self):
+        """获取数据库会话"""
+        return self.SessionLocal()
+
+    def _validate_existing_schema(self):
+        """Reject incompatible existing tables without modifying the database."""
+        inspector = inspect(self.engine)
+        existing_tables = set(inspector.get_table_names())
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            existing_columns = {column["name"] for column in inspector.get_columns(table.name)}
+            required_columns = {column.name for column in table.columns}
+            missing = required_columns - existing_columns
+            if missing:
+                raise RuntimeError(
+                    f"Database table '{table.name}' is incompatible; missing columns: "
+                    f"{', '.join(sorted(missing))}. Back up and migrate the database."
+                )
+
+    # ===== Project CRUD =====
+
+    def create_project(self, project_data: Dict) -> Project:
+        """创建项目"""
+        session = self.get_session()
+        try:
+            project = Project(**project_data)
+            session.add(project)
+            session.commit()
+            session.refresh(project)
+            return project
+        finally:
+            session.close()
+
+    def get_project(self, project_id: int) -> Optional[Project]:
+        """获取项目"""
+        session = self.get_session()
+        try:
+            return session.query(Project).options(selectinload(Project.tasks)).filter(Project.id == project_id).first()
+        finally:
+            session.close()
+
+    def list_projects(self, status: str = None, client: str = None, limit: int = 50) -> List[Project]:
+        """列出项目"""
+        session = self.get_session()
+        try:
+            query = session.query(Project)
+
+            if status:
+                query = query.filter(Project.status == status)
+            if client:
+                query = query.filter(Project.client == client)
+
+            return query.options(selectinload(Project.tasks)).order_by(Project.created_at.desc()).limit(limit).all()
+        finally:
+            session.close()
+
+    def update_project(self, project_id: int, update_data: Dict) -> Optional[Project]:
+        """更新项目"""
+        allowed = {column.name for column in Project.__table__.columns} - {"id", "created_at"}
+        invalid = set(update_data) - allowed
+        if invalid:
+            raise ValueError(f"Unknown project fields: {', '.join(sorted(invalid))}")
+        session = self.get_session()
+        try:
+            project = session.query(Project).filter(Project.id == project_id).first()
+            if project:
+                for key, value in update_data.items():
+                    setattr(project, key, value)
+                session.commit()
+                session.refresh(project)
+            return project
+        finally:
+            session.close()
+
+    # ===== Asset CRUD =====
+
+    def create_asset(self, asset_data: Dict) -> Asset:
+        """创建资产"""
+        session = self.get_session()
+        try:
+            asset = Asset(**asset_data)
+            session.add(asset)
+            session.commit()
+            session.refresh(asset)
+            return asset
+        finally:
+            session.close()
+
+    def get_project_assets(self, project_id: int) -> List[Asset]:
+        """获取项目的所有资产"""
+        session = self.get_session()
+        try:
+            return session.query(Asset).filter(Asset.project_id == project_id).all()
+        finally:
+            session.close()
+
+    # ===== Task CRUD =====
+
+    def create_task(self, task_data: Dict) -> Task:
+        """创建任务"""
+        session = self.get_session()
+        try:
+            task = Task(**task_data)
+            session.add(task)
+            session.commit()
+            session.refresh(task)
+            return task
+        finally:
+            session.close()
+
+    def get_tasks_by_status(self, status: str) -> List[Task]:
+        """按状态获取任务"""
+        session = self.get_session()
+        try:
+            return session.query(Task).filter(Task.status == status).all()
+        finally:
+            session.close()
+
+    def get_member_tasks(self, member_id: int) -> List[Task]:
+        """获取成员的任务"""
+        session = self.get_session()
+        try:
+            return session.query(Task).filter(Task.assignee_id == member_id).all()
+        finally:
+            session.close()
+
+    # ===== TeamMember CRUD =====
+
+    def create_member(self, member_data: Dict) -> TeamMember:
+        """创建团队成员"""
+        member_data = dict(member_data)
+        if isinstance(member_data.get("skills"), (list, tuple)):
+            member_data["skills"] = json.dumps(member_data["skills"], ensure_ascii=False)
+        session = self.get_session()
+        try:
+            member = TeamMember(**member_data)
+            session.add(member)
+            session.commit()
+            session.refresh(member)
+            return member
+        finally:
+            session.close()
+
+    def list_members(self, is_active: bool = True) -> List[TeamMember]:
+        """列出团队成员"""
+        session = self.get_session()
+        try:
+            query = session.query(TeamMember)
+            if is_active is not None:
+                query = query.filter(TeamMember.is_active == is_active)
+            return query.all()
+        finally:
+            session.close()
+
+    # ===== Statistics =====
+
+    def get_project_stats(self) -> Dict:
+        """获取项目统计"""
+        session = self.get_session()
+        try:
+            total = session.query(Project).count()
+            in_progress = session.query(Project).filter(Project.status == '进行中').count()
+            completed = session.query(Project).filter(Project.status == '已完成').count()
+
+            # 计算总收入
+            total_revenue = session.query(func.sum(Project.quote_amount)).filter(
+                Project.status == '已完成'
+            ).scalar() or 0
+
+            # 平均利润率
+            avg_profit_rate = session.query(func.avg(Project.profit_rate)).filter(
+                Project.profit_rate.isnot(None)
+            ).scalar() or 0
+
+            return {
+                "total_projects": total,
+                "in_progress": in_progress,
+                "completed": completed,
+                "total_revenue": float(total_revenue),
+                "avg_profit_rate": float(avg_profit_rate)
+            }
+        finally:
+            session.close()
+
+
+# 使用示例
+if __name__ == "__main__":
+    from sqlalchemy import func
+
+    # 初始化数据库
+    db = DatabaseManager()
+
+    # 创建项目
+    project = db.create_project({
+        "project_name": "角色模型制作",
+        "client": "腾讯",
+        "quote_amount": 30000,
+        "cost": 20000,
+        "status": "进行中",
+        "deadline": datetime(2026, 8, 15)
+    })
+    print(f"创建项目: {project.id} - {project.project_name}")
+
+    # 创建资产
+    asset = db.create_asset({
+        "project_id": project.id,
+        "asset_name": "主角色模型",
+        "asset_type": "角色",
+        "quantity": 1,
+        "unit_price": 8000,
+        "total_price": 8000
+    })
+    print(f"创建资产: {asset.asset_name}")
+
+    # 查询项目
+    projects = db.list_projects(status="进行中")
+    print(f"进行中的项目: {len(projects)}个")
+
+    # 统计
+    stats = db.get_project_stats()
+    print(f"项目统计: {stats}")

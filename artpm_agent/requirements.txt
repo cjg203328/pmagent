@@ -1,0 +1,32 @@
+# Core dependencies
+anthropic>=0.18.0
+openai>=1.12.0
+
+# Data processing
+pandas>=2.0.0
+openpyxl>=3.1.0
+xlrd>=2.0.0
+
+# OCR and image processing (optional)
+# paddleocr>=2.7.0
+# paddlepaddle>=2.6.0
+Pillow>=10.0.0
+
+# PDF processing
+pdfplumber>=0.10.0
+PyMuPDF>=1.24.0
+
+# Vector database (optional)
+# faiss-cpu>=1.7.4
+# chromadb>=0.4.0
+
+# Database
+aiosqlite>=0.19.0
+
+# Web interface (optional)
+streamlit>=1.44.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+loguru>=0.7.0

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import sys; sys.stdout.reconfigure\\(encoding='utf-8'\\); exec\\(open\\('test_mcp.py', encoding='utf-8'\\).read\\(\\)\\)\")",
+      "Bash(python test_agent_mcp.py)",
+      "Bash(taskkill /F /IM python.exe /T)",
+      "Bash(exit 0)"
+    ]
+  }
+}

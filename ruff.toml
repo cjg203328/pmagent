@@ -1,0 +1,16 @@
+exclude = [
+    "artpm_agent/app_backup.py",
+    "artpm_agent/app_old.py",
+    "artpm_agent/app_simple.py",
+    "artpm_agent/artpm_agent/",
+    "artpm_agent/core/chat_agent.py",
+    "artpm_agent/core/llm_client.py",
+    "artpm_agent/core/rag_system.py",
+    "artpm_agent/core/skills.py",
+    "artpm_agent/core/mcp_skills.py",
+    "artpm_agent/core/tools.py",
+    "artpm_agent/test_*.py",
+]
+
+[lint.per-file-ignores]
+"tests/*.py" = ["E402"]
