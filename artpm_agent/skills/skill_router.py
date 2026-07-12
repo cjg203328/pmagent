@@ -17,6 +17,7 @@ from .smart_task_allocator import SmartTaskAllocator
 from .quality_control_skill import QualityControlSkill
 from .requirements_assessment_skill import RequirementsAssessmentSkill
 from .cost_control_skill import CostControlSkill
+from .quote_scheduling_skill import QuoteSchedulingSkill
 from parsers.excel_parser import ExcelQuoteParser
 from utils.image_validation import MAX_IMAGE_FILE_SIZE, load_validated_image
 from utils.unlimited_ocr import UnlimitedOCRClient
@@ -729,6 +730,7 @@ SKILL_REGISTRY: Dict[str, type] = {
     "quality_control": QualityControlSkill,
     "requirements_assessment": RequirementsAssessmentSkill,
     "cost_control": CostControlSkill,
+    "quote_scheduling": QuoteSchedulingSkill,
 }
 
 SKILL_METADATA = {
@@ -798,6 +800,14 @@ SKILL_METADATA = {
     },
     "cost_control": {
         "description": "成本管控：人天成本推导、预算跟踪、超支告警",
+        "version": "1.0",
+        "requires_llm": False,
+        "risk": "low",
+        "read_only": False,
+        "requires_approval": False,
+    },
+    "quote_scheduling": {
+        "description": "报价排期：人天估算引擎、排期时间线、里程碑计划",
         "version": "1.0",
         "requires_llm": False,
         "risk": "low",
