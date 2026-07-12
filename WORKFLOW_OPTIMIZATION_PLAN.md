@@ -19,7 +19,13 @@
 | 6 | 报价排期 | ✅ 已完成 | 人天估算引擎（复杂度→工时×历史系数，替换写死 8h）；里程碑计划 + 整体时间线 |
 | 7 | 进度管理 | ✅ 已完成(7d11029) | 里程碑进度视图；阻塞/风险卡点；「每日站会摘要」技能替代后台调度（遵守无后台进程规则） |
 
-> **7 大方向全部完成。** 共新增 6 个技能（质量把控/产品交付/复盘总结/需求评估/成本管控/报价排期/进度管理——其中需求评估为增强既有 `project_evaluator`，故新脚本 6 个）+ 2 个数据模型（`Delivery`/`AssetVersion`）+ 一组 `DatabaseManager` 增量方法。全流程 pytest 378 passed / 11 skipped / 0 failed（覆盖率 74.58% 过线），ruff 全绿，streamlit 启动 HTTP 200。
+> **7 大方向全部完成。** 共新增 6 个技能（质量把控/产品交付/复盘总结/需求评估/成本管控/报价排期/进度管理——其中需求评估为增强既有 `project_evaluator`，故新脚本 6 个）+ 2 个数据模型（`Delivery`/`AssetVersion`）+ 一组 `DatabaseManager` 增量方法。全流程 pytest 392 passed / 11 skipped / 0 failed（覆盖率过 50% 门禁），ruff 全绿，streamlit 启动 HTTP 200。
+
+## 意图路由接线（agent.py，已本地提交）
+- 在 `agent.py` 为全部 7 个技能补齐意图路由：`INTENT_KEYWORDS` / `SKILL_ROUTE_SIGNALS` / `INTENT_EXAMPLES` 各加 6 项（质量把控此前已加），`_extract_inputs` 加 6 个分支，`_format_skill_result` 加 6 个可读 markdown 分支（按结果 key 判别动作，无需改技能本身）。
+- 路由门槛：`_is_high_confidence_skill_request` 要求 `SKILL_ROUTE_SIGNALS` 中 action+entity 同时命中；示例短语均按此设计，embedding/LLM 层亦能命中。
+- 测试：`tests/test_agent_routing.py`（14 用例，绕过 `__init__` 用最小实例验证检测/提取/格式化）。全流程 pytest 392 passed（含新增 14）。
+- 提交：`agent.py` + `test_agent_routing.py`；**未触碰** `config.*`/`utils/*`/其他 WIP 测试文件。
 
 ## 已落地细节（Phase 1 质量把控）
 - 新增 `artpm_agent/skills/quality_control_skill.py`：动作 `submit` / `review` / `report`。
