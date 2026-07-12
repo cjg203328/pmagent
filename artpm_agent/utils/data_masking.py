@@ -1,8 +1,8 @@
 """
 日志脱敏工具
 """
+import logging
 import re
-from typing import Any
 
 # 敏感信息模式
 PATTERNS = {
@@ -42,7 +42,6 @@ def mask_sensitive(text: str) -> str:
     return text
 
 # 集成到 Logger
-import logging
 
 class SensitiveDataFilter(logging.Filter):
     """敏感信息过滤器"""

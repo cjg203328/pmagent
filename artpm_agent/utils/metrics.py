@@ -5,7 +5,6 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 import json
 from pathlib import Path
 

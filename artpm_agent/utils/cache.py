@@ -11,9 +11,6 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Any, Optional, Callable
 from functools import wraps
-import sys
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
     from utils.logger import get_logger

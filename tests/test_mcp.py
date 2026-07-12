@@ -35,7 +35,7 @@ def test_mcp_connection():
 
         async def test_call():
             result = await client.call_skill("web_search", {"query": "test"})
-            print(f"\nResult:")
+            print("\nResult:")
             print(f"  Success: {result['success']}")
             if result['success']:
                 print(f"  Message: {result['result']}")

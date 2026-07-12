@@ -64,3 +64,10 @@ packages = [
 
 [tool.setuptools.package-dir]
 "" = "artpm_agent"
+
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+show_missing = true

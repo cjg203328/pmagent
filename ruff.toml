@@ -14,3 +14,6 @@ exclude = [
 
 [lint.per-file-ignores]
 "tests/*.py" = ["E402"]
+"tests/test_basic.py" = ["F841"]
+"tests/test_mcp_enhanced.py" = ["F541", "F841"]
+"tests/test_mcp_simple.py" = ["F541"]

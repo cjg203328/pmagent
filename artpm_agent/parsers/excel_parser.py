@@ -8,10 +8,6 @@ from typing import BinaryIO, Dict, List, Optional, Any, Union
 from pathlib import Path
 import re
 from datetime import datetime
-import sys
-
-# 添加父目录到路径
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
     from utils.logger import get_logger
