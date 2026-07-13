@@ -9,5 +9,7 @@ logs/
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/vector_store/
+data/backups/
 .streamlit/
 temp/
