@@ -664,6 +664,99 @@ class DatabaseManager:
             session.close()
 
 
+# ============================================================================
+# 遗留表（Legacy tables）
+# ----------------------------------------------------------------------------
+# 以下 6 张表历史上由 memory/sqlite_manager.py 以原生 SQL 创建并维护，未被
+# SQLAlchemy ORM 建模，导致 Alembic 无法覆盖、产生 schema 漂移（真实库有 14 张表
+# 而 ORM 仅 8 张）。此处补齐 ORM 模型并新增迁移 0002，使全量 schema 受 Alembic 管理。
+#
+# staff / quotes / reminders 当前无业务代码读写，属于历史残留，仅保留以便数据保全；
+# 若确认不再需要，可在后续迁移中 DROP。task_assignments / progress_updates /
+# operation_logs 仍被 sqlite_manager.py 以原生 SQL 使用。
+# ============================================================================
+
+class Staff(Base):
+    """遗留：人员表（历史残留，当前无业务代码读写）。"""
+    __tablename__ = "staff"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    level = Column(String)
+    skills = Column(Text)
+    daily_cost = Column(Float)
+    contact_wecom = Column(String)
+    status = Column(String, default="active")
+    created_at = Column(DateTime, default=datetime.now)
+
+
+class Quote(Base):
+    """遗留：报价单解析结果表（历史残留，当前无业务代码读写）。"""
+    __tablename__ = "quotes"
+
+    id = Column(String, primary_key=True)
+    project_id = Column(String, ForeignKey("projects.id"))
+    document_type = Column(String)
+    file_path = Column(String)
+    file_hash = Column(String)
+    parsed_data = Column(Text)
+    profit_analysis = Column(Text)
+    confidence = Column(Float)
+    created_at = Column(DateTime, default=datetime.now)
+
+
+class Reminder(Base):
+    """遗留：催办提醒表（历史残留，当前无业务代码读写）。"""
+    __tablename__ = "reminders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(String, ForeignKey("tasks.id"))
+    reminder_type = Column(String)
+    content = Column(Text)
+    recipients = Column(Text)
+    channel = Column(String)
+    sent_status = Column(String, default="pending")
+    scheduled_at = Column(DateTime)
+    sent_at = Column(DateTime)
+
+
+class OperationLog(Base):
+    """遗留：操作日志表（仍被 sqlite_manager.py 原生 SQL 使用）。"""
+    __tablename__ = "operation_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    operation = Column(String)
+    skill_name = Column(String)
+    inputs = Column(Text)
+    outputs = Column(Text)
+    success = Column(Boolean)
+    error = Column(Text)
+    created_at = Column(DateTime, default=datetime.now)
+
+
+class ProgressUpdate(Base):
+    """遗留：进度更新表（仍被 sqlite_manager.py 原生 SQL 使用）。"""
+    __tablename__ = "progress_updates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(String, ForeignKey("tasks.id"), nullable=False)
+    progress = Column(Float)
+    note = Column(Text)
+    updated_by = Column(String)
+    updated_at = Column(DateTime, default=datetime.now)
+
+
+class TaskAssignment(Base):
+    """遗留：任务分派表（仍被 sqlite_manager.py 原生 SQL 使用）。"""
+    __tablename__ = "task_assignments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(String, ForeignKey("tasks.id"), nullable=False)
+    staff_id = Column(String, ForeignKey("staff.id"), nullable=False)
+    workload_ratio = Column(Float, default=1.0)
+    assigned_at = Column(DateTime, default=datetime.now)
+
+
 # 使用示例
 if __name__ == "__main__":
     from sqlalchemy import func
