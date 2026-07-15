@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 from types import SimpleNamespace
+
+from PIL import Image
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from agent import ArtPMAgent
+from artpm_agent.agent import ArtPMAgent
 
 
 class FailingGenerationClient:
@@ -112,7 +112,7 @@ def test_visual_question_keeps_vision_even_when_ocr_text_exists(tmp_path):
     assert vision.vision_calls == 1
 
 
-def test_agent_rejects_scanned_pdf_without_ocr_text(tmp_path):
+def test_agent_keeps_scanned_pdf_for_multimodal_fallback(tmp_path):
     pdf_path = tmp_path / "scanned.pdf"
     pdf_path.write_bytes(b"placeholder")
     agent = object.__new__(ArtPMAgent)
@@ -128,5 +128,41 @@ def test_agent_rejects_scanned_pdf_without_ocr_text(tmp_path):
     )
 
     assert context.startswith("以下是应用刚刚")
-    assert parsed[0]["success"] is False
-    assert "没有可用的 OCR" in parsed[0]["error"]
+    assert parsed[0]["success"] is True
+    assert parsed[0]["requires_vision"] is True
+    assert parsed[0]["ocr_available"] is False
+
+
+def test_agent_sends_scanned_pdf_pages_to_multimodal_model(tmp_path):
+    pdf_path = tmp_path / "scanned.pdf"
+    Image.new("RGB", (48, 32), "white").save(pdf_path, "PDF")
+    captured_paths = []
+
+    class VisionClient:
+        def chat_with_images(self, prompt, image_paths, **kwargs):
+            captured_paths.extend(image_paths)
+            assert len(image_paths) == 1
+            assert Path(image_paths[0]).is_file()
+            assert Path(image_paths[0]).suffix == ".png"
+            return "多模态回退结果"
+
+    agent = object.__new__(ArtPMAgent)
+    agent.llm_client = VisionClient()
+    agent.router = SimpleNamespace(skills={})
+    agent.config = SimpleNamespace(get=lambda key, default=None: default)
+    agent._build_system_prompt = lambda profile, knowledge: "trusted system prompt"
+    agent.process_document = lambda file_path, hint: {
+        "success": True,
+        "document_type": "PDF资料",
+        "extracted_data": {"page_count": 1, "pages_requiring_ocr": [1]},
+        "raw_text": "",
+    }
+
+    response = agent.chat(
+        "请读取扫描 PDF",
+        {"file_paths": [str(pdf_path)], "conversation_history": []},
+    )
+
+    assert response == "多模态回退结果"
+    assert captured_paths
+    assert all(not Path(path).exists() for path in captured_paths)

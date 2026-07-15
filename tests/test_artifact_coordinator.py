@@ -1,14 +1,12 @@
 import json
 from pathlib import Path
-import sys
 
 import pytest
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from artifacts import ArtifactCoordinator, WorkspaceArtifactGenerator
+from artpm_agent.artifacts import ArtifactCoordinator, WorkspaceArtifactGenerator
 
 
 class FakeLLM:
@@ -377,3 +375,77 @@ def test_coordinator_requires_generator_and_llm_chat(tmp_path):
         ArtifactCoordinator(object(), FakeLLM("{}"))
     with pytest.raises(TypeError):
         ArtifactCoordinator(generator, object())
+
+
+def test_edit_artifact_generates_version_from_one_sentence_and_context(tmp_path):
+    generator = WorkspaceArtifactGenerator(tmp_path / "artifacts")
+    source = generator.generate_docx(
+        "brief.docx",
+        [{"text": "Old title", "kind": "heading", "level": 1}],
+    )
+    llm = FakeLLM(
+        json.dumps(
+            {
+                "format": "docx",
+                "filename": "brief-edited.docx",
+                "paragraphs": [
+                    {"text": "New title", "kind": "heading", "level": 1},
+                    {"text": "Added from reference image."},
+                ],
+            },
+            ensure_ascii=False,
+        )
+    )
+    coordinator = ArtifactCoordinator(generator, llm)
+
+    result = coordinator.edit_artifact(
+        source["stored_path"],
+        "change the title and add the image conclusion",
+        attachment_context="<attachment_markdown>image conclusion</attachment_markdown>",
+    )
+
+    assert result.matched is True
+    assert result.rejected is False
+    assert result.error_code is None
+    assert result.artifact["format"] == "docx"
+    assert result.artifact["source_artifact"] == source["stored_path"]
+    assert result.artifact["preview_markdown"]
+    assert Path(result.artifact["path"]).is_file()
+    assert len(llm.calls) == 1
+    assert "<current_artifact" in llm.calls[0]["prompt"]
+    assert "image conclusion" in llm.calls[0]["prompt"]
+    assert "完整的新文件计划" in llm.calls[0]["system_prompt"]
+
+
+def test_process_routes_existing_generated_file_edit_to_new_version(tmp_path):
+    generator = WorkspaceArtifactGenerator(tmp_path / "artifacts")
+    source = generator.generate_xlsx(
+        "source.xlsx",
+        {"columns": ["Item", "Cost"], "rows": [["Old", 1]]},
+    )
+    llm = FakeLLM(
+        json.dumps(
+            {
+                "format": "xlsx",
+                "filename": "source-edited.xlsx",
+                "table": {
+                    "sheet_name": "Sheet1",
+                    "columns": ["Item", "Cost"],
+                    "rows": [["New", 2]],
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+    coordinator = ArtifactCoordinator(generator, llm)
+
+    result = coordinator.process(
+        "edit this xlsx and change Old to New",
+        file_paths=[source["path"]],
+        attachment_context="<attachment_markdown>reference</attachment_markdown>",
+    )
+
+    assert result.error_code is None
+    assert result.artifact["name"] == "source-edited.xlsx"
+    assert result.artifact["source_artifact"] == source["stored_path"]
+    assert "reference" in llm.calls[0]["prompt"]

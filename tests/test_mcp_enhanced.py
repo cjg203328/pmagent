@@ -5,11 +5,28 @@ import asyncio
 import sys
 from pathlib import Path
 
-# 添加项目路径
-sys.path.insert(0, str(Path(__file__).parent))
+# 添加仓库根路径
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.mcp_client_enhanced import get_enhanced_mcp_client
-from skills.mcp_skills import get_mcp_skill
+from artpm_agent.core.mcp_client_enhanced import EnhancedMCPClient, get_enhanced_mcp_client
+from artpm_agent.skills.mcp_skills import get_mcp_skill
+
+
+async def test_sensitive_files_are_never_exposed_and_output_is_bounded(tmp_path):
+    (tmp_path / ".env").write_text("API_KEY=secret", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("x" * 40000, encoding="utf-8")
+    client = EnhancedMCPClient(str(tmp_path))
+
+    blocked = await client.call_tool("read_file", {"file_path": ".env"})
+    bounded = await client.call_tool("read_file", {"file_path": "notes.txt"})
+    listed = await client.call_tool("search_files", {"pattern": "*"})
+
+    assert blocked["success"] is False
+    assert "Sensitive" in blocked["error"]
+    assert bounded["success"] is True
+    assert len(bounded["content"]) == 32 * 1024
+    assert bounded["metadata"]["truncated"] is True
+    assert ".env" not in listed["files"]
 
 
 async def test_mcp_client():

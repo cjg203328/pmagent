@@ -7,7 +7,7 @@
 """
 import asyncio
 
-from core.mcp_client_unified import UnifiedMCPClient, get_unified_mcp_client
+from artpm_agent.core.mcp_client_unified import UnifiedMCPClient, get_unified_mcp_client
 
 
 class FakeEnhanced:

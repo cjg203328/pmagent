@@ -1,7 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from pathlib import Path
-import sys
 
 from docx import Document
 from openpyxl import load_workbook
@@ -9,9 +8,8 @@ import pytest
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from artifacts import WorkspaceArtifactGenerator
+from artpm_agent.artifacts import WorkspaceArtifactGenerator
 
 
 def test_generate_xlsx_from_structured_rows_with_safe_metadata(tmp_path):
@@ -275,3 +273,38 @@ def test_generator_exposes_no_overwrite_or_delete_api(tmp_path):
     assert not hasattr(generator, "overwrite")
     assert not hasattr(generator, "delete")
     assert not hasattr(generator, "remove")
+
+
+def test_generated_artifact_preview_and_export_formats(tmp_path):
+    generator = WorkspaceArtifactGenerator(tmp_path / "artifacts")
+
+    artifact = generator.generate_xlsx(
+        "quote.xlsx",
+        {
+            "columns": ["Item", "Cost"],
+            "rows": [["Character", 1000], ["Scene", 2000]],
+        },
+    )
+
+    assert "| Item | Cost |" in artifact["preview_markdown"]
+    assert artifact["export_formats"] == ["csv", "md", "txt", "docx"]
+
+    preview = generator.preview_artifact(artifact["stored_path"])
+    assert preview["success"] is True
+    assert "Character" in preview["preview_markdown"]
+
+    csv_export = generator.export_artifact_bytes(artifact["stored_path"], "csv")
+    assert csv_export["filename"] == "quote.csv"
+    assert "Item,Cost" in csv_export["data"].decode("utf-8-sig")
+
+    md_export = generator.export_artifact_bytes(artifact["stored_path"], "md")
+    assert b"| Item | Cost |" in md_export["data"]
+
+    docx_export = generator.export_artifact_bytes(artifact["stored_path"], "docx")
+    assert docx_export["filename"] == "quote.docx"
+    assert docx_export["data"].startswith(b"PK")
+
+    saved = generator.export_artifact(artifact["stored_path"], "md")
+    assert saved["format"] == "md"
+    assert saved["source_artifact"] == artifact["stored_path"]
+    assert Path(saved["path"]).is_file()

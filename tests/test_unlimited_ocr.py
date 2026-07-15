@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 import json
 from pathlib import Path
-import sys
 from urllib.error import URLError
 from urllib.request import Request
 
@@ -12,9 +11,8 @@ import pytest
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from utils.unlimited_ocr import (
+from artpm_agent.utils.unlimited_ocr import (
     UnlimitedOCRClient,
     UnlimitedOCRConfig,
     UnlimitedOCRConfigurationError,

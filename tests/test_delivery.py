@@ -1,5 +1,5 @@
 """产品交付技能单元测试：交付清单 / 验收单 / 记录交付 / 记录版本（fake DB）"""
-from skills.delivery_skill import DeliverySkill
+from artpm_agent.skills.delivery_skill import DeliverySkill
 
 
 class Asset:

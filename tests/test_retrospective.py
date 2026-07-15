@@ -1,5 +1,5 @@
 """复盘总结技能单元测试：结项复盘 / 经验沉淀（fake DB）"""
-from skills.retrospective_skill import RetrospectiveSkill
+from artpm_agent.skills.retrospective_skill import RetrospectiveSkill
 
 
 class Task:

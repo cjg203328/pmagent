@@ -1,16 +1,15 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 import sqlite3
-import sys
 
 import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = PROJECT_ROOT / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from memory.conversation_store import ConversationStore
+from artpm_agent.memory.conversation_store import ConversationStore
 
 
 def make_store(tmp_path: Path) -> ConversationStore:
@@ -24,7 +23,7 @@ def insert_workspace(
     profile_id: str = "profile-b",
     name: str = "工作区 B",
 ) -> None:
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute(
             """
             INSERT INTO workspaces(
@@ -42,7 +41,7 @@ def insert_workspace(
 
 
 def create_v1_database(path: Path) -> None:
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.executescript(
             """
             CREATE TABLE chat_schema_migrations (
@@ -182,7 +181,7 @@ def test_v1_data_migrates_to_default_workspace_with_foreign_keys(tmp_path):
     appended = store.add_message(conversation["id"], "assistant", "迁移后消息")
     assert appended["id"] > 1
 
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         columns = {
             row[1]: row for row in conn.execute("PRAGMA table_info(conversations)")
         }
@@ -209,7 +208,7 @@ def test_v1_data_migrates_to_default_workspace_with_foreign_keys(tmp_path):
     assert violations == []
 
     assert store.delete_conversation(conversation["id"]) is True
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
 
 
@@ -312,7 +311,7 @@ def test_delete_conversation_cascades_messages(tmp_path):
     store.add_message(conversation["id"], "user", "需要删除")
 
     assert store.delete_conversation(conversation["id"]) is True
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         count = conn.execute(
             "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
             (conversation["id"],),
@@ -325,7 +324,7 @@ def test_schema_migration_is_idempotent_and_wal_is_enabled(tmp_path):
     ConversationStore(path)
     ConversationStore(path)
 
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         versions = conn.execute(
             "SELECT version FROM chat_schema_migrations ORDER BY version"

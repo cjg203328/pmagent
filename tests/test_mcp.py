@@ -6,10 +6,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.mcp_client import get_mcp_client
+from artpm_agent.core.mcp_client import get_mcp_client
 import asyncio
+import pytest
 
 
+@pytest.mark.integration
 def test_mcp_connection():
     """测试 MCP 连接"""
     print("=" * 60)

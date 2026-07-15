@@ -1,5 +1,5 @@
 """成本管控技能单元测试：成本估算 / 预算跟踪 / 超支告警（fake DB，无需真实库）"""
-from skills.cost_control_skill import CostControlSkill
+from artpm_agent.skills.cost_control_skill import CostControlSkill
 
 
 class FakeProject:

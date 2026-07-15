@@ -1,7 +1,6 @@
 import asyncio
 import io
 import sqlite3
-import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -13,19 +12,18 @@ import requests
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = PROJECT_ROOT / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from core.mcp_client_enhanced import EnhancedMCPClient
-from config import Config
-from database.models import DatabaseManager
-from memory.sqlite_manager import SQLiteManager
-from memory.memory_manager import MemoryManager
-from parsers.excel_parser import ExcelQuoteParser
-from skills.base_skill import BaseSkill
-from skills.smart_progress_tracker import SmartProgressTracker
-from skills.smart_task_allocator import SmartTaskAllocator
-from skills.mcp_skills import DataAnalyzerSkill, ProjectEvaluatorSkill, TrendAnalyzerSkill
-from skills.skill_router import (
+from artpm_agent.core.mcp_client_enhanced import EnhancedMCPClient
+from artpm_agent.config import Config
+from artpm_agent.database.models import DatabaseManager
+from artpm_agent.memory.sqlite_manager import SQLiteManager
+from artpm_agent.memory.memory_manager import MemoryManager
+from artpm_agent.parsers.excel_parser import ExcelQuoteParser
+from artpm_agent.skills.base_skill import BaseSkill
+from artpm_agent.skills.smart_progress_tracker import SmartProgressTracker
+from artpm_agent.skills.smart_task_allocator import SmartTaskAllocator
+from artpm_agent.skills.mcp_skills import DataAnalyzerSkill, ProjectEvaluatorSkill, TrendAnalyzerSkill
+from artpm_agent.skills.skill_router import (
     CAPABILITY_REGISTRY,
     DocumentClassifierParser,
     ReminderBot,
@@ -33,17 +31,17 @@ from skills.skill_router import (
     SKILL_METADATA,
     SkillRouter,
 )
-from utils.validators import check_rule
-from utils.llm_client import ZhipuClient, create_llm_client, is_valid_api_key
-from utils.cache import cached
-from utils.chat_intent import (
+from artpm_agent.utils.validators import check_rule
+from artpm_agent.utils.llm_client import ZhipuClient, create_llm_client, is_valid_api_key
+from artpm_agent.utils.cache import cached
+from artpm_agent.utils.chat_intent import (
     chat_processing_label,
     is_capability_query,
     is_local_fast_intent,
 )
-from visualization.advanced_charts import AdvancedVisualizer
-from core.token_monitor import TokenBudgetManager, TokenMonitor
-from agent import ArtPMAgent
+from artpm_agent.visualization.advanced_charts import AdvancedVisualizer
+from artpm_agent.core.token_monitor import TokenBudgetManager, TokenMonitor
+from artpm_agent.agent import ArtPMAgent
 
 
 class AsyncSkill(BaseSkill):
@@ -630,7 +628,8 @@ def test_agent_reports_configured_runtime_model_without_calling_llm(question):
     response = agent.chat(question)
 
     assert "qwen3.5" in response
-    assert "第三方 OpenAI 兼容服务" in response
+    assert response == "当前模型：`qwen3.5`。状态：已配置。"
+    assert "接入方式" not in response
     agent.llm_client.chat.assert_not_called()
 
 
@@ -722,9 +721,166 @@ def test_agent_describes_profile_and_loaded_capabilities_without_calling_llm():
     assert "小艺" in response
     assert "美术制片助手" in response
     assert "角色资产交付" in response
-    assert "读取当前项目资料" in response
-    assert "删除项目文件（执行前需要确认）" in response
+    assert "我可以处理" in response
+    assert "交付物生成、预览、导出和一句话编辑" in response
+    assert "工作区记忆、偏好和知识规则沉淀" in response
+    assert "删除项目文件" not in response
     assert "未授权扩展" not in response
+    agent.llm_client.chat.assert_not_called()
+
+
+def test_agent_stream_chat_preserves_deterministic_skill_results():
+    agent = ArtPMAgent()
+    agent.llm_client = Mock()
+    agent.router.execute_skill = Mock(return_value={"success": True})
+
+    chunks = list(agent.stream_chat("报价10万成本6万帮我算利润"))
+
+    assert "利润分析结果" in "".join(chunks)
+    agent.llm_client.stream_chat.assert_not_called()
+
+
+def _failover_agent(monkeypatch, primary_client, fallback_client):
+    """Build an isolated compatible-provider agent with deterministic clients."""
+    import artpm_agent.agent as agent_module
+
+    clients = [primary_client, fallback_client]
+    factory = Mock(side_effect=lambda _config: clients.pop(0))
+    monkeypatch.setattr(agent_module, "create_llm_client", factory)
+    agent = ArtPMAgent(
+        {
+            "llm.provider": "custom",
+            "llm.model": "deepseek-v4-flash",
+            "llm.available_models": [
+                "qwen3.5",
+                "deepseek-v4-pro",
+                "glm-5.2",
+            ],
+        }
+    )
+    agent._detect_intent = Mock(return_value=None)
+    return agent, factory
+
+
+def test_agent_fails_over_retryable_sync_error_without_changing_default(monkeypatch):
+    primary = Mock()
+    primary.chat.side_effect = TimeoutError("provider read timed out")
+    fallback = Mock()
+    fallback.chat.return_value = "备用模型回答"
+    agent, factory = _failover_agent(monkeypatch, primary, fallback)
+
+    response = agent.chat("请解释一下色彩空间")
+
+    assert "已切换备用模型：`deepseek-v4-pro`" in response
+    assert response.endswith("备用模型回答")
+    assert agent.config.get("llm.model") == "deepseek-v4-flash"
+    assert agent.last_response_model == "deepseek-v4-pro"
+    assert agent.last_model_fallback_from == "deepseek-v4-flash"
+    assert primary.chat.call_count == 1
+    assert fallback.chat.call_count == 1
+    assert factory.call_args_list[-1].args[0]["model"] == "deepseek-v4-pro"
+
+
+def test_agent_does_not_fail_over_non_retryable_model_error(monkeypatch):
+    primary = Mock()
+    primary.chat.side_effect = RuntimeError("Invalid API key")
+    fallback = Mock()
+    agent, factory = _failover_agent(monkeypatch, primary, fallback)
+
+    with pytest.raises(RuntimeError, match="模型请求失败") as raised:
+        agent.chat("请解释一下色彩空间")
+
+    assert "Invalid API key" in str(raised.value.__cause__)
+    assert fallback.chat.call_count == 0
+    assert factory.call_count == 1
+
+
+def test_agent_skips_primary_while_its_circuit_is_open(monkeypatch):
+    primary = Mock()
+    primary.chat.side_effect = TimeoutError("provider read timed out")
+    fallback = Mock()
+    fallback.chat.return_value = "备用回答"
+    agent, _ = _failover_agent(monkeypatch, primary, fallback)
+
+    first_response = agent.chat("请解释一下色彩空间")
+    second_response = agent.chat("再解释一下色彩空间")
+
+    assert "备用回答" in first_response
+    assert "备用回答" in second_response
+    assert primary.chat.call_count == 1
+    assert fallback.chat.call_count == 2
+
+
+def test_agent_returns_busy_immediately_when_all_model_circuits_are_open(monkeypatch):
+    primary = Mock()
+    fallback = Mock()
+    agent, _ = _failover_agent(monkeypatch, primary, fallback)
+    for model_id in ["deepseek-v4-flash", "deepseek-v4-pro", "glm-5.2", "qwen3.5"]:
+        agent._mark_model_unavailable(model_id)
+
+    with pytest.raises(RuntimeError, match="服务繁忙"):
+        agent.chat("请解释一下色彩空间")
+
+    primary.chat.assert_not_called()
+    fallback.chat.assert_not_called()
+
+
+def test_agent_prefers_same_model_family_for_fallback(monkeypatch):
+    primary = Mock()
+    primary.chat.side_effect = TimeoutError("timed out")
+    fallback = Mock()
+    fallback.chat.return_value = "回答"
+    agent, factory = _failover_agent(monkeypatch, primary, fallback)
+
+    assert agent.chat("请解释一下色彩空间").endswith("回答")
+    assert factory.call_args_list[-1].args[0]["model"] == "deepseek-v4-pro"
+
+
+def test_agent_stream_fails_over_before_first_chunk(monkeypatch):
+    primary = Mock()
+    primary.stream_chat.side_effect = TimeoutError("provider read timed out")
+    fallback = Mock()
+    fallback.stream_chat.return_value = iter(["备用", "回答"])
+    agent, _ = _failover_agent(monkeypatch, primary, fallback)
+
+    chunks = list(agent.stream_chat("请解释一下色彩空间"))
+
+    assert chunks[0].startswith("已切换备用模型：`deepseek-v4-pro`")
+    assert "".join(chunks).endswith("备用回答")
+    assert agent.last_response_model == "deepseek-v4-pro"
+    assert primary.stream_chat.call_count == 1
+    assert fallback.stream_chat.call_count == 1
+
+
+def test_agent_stream_does_not_fail_over_after_partial_output(monkeypatch):
+    def partial_stream(*_args, **_kwargs):
+        yield "已输出的前半句"
+        raise TimeoutError("provider read timed out")
+
+    primary = Mock()
+    primary.stream_chat.side_effect = partial_stream
+    fallback = Mock()
+    fallback.stream_chat.return_value = iter(["不应输出"])
+    agent, _ = _failover_agent(monkeypatch, primary, fallback)
+
+    stream = agent.stream_chat("请解释一下色彩空间")
+    assert next(stream) == "已输出的前半句"
+    with pytest.raises(RuntimeError, match="模型请求失败"):
+        next(stream)
+    assert fallback.stream_chat.call_count == 0
+    assert not agent._is_model_available_for_request("deepseek-v4-flash")
+
+
+def test_local_fast_responses_do_not_build_skill_intent_embeddings():
+    agent = ArtPMAgent()
+    agent.llm_client = Mock()
+    agent._build_intent_embeddings = Mock()
+
+    response = agent.chat("你可以帮我做什么")
+
+    assert "我可以处理" in response
+    assert "模板学习与复用" in response
+    agent._build_intent_embeddings.assert_not_called()
     agent.llm_client.chat.assert_not_called()
 
 
@@ -940,8 +1096,8 @@ def test_agent_system_prompt_describes_runtime_and_general_answer_rules():
         ("报价10万成本6万", "qwen3.5", "正在计算报价与利润"),
         ("请解析这个 PDF 文件", "qwen3.5", "正在读取并解析资料"),
         ("检查项目进度", "qwen3.5", "正在分析项目数据"),
-        ("解释一下色彩空间", "qwen3.5", "qwen3.5 正在思考并生成回答"),
-        ("解释一下色彩空间", None, "正在思考并生成回答"),
+        ("解释一下色彩空间", "qwen3.5", "qwen3.5 正在生成回答"),
+        ("解释一下色彩空间", None, "正在生成回答"),
     ],
 )
 def test_chat_processing_label_matches_request_type(prompt, model_id, expected_label):
@@ -953,8 +1109,8 @@ def test_long_general_chat_uses_only_one_generation_request_by_default():
     agent.llm_client = Mock()
     agent.llm_client.chat.return_value = "one generated answer"
     agent._intent_embeddings = {}
-    agent._detect_intent_via_keywords = Mock(return_value=None)
-    agent._detect_intent_via_embedding = Mock(return_value=None)
+    agent._detect_intent_via_keywords = Mock(return_value=(None, 0.0))
+    agent._detect_intent_via_embedding = Mock(return_value=(None, 0.0))
     agent._detect_intent_via_llm = Mock(return_value=None)
 
     assert agent.config.get("llm.intent_classification_enabled", False) is False

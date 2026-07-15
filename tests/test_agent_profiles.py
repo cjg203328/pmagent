@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 import sqlite3
-import sys
 
 import pytest
 from pydantic import ValidationError
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from memory.conversation_store import ConversationStore
-from profiles import (
+from artpm_agent.memory.conversation_store import ConversationStore
+from artpm_agent.profiles import (
     AgentIdentity,
     AgentIdentityPatch,
     AgentProfilePatch,
@@ -147,7 +146,7 @@ def test_proposal_and_confirmation_are_idempotent(tmp_path):
     applied = store.confirm_change(first.id, actor="用户")
     applied_again = store.confirm_change(first.id, actor="用户")
     assert applied_again == applied
-    with sqlite3.connect(store.db_path) as conn:
+    with closing(sqlite3.connect(store.db_path)) as conn, conn:
         revisions = conn.execute(
             "SELECT revision FROM agent_profiles ORDER BY revision"
         ).fetchall()
@@ -196,7 +195,7 @@ def test_rejected_proposal_never_changes_profile(tmp_path):
 def test_profile_proposal_is_scoped_to_the_conversation_workspace(tmp_path):
     path, conversations, default_conversation, store = make_stores(tmp_path)
     now = "2026-07-12T00:00:00+00:00"
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute(
             """
@@ -247,7 +246,7 @@ def test_concurrent_confirmation_creates_only_one_revision(tmp_path):
         )
 
     assert {profile.revision for profile in profiles} == {2}
-    with sqlite3.connect(store.db_path) as conn:
+    with closing(sqlite3.connect(store.db_path)) as conn, conn:
         count = conn.execute("SELECT COUNT(*) FROM agent_profiles").fetchone()[0]
     assert count == 2
 

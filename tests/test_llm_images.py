@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
-import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -12,10 +11,9 @@ import pytest
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from utils.image_validation import MAX_IMAGE_FILE_SIZE
-from utils.llm_client import AnthropicClient, BaseLLMClient, OpenAIClient
+from artpm_agent.utils.image_validation import MAX_IMAGE_FILE_SIZE
+from artpm_agent.utils.llm_client import AnthropicClient, BaseLLMClient, OpenAIClient
 
 
 def _openai_client() -> OpenAIClient:

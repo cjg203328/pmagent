@@ -1,6 +1,6 @@
 import sqlite3
-import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -8,11 +8,10 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = PROJECT_ROOT / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from memory.workspace_knowledge_store import WorkspaceKnowledgeStore
-from memory import KnowledgeProposalConflictError
-from memory.conversation_store import ConversationStore
+from artpm_agent.memory.workspace_knowledge_store import WorkspaceKnowledgeStore
+from artpm_agent.memory import KnowledgeProposalConflictError
+from artpm_agent.memory.conversation_store import ConversationStore
 
 
 def test_resource_source_metadata_and_versions_are_persistent(tmp_path):
@@ -115,7 +114,11 @@ def test_search_uses_current_version_and_isolates_workspaces(tmp_path):
         source_id="budget-rule",
     )
 
-    assert store.search("旧预算规则", workspace_id="studio-a") == []
+    semantic_results = store.search("旧预算规则", workspace_id="studio-a")
+    assert [result["id"] for result in semantic_results] == [first["id"]]
+    assert semantic_results[0]["current_version"] == 2
+    assert semantic_results[0]["retrieval_mode"] == "vector"
+    assert "旧预算规则" not in semantic_results[0]["version"]["searchable_text"]
     results = store.search(
         "新预算规则",
         workspace_id="studio-a",
@@ -277,17 +280,19 @@ def test_concurrent_source_updates_create_a_serial_version_chain(tmp_path):
 def test_schema_is_idempotent_and_wal_is_enabled(tmp_path):
     path = tmp_path / "knowledge.db"
     WorkspaceKnowledgeStore(path)
-    WorkspaceKnowledgeStore(path)
+    WorkspaceKnowledgeStore(path)  # 第二次打开不应重复迁移
 
     connection = sqlite3.connect(path)
     journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
     migrations = connection.execute(
-        "SELECT version FROM knowledge_schema_migrations"
+        "SELECT version FROM knowledge_schema_migrations ORDER BY version"
     ).fetchall()
     connection.close()
 
     assert journal_mode.lower() == "wal"
-    assert migrations == [(1,), (2,)]
+    # 迁移应覆盖到当前 SCHEMA_VERSION，且幂等（无重复版本行）
+    assert migrations[-1] == (WorkspaceKnowledgeStore.SCHEMA_VERSION,)
+    assert len(migrations) == len({row[0] for row in migrations})
 
 
 def test_ingestion_proposal_is_inert_until_confirmed_and_audited(tmp_path):
@@ -434,7 +439,7 @@ def test_ingestion_proposal_enforces_conversation_workspace_scope(tmp_path):
     path = tmp_path / "shared.db"
     conversations = ConversationStore(path)
     default_conversation = conversations.create_conversation("默认工作区")
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
             """
             INSERT INTO workspaces(

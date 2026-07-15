@@ -1,5 +1,5 @@
 """需求评估技能单元测试：复杂度判定 / 范围清单 / 报价落库（fake DB，无需真实库）"""
-from skills.requirements_assessment_skill import RequirementsAssessmentSkill
+from artpm_agent.skills.requirements_assessment_skill import RequirementsAssessmentSkill
 
 
 class FakeDB:

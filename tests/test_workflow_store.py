@@ -1,24 +1,23 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 import sqlite3
-import sys
 
 import pytest
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from memory.conversation_store import ConversationStore
-from workflows.models import (
+from artpm_agent.memory.conversation_store import ConversationStore
+from artpm_agent.workflows.models import (
     WorkflowDefinition,
     WorkflowOverride,
     WorkflowStepDefinition,
     WorkflowTrigger,
 )
-from workflows.store import WorkflowConflictError, WorkflowStore
+from artpm_agent.workflows.store import WorkflowConflictError, WorkflowStore
 
 
 def make_stores(tmp_path):
@@ -54,7 +53,7 @@ def test_schema_is_idempotent_in_conversation_db_and_installs_builtins(tmp_path)
     path, _, _, store = make_stores(tmp_path)
     reopened = WorkflowStore(path)
 
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         tables = {
             row[0]
             for row in conn.execute(
@@ -119,7 +118,7 @@ def test_override_changes_resolution_without_mutating_definition_snapshot(tmp_pa
     resolved = store.get_definition("quote_assessment")
     assert resolved.enabled is False
     assert resolved.priority == 99
-    with sqlite3.connect(store.db_path) as conn:
+    with closing(sqlite3.connect(store.db_path)) as conn, conn:
         raw = conn.execute(
             "SELECT definition_json FROM workflow_definitions WHERE workflow_id = ?",
             (base.id,),
@@ -243,7 +242,7 @@ def test_unknown_conversation_is_rejected(tmp_path):
 def test_run_cannot_bind_a_conversation_from_another_workspace(tmp_path):
     path, conversations, _, store = make_stores(tmp_path)
     now = "2026-07-12T00:00:00+00:00"
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute(
             """
             INSERT INTO workspaces(

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 from types import SimpleNamespace
 
 from docx import Document
@@ -10,9 +9,8 @@ import pytest
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from skills.skill_router import (
+from artpm_agent.skills.skill_router import (
     MAX_DOCUMENT_FILE_SIZE,
     DocumentClassifierParser,
 )

@@ -4,10 +4,10 @@ Simple test to verify the basic framework
 import sys
 from pathlib import Path
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add repository root to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agent import ArtPMAgent
+from artpm_agent.agent import ArtPMAgent
 
 
 def check_agent_initialization():
@@ -38,7 +38,7 @@ def check_config_system():
     print("\nTesting configuration system...")
 
     try:
-        from config import Config
+        from artpm_agent.config import Config
         config = Config()
 
         # Test getting values
@@ -59,7 +59,7 @@ def check_database():
     print("\nTesting database...")
 
     try:
-        from memory.sqlite_manager import SQLiteManager
+        from artpm_agent.memory.sqlite_manager import SQLiteManager
         import tempfile
         import os
 
@@ -68,7 +68,7 @@ def check_database():
         db = SQLiteManager(temp_db)
 
         # Test basic operations
-        from utils import generate_uuid
+        from artpm_agent.utils import generate_uuid
         test_id = generate_uuid()
 
         # Insert test record
@@ -104,7 +104,7 @@ def check_skill_system():
     print("\nTesting skill system...")
 
     try:
-        from skills import BaseSkill
+        from artpm_agent.skills import BaseSkill
 
         # Create a test skill
         class TestSkill(BaseSkill):
@@ -137,7 +137,7 @@ def check_skill_router():
     print("\nTesting skill router...")
 
     try:
-        from skills import SkillRouter
+        from artpm_agent.skills import SkillRouter
 
         router = SkillRouter({})
         loaded = router.list_skills()

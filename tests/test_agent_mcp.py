@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agent import ArtPMAgent
+from artpm_agent.agent import ArtPMAgent
 
 
 def test_agent_with_mcp():

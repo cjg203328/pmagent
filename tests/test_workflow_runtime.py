@@ -1,27 +1,25 @@
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 
 import pytest
 from pydantic import ValidationError
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from memory.conversation_store import ConversationStore
-from workflows.defaults import get_builtin_workflows
-from workflows.engine import WorkflowEngine
-from workflows.models import (
+from artpm_agent.memory.conversation_store import ConversationStore
+from artpm_agent.workflows.defaults import get_builtin_workflows
+from artpm_agent.workflows.engine import WorkflowEngine
+from artpm_agent.workflows.models import (
     AttachmentSelectionData,
     WorkflowDefinition,
     WorkflowSelectionContext,
     WorkflowStepDefinition,
     WorkflowTrigger,
 )
-from workflows.selector import WorkflowSelector
-from workflows.store import WorkflowStore
+from artpm_agent.workflows.selector import WorkflowSelector
+from artpm_agent.workflows.store import WorkflowStore
 
 
 ALLOWLIST = {

@@ -13,7 +13,7 @@ progress_updates/task_assignments）纳入 Alembic 管理：
 """
 from sqlalchemy import create_engine, inspect, text
 
-from database.models import DatabaseManager, Base
+from artpm_agent.database.models import DatabaseManager, Base
 
 
 def _table_names(engine):

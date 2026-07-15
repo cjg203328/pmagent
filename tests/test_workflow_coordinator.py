@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from memory.conversation_store import ConversationStore
-from workflows.coordinator import WorkflowCoordinator, format_workflow_result
-from workflows.store import WorkflowStore
+from artpm_agent.memory.conversation_store import ConversationStore
+from artpm_agent.workflows.coordinator import WorkflowCoordinator, format_workflow_result
+from artpm_agent.workflows.store import WorkflowStore
 
 
 class RecordingRouter:

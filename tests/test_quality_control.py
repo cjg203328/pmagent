@@ -4,7 +4,7 @@ Quality Control skill tests.
 Uses an in-memory fake DatabaseManager so no real SQLite is required.
 Mirrors the methods the skill relies on: get_task / get_tasks / update_task.
 """
-from skills.quality_control_skill import QualityControlSkill
+from artpm_agent.skills.quality_control_skill import QualityControlSkill
 
 
 class FakeTask:

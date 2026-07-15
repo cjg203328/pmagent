@@ -11,10 +11,9 @@ from streamlit.testing.v1 import AppTest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = PROJECT_ROOT / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from utils.llm_client import OpenAIClient
-from utils.model_catalog import (
+from artpm_agent.utils.llm_client import OpenAIClient
+from artpm_agent.utils.model_catalog import (
     ModelCatalogError,
     fetch_openai_compatible_models,
     normalize_openai_base_url,
@@ -66,7 +65,7 @@ def test_model_cache_round_trip_is_deduplicated_and_sorted():
 
 
 def test_persist_settings_saves_default_model_and_catalog(tmp_path, monkeypatch):
-    import app as streamlit_app
+    import artpm_agent.app as streamlit_app
 
     env_path = tmp_path / ".env"
     env_path.write_text(
@@ -119,6 +118,42 @@ def test_persist_settings_saves_default_model_and_catalog(tmp_path, monkeypatch)
     assert saved["UNLIMITED_OCR_BASE_URL"] == "http://ocr-sidecar.internal:10000"
 
 
+def test_persist_settings_default_path_uses_project_env(tmp_path, monkeypatch):
+    import artpm_agent.views.settings as settings_page
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("# preserved\nKEEP_ME=yes\n", encoding="utf-8")
+    monkeypatch.setattr(settings_page, "PROJECT_ENV_PATH", env_path)
+    for key in (
+        "LLM_PROVIDER",
+        "LLM_MODEL",
+        "OPENAI_API_KEY",
+        "OPENAI_API_BASE",
+        "MCP_ENABLED",
+        "SKILLS_FORGE_KEY",
+        "SKILLS_FORGE_URL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    settings_page.persist_settings({
+        "provider": "custom",
+        "model": "project-env-model",
+        "api_key": "sk-valid-test-key",
+        "api_base_url": "https://provider.example/v1",
+        "available_models": [],
+        "models_synced_at": "",
+        "mcp_enabled": True,
+        "mcp_key": "forge-key",
+        "mcp_url": "https://skillsforge.xyz",
+    })
+
+    saved = dotenv_values(env_path)
+    assert saved["KEEP_ME"] == "yes"
+    assert saved["LLM_MODEL"] == "project-env-model"
+    assert saved["MCP_ENABLED"] == "true"
+    assert saved["SKILLS_FORGE_URL"] == "https://skillsforge.xyz"
+
+
 def test_openai_chat_sends_the_selected_model():
     client = OpenAIClient({
         "openai_api_key": "sk-valid-test-key",
@@ -134,6 +169,7 @@ def test_openai_chat_sends_the_selected_model():
     assert client.chat("hello", system_prompt="system") == "ok"
     kwargs = sdk_client.chat.completions.create.call_args.kwargs
     assert kwargs["model"] == "selected-chat-model"
+    assert "stream" not in kwargs
     assert kwargs["messages"][-1] == {"role": "user", "content": "hello"}
 
 
@@ -171,6 +207,58 @@ def test_openai_chat_sends_system_history_then_current_prompt():
     ]
 
 
+def test_openai_stream_chat_yields_text_and_preserves_message_context():
+    client = OpenAIClient({
+        "openai_api_key": "sk-valid-test-key",
+        "model": "selected-chat-model",
+        "retry_max_attempts": 1,
+    })
+    sdk_client = Mock()
+    sdk_client.chat.completions.create.return_value = iter([
+        None,
+        SimpleNamespace(choices=[]),
+        SimpleNamespace(choices=[SimpleNamespace(delta=None)]),
+        SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content=None))]
+        ),
+        SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content="first"))]
+        ),
+        {"choices": [{"delta": {"content": " response"}}]},
+        SimpleNamespace(
+            choices=[SimpleNamespace(
+                delta=SimpleNamespace(content=[
+                    SimpleNamespace(text=" from"),
+                    {"text": " stream"},
+                ])
+            )]
+        ),
+    ])
+    client.client = sdk_client
+    history = [
+        {"role": "user", "content": "previous question", "status": "complete"},
+        {"role": "assistant", "content": "previous answer", "status": "complete"},
+        {"role": "user", "content": "current question", "status": "complete"},
+    ]
+
+    chunks = list(client.stream_chat(
+        "current question",
+        system_prompt="trusted system prompt",
+        history=history,
+    ))
+
+    assert chunks == ["first", " response", " from stream"]
+    kwargs = sdk_client.chat.completions.create.call_args.kwargs
+    assert kwargs["stream"] is True
+    assert kwargs["model"] == "selected-chat-model"
+    assert kwargs["messages"] == [
+        {"role": "system", "content": "trusted system prompt"},
+        {"role": "user", "content": "previous question"},
+        {"role": "assistant", "content": "previous answer"},
+        {"role": "user", "content": "current question"},
+    ]
+
+
 def test_openai_client_uses_one_bounded_retry_layer():
     with patch("openai.OpenAI") as openai_class:
         OpenAIClient({
@@ -188,8 +276,24 @@ def test_openai_client_uses_one_bounded_retry_layer():
     )
 
 
+def test_config_reads_interactive_llm_budget_from_environment(monkeypatch):
+    from artpm_agent.config import Config
+
+    monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "9")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "640")
+    monkeypatch.setenv("LLM_HISTORY_MAX_MESSAGES", "6")
+    monkeypatch.setenv("LLM_HISTORY_MAX_CHARS", "2400")
+
+    config = Config()
+
+    assert config.get("llm.request_timeout_seconds") == 9.0
+    assert config.get("llm.max_tokens") == 640
+    assert config.get("llm.history_max_messages") == 6
+    assert config.get("llm.history_max_chars") == 2400
+
+
 def test_settings_page_exposes_model_dropdown_and_manual_id():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(str(APP_ROOT / "app.py")).run(timeout=30)
     app.button(key="nav_settings").click().run(timeout=30)
 
     assert not app.exception
@@ -206,8 +310,7 @@ def test_settings_page_exposes_model_dropdown_and_manual_id():
 def test_app_import_survives_stale_utils_package_cache():
     script = """
 import sys
-sys.path.insert(0, 'artpm_agent')
-import utils
+from artpm_agent import utils
 for name in (
     'ModelCatalogError',
     'fetch_openai_compatible_models',
@@ -216,7 +319,7 @@ for name in (
 ):
     if hasattr(utils, name):
         delattr(utils, name)
-import app
+from artpm_agent import app
 assert app.AVAILABLE
 """
     result = subprocess.run(
@@ -234,14 +337,13 @@ def test_model_catalog_import_failure_does_not_disable_core_app():
     script = """
 import builtins
 import sys
-sys.path.insert(0, 'artpm_agent')
 real_import = builtins.__import__
 def guarded_import(name, *args, **kwargs):
-    if name == 'utils.model_catalog':
+    if name == 'artpm_agent.utils.model_catalog':
         raise ImportError('simulated model catalog failure')
     return real_import(name, *args, **kwargs)
 builtins.__import__ = guarded_import
-import app
+from artpm_agent import app
 assert app.AVAILABLE
 assert not app.MODEL_CATALOG_AVAILABLE
 """

@@ -1,5 +1,5 @@
 """报价排期技能单元测试：人天估算 / 排期时间线 / 里程碑（无需真实库）"""
-from skills.quote_scheduling_skill import QuoteSchedulingSkill
+from artpm_agent.skills.quote_scheduling_skill import QuoteSchedulingSkill
 
 
 def _skill():

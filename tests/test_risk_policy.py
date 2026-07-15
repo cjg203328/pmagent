@@ -1,26 +1,24 @@
 from pathlib import Path
-import sys
 
 import pytest
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from memory.conversation_store import ConversationStore
-from skills.skill_router import CAPABILITY_REGISTRY
-from workflows.engine import WorkflowEngine
-from workflows.models import (
+from artpm_agent.memory.conversation_store import ConversationStore
+from artpm_agent.skills.skill_router import CAPABILITY_REGISTRY
+from artpm_agent.workflows.engine import WorkflowEngine
+from artpm_agent.workflows.models import (
     WorkflowDefinition,
     WorkflowStepDefinition,
     WorkflowTrigger,
 )
-from workflows.risk_policy import (
+from artpm_agent.workflows.risk_policy import (
     DEFAULT_RISK_POLICY,
     CapabilityRiskPolicy,
     audit_skill_capability_registry,
 )
-from workflows.store import WorkflowStore
+from artpm_agent.workflows.store import WorkflowStore
 
 
 @pytest.mark.parametrize(

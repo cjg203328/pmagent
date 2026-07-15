@@ -1,5 +1,5 @@
 """进度管理技能单元测试：里程碑视图 / 阻塞卡点 / 站会摘要（fake DB）"""
-from skills.progress_management_skill import ProgressManagementSkill
+from artpm_agent.skills.progress_management_skill import ProgressManagementSkill
 
 
 class Task:

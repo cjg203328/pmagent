@@ -1,6 +1,11 @@
 """
 Quick Verification Script - 快速验证MCP Skills
 """
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 print("=" * 60)
 print("ArtPM Agent - MCP Skills Quick Verification")
 print("=" * 60)
@@ -8,7 +13,7 @@ print("=" * 60)
 try:
     # Step 1: Import modules
     print("\n[Step 1] Importing modules...")
-    from skills.skill_router import SkillRouter, SKILL_REGISTRY, SKILL_METADATA
+    from artpm_agent.skills.skill_router import SkillRouter, SKILL_REGISTRY, SKILL_METADATA
     print("  OK - Imported skill_router")
 
     # Step 2: Check Skills count
@@ -37,7 +42,7 @@ try:
 
     # Step 5: Check MCP Client
     print("\n[Step 5] Checking Enhanced MCP Client...")
-    from core.mcp_client_enhanced import get_enhanced_mcp_client
+    from artpm_agent.core.mcp_client_enhanced import get_enhanced_mcp_client
     client = get_enhanced_mcp_client()
     tools = client.list_tools()
     print(f"  MCP Tools count: {len(tools)}")

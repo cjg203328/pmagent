@@ -4,7 +4,14 @@ from types import SimpleNamespace
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from artpm_agent.memory import SessionStore
+from artpm_agent.views.chat import _compact_legacy_assistant_copy
 from artpm_agent.profiles import AgentProfilePatch, QuotePolicyPatch
+from artpm_agent.ui_style import STYLE_CSS
+
+# Resolve the app entrypoint from this file's location so AppTest.from_file
+# works regardless of the current working directory.
+APP_FILE = str(Path(__file__).resolve().parent.parent / "artpm_agent" / "app.py")
 
 
 class StubAgent:
@@ -33,6 +40,14 @@ class TimeoutStubAgent:
             raise RuntimeError("模型请求失败") from error
 
 
+class BusyStubAgent(TimeoutStubAgent):
+    def chat(self, message, context=None):
+        try:
+            raise RuntimeError("ResourceExhausted: Worker local total request limit")
+        except RuntimeError as error:
+            raise RuntimeError("模型请求失败") from error
+
+
 class RecordingAgent:
     def __init__(self):
         self.calls = []
@@ -40,6 +55,24 @@ class RecordingAgent:
     def chat(self, message, context=None):
         self.calls.append({"message": message, "context": context or {}})
         return f"回答：{message}"
+
+
+class StreamingAgent(RecordingAgent):
+    def stream_chat(self, message, context=None):
+        self.calls.append({"message": message, "context": context or {}})
+        yield "流式"
+        yield "回答"
+
+
+class FallbackRecordingAgent(RecordingAgent):
+    def __init__(self):
+        super().__init__()
+        self.last_response_model = "deepseek-v4-pro"
+        self.config = SimpleNamespace(
+            get=lambda key, default=None: (
+                "deepseek-v4-flash" if key == "llm.model" else default
+            )
+        )
 
 
 class ArtifactPlanLLM:
@@ -62,12 +95,46 @@ class ArtifactAgent:
         raise AssertionError("artifact request should not fall through to chat")
 
 
+class LocalArtifactAgent:
+    def chat(self, message, context=None):
+        raise AssertionError("explicit artifact request should stay local")
+
+
 def message_contents(app):
     return [message["content"] for message in app.session_state["messages"]]
 
 
+def test_legacy_model_copy_is_compacted_for_display():
+    old_runtime_copy = (
+        "当前配置的生成模型 ID 是 **`deepseek-v4-flash`**，通过"
+        " **第三方 OpenAI 兼容服务** 接入；连接状态：**已配置**。\n\n"
+        "需要生成式回答时，ArtPM 会实际调用该模型，并携带当前会话的上下文。"
+    )
+    old_fallback_copy = (
+        "默认模型 `deepseek-v4-flash` 暂时不可用，本次临时使用 "
+        "`deepseek-v4-pro` 生成回答；默认设置未修改。\n\n"
+        "色彩空间是用于定义和表示色彩的系统。"
+    )
+
+    assert _compact_legacy_assistant_copy(old_runtime_copy) == (
+        "当前模型：`deepseek-v4-flash`。状态：已配置。"
+    )
+    assert _compact_legacy_assistant_copy(old_fallback_copy) == (
+        "已切换备用模型：`deepseek-v4-pro`。\n\n"
+        "色彩空间是用于定义和表示色彩的系统。"
+    )
+
+
+def test_sidebar_restore_control_is_not_hidden_with_header():
+    hidden_block = STYLE_CSS.split("[data-testid=\"stSidebarNav\"]", 1)[0]
+
+    assert "footer, header" not in hidden_block
+    assert "[data-testid=\"stHeader\"]" in STYLE_CSS
+    assert "background: transparent" in STYLE_CSS
+
+
 def test_sidebar_exposes_only_chat_and_settings_navigation():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
 
     navigation_keys = {
         button.key for button in app.button if button.key.startswith("nav_")
@@ -89,9 +156,25 @@ def test_sidebar_exposes_only_chat_and_settings_navigation():
     assert app.chat_input(key="chat_input") is not None
 
 
+def test_global_navigation_stays_available_outside_sidebar():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+
+    assert app.button(key="global_nav_settings") is not None
+    assert app.button(key="global_nav_chat") is not None
+
+    app.button(key="global_nav_settings").click().run(timeout=30)
+    assert not app.exception
+    assert app.session_state["view"] == "设置"
+
+    app.button(key="global_nav_chat").click().run(timeout=30)
+    assert not app.exception
+    assert app.session_state["view"] == "对话"
+    assert app.chat_input(key="chat_input") is not None
+
+
 @pytest.mark.parametrize("legacy_view", ["概览", "项目", "上传", "未知页面"])
 def test_legacy_or_unknown_view_falls_back_to_chat(legacy_view):
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
     app.session_state["view"] = legacy_view
 
     app.run(timeout=30)
@@ -102,7 +185,7 @@ def test_legacy_or_unknown_view_falls_back_to_chat(legacy_view):
 
 
 def test_settings_round_trip_preserves_active_conversation_and_messages():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
     app.session_state["agent"] = RecordingAgent()
     app.chat_input(key="chat_input").set_value("设置前的问题").run(timeout=30)
     conversation_id = app.session_state["active_conversation_id"]
@@ -124,7 +207,7 @@ def test_settings_round_trip_preserves_active_conversation_and_messages():
 
 
 def test_settings_does_not_expose_volatile_quote_policy_controls():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
     app.button(key="nav_settings").click().run(timeout=30)
 
     number_labels = {widget.label for widget in app.number_input}
@@ -138,7 +221,7 @@ def test_settings_does_not_expose_volatile_quote_policy_controls():
 
 
 def test_settings_can_disable_and_restore_a_workflow():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
     app.button(key="nav_settings").click().run(timeout=30)
 
     enabled_key = "workflow_enabled_quote_assessment_1"
@@ -156,7 +239,7 @@ def test_settings_can_disable_and_restore_a_workflow():
 
 
 def test_streamlit_offline_quote_workflow():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
     app.session_state["agent"] = StubAgent()
     app.chat_input(key="chat_input").set_value("报价10万成本6万帮我算利润").run(timeout=30)
     assert not app.exception
@@ -165,7 +248,7 @@ def test_streamlit_offline_quote_workflow():
 
 
 def test_streamlit_real_quote_request_persists_workflow_metadata():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
 
     app.chat_input(key="chat_input").set_value(
         "报价10万成本6万，帮我评估利润"
@@ -182,7 +265,7 @@ def test_streamlit_real_quote_request_persists_workflow_metadata():
 
 
 def test_streamlit_reminder_waits_for_persisted_approval_and_can_be_cancelled():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
 
     app.chat_input(key="chat_input").set_value("请催办任务 T1").run(timeout=30)
 
@@ -210,7 +293,7 @@ def test_streamlit_reminder_waits_for_persisted_approval_and_can_be_cancelled():
 
 
 def test_streamlit_identity_question_returns_an_answer():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
     app.chat_input(key="chat_input").set_value("你是什么").run(timeout=30)
 
     assert not app.exception
@@ -220,8 +303,57 @@ def test_streamlit_identity_question_returns_an_answer():
     assert "pending_prompt" not in app.session_state
 
 
+def test_streamlit_capability_question_skips_knowledge_lookup_and_returns_fast_answer(
+    monkeypatch,
+):
+    import artpm_agent.app as streamlit_app
+
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+    agent = RecordingAgent()
+    app.session_state["agent"] = agent
+    monkeypatch.setattr(
+        streamlit_app,
+        "build_knowledge_context",
+        lambda prompt: (_ for _ in ()).throw(AssertionError("unexpected lookup")),
+    )
+
+    app.chat_input(key="chat_input").set_value("你可以帮我做什么？").run(
+        timeout=30
+    )
+
+    assert not app.exception
+    assert agent.calls[-1]["context"]["knowledge_context"] == ""
+    assert app.session_state["messages"][-1]["content"] == "回答：你可以帮我做什么？"
+
+
+def test_streamlit_ordinary_text_uses_streaming_agent_response():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+    agent = StreamingAgent()
+    app.session_state["agent"] = agent
+
+    app.chat_input(key="chat_input").set_value("解释一下色彩空间").run(timeout=30)
+
+    assert not app.exception
+    assert app.session_state["messages"][-1]["content"] == "流式回答"
+    assert [call["message"] for call in agent.calls] == ["解释一下色彩空间"]
+
+
+def test_streamlit_persists_the_model_that_actually_answered():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+    agent = FallbackRecordingAgent()
+    app.session_state["agent"] = agent
+
+    app.chat_input(key="chat_input").set_value("解释一下色彩空间").run(timeout=30)
+
+    assert not app.exception
+    stored = app.session_state["conversation_store"].list_messages(
+        app.session_state["active_conversation_id"]
+    )
+    assert stored[-1]["model_id"] == "deepseek-v4-pro"
+
+
 def test_streamlit_profile_change_requires_conversation_confirmation():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
     app.button(key="new_conversation").click().run(timeout=30)
     profile_store = app.session_state["profile_store"]
     conversation_id = app.session_state["active_conversation_id"]
@@ -272,7 +404,7 @@ def test_streamlit_profile_change_requires_conversation_confirmation():
 
 
 def test_streamlit_knowledge_rule_is_inert_until_accepted():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
     app.button(key="new_conversation").click().run(timeout=30)
     knowledge_store = app.session_state["knowledge_store"]
     conversation_id = app.session_state["active_conversation_id"]
@@ -313,11 +445,19 @@ def test_streamlit_knowledge_rule_is_inert_until_accepted():
 
 
 def test_streamlit_clear_chat_requires_second_confirmation():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
     app.button(key="new_conversation").click().run(timeout=30)
     app.session_state["agent"] = RecordingAgent()
     app.chat_input(key="chat_input").set_value("需要保留的消息").run(timeout=30)
     conversation_id = app.session_state["active_conversation_id"]
+    session_store = SessionStore(app.session_state["conversation_store"])
+    session_store.append(
+        conversation_id,
+        "tool_result",
+        run_id="clear-chat-run",
+        turn_id="clear-chat-turn",
+        tool_result={"sensitive": "persisted tool output"},
+    )
     before = list(app.session_state["messages"])
 
     app.button(key="clear_chat").click().run(timeout=30)
@@ -331,10 +471,11 @@ def test_streamlit_clear_chat_requires_second_confirmation():
 
     assert not app.exception
     assert app.session_state["messages"] == []
+    assert session_store.replay(conversation_id) == []
 
 
 def test_streamlit_generates_new_xlsx_and_exposes_download_metadata():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
     app.button(key="new_conversation").click().run(timeout=30)
     app.session_state["agent"] = ArtifactAgent()
 
@@ -354,8 +495,30 @@ def test_streamlit_generates_new_xlsx_and_exposes_download_metadata():
     Path(path).unlink()
 
 
+def test_streamlit_generates_explicit_xlsx_without_llm_client():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+    app.button(key="new_conversation").click().run(timeout=30)
+    app.session_state["agent"] = LocalArtifactAgent()
+
+    app.chat_input(key="chat_input").set_value(
+        "生成一个 Excel 项目任务清单，列为任务、负责人、状态，"
+        "包含角色建模、小李、进行中"
+    ).run(timeout=30)
+
+    assert not app.exception
+    response = app.session_state["messages"][-1]
+    artifact = response["metadata"]["artifacts"][0]
+    assert artifact["format"] == "xlsx"
+    assert artifact["rows"] == 1
+    assert artifact["columns"] == 3
+    assert "明确字段" in response["content"]
+    path = app.session_state["artifact_generator"].root / artifact["stored_path"]
+    assert Path(path).is_file()
+    Path(path).unlink()
+
+
 def test_streamlit_empty_agent_response_is_a_visible_retryable_error():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
     app.session_state["agent"] = EmptyStubAgent()
     app.chat_input(key="chat_input").set_value("普通问题").run(timeout=30)
 
@@ -369,7 +532,7 @@ def test_streamlit_empty_agent_response_is_a_visible_retryable_error():
 
 
 def test_streamlit_model_timeout_names_selected_model_and_is_retryable():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
     app.session_state["agent"] = TimeoutStubAgent()
     app.chat_input(key="chat_input").set_value("解释一下色彩空间").run(timeout=30)
 
@@ -381,8 +544,20 @@ def test_streamlit_model_timeout_names_selected_model_and_is_retryable():
     assert "pending_prompt" not in app.session_state
 
 
+def test_streamlit_busy_model_names_capacity_issue_and_is_retryable():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+    app.session_state["agent"] = BusyStubAgent()
+    app.chat_input(key="chat_input").set_value("解释一下色彩空间").run(timeout=30)
+
+    assert not app.exception
+    response = app.session_state["messages"][1]
+    assert response["status"] == "error"
+    assert response["retry_prompt"] == "解释一下色彩空间"
+    assert "deepseek-v4-flash 当前服务繁忙" in response["content"]
+
+
 def test_streamlit_conversation_history_excludes_current_user_message():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
     agent = RecordingAgent()
     app.session_state["agent"] = agent
 
@@ -410,7 +585,7 @@ def test_streamlit_conversation_history_excludes_current_user_message():
 
 
 def test_streamlit_multiple_conversations_are_isolated_and_restorable():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
     agent = RecordingAgent()
     app.session_state["agent"] = agent
     conversation_a = app.session_state["active_conversation_id"]
@@ -446,67 +621,32 @@ def test_streamlit_multiple_conversations_are_isolated_and_restorable():
 
 
 def test_streamlit_messages_survive_a_new_app_session():
-    first_app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    first_app = AppTest.from_file(APP_FILE).run(timeout=30)
     first_app.session_state["agent"] = RecordingAgent()
     first_app.chat_input(key="chat_input").set_value("持久化问题").run(timeout=30)
     conversation_id = first_app.session_state["active_conversation_id"]
 
-    second_app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+    second_app = AppTest.from_file(APP_FILE).run(timeout=30)
 
     assert not second_app.exception
     assert second_app.session_state["active_conversation_id"] == conversation_id
     assert message_contents(second_app) == ["持久化问题", "回答：持久化问题"]
 
 
-def test_streamlit_conversation_can_be_renamed_and_deleted():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
+def test_sidebar_conversation_list_is_read_only_and_compact():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
     conversation_id = app.session_state["active_conversation_id"]
-    store = app.session_state["conversation_store"]
-
-    app.text_input(key=f"rename_input_{conversation_id}").set_value(
-        "交付计划"
-    ).run(timeout=30)
-    app.button(key=f"rename_conversation_{conversation_id}").click().run(timeout=30)
+    button_keys = {button.key for button in app.button}
+    text_input_keys = {text_input.key for text_input in app.text_input}
+    checkbox_keys = {checkbox.key for checkbox in app.checkbox}
 
     assert not app.exception
-    assert store.get_conversation(conversation_id)["title"] == "交付计划"
-
-    app.checkbox(key=f"confirm_delete_conversation_{conversation_id}").check().run(
-        timeout=30
-    )
-    app.button(key=f"delete_conversation_{conversation_id}").click().run(timeout=30)
-
-    assert not app.exception
-    assert store.get_conversation(conversation_id) is None
-    assert app.session_state["active_conversation_id"] != conversation_id
-    assert store.get_conversation(
-        app.session_state["active_conversation_id"]
-    ) is not None
-
-
-def test_sidebar_quick_delete_requires_confirmation_and_keeps_valid_active_chat():
-    app = AppTest.from_file("artpm_agent/app.py").run(timeout=30)
-    conversation_id = app.session_state["active_conversation_id"]
-    store = app.session_state["conversation_store"]
-
-    app.button(key=f"quick_delete_conversation_{conversation_id}").click().run(
-        timeout=30
-    )
-    assert store.get_conversation(conversation_id) is not None
-    assert app.session_state["pending_conversation_delete"] == conversation_id
-
-    app.button(key=f"cancel_quick_delete_{conversation_id}").click().run(timeout=30)
-    assert store.get_conversation(conversation_id) is not None
+    assert f"conversation_{conversation_id}" in button_keys
+    assert f"quick_delete_conversation_{conversation_id}" not in button_keys
+    assert f"confirm_quick_delete_{conversation_id}" not in button_keys
+    assert f"cancel_quick_delete_{conversation_id}" not in button_keys
+    assert f"rename_conversation_{conversation_id}" not in button_keys
+    assert f"delete_conversation_{conversation_id}" not in button_keys
+    assert f"rename_input_{conversation_id}" not in text_input_keys
+    assert f"confirm_delete_conversation_{conversation_id}" not in checkbox_keys
     assert "pending_conversation_delete" not in app.session_state
-
-    app.button(key=f"quick_delete_conversation_{conversation_id}").click().run(
-        timeout=30
-    )
-    app.button(key=f"confirm_quick_delete_{conversation_id}").click().run(timeout=30)
-
-    assert not app.exception
-    assert store.get_conversation(conversation_id) is None
-    assert app.session_state["active_conversation_id"] != conversation_id
-    assert store.get_conversation(
-        app.session_state["active_conversation_id"]
-    ) is not None

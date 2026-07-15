@@ -3,16 +3,14 @@ from __future__ import annotations
 import hashlib
 import io
 from pathlib import Path
-import sys
 from types import SimpleNamespace
 
 import pytest
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from utils.chat_attachments import (
+from artpm_agent.utils.chat_attachments import (
     ChatAttachmentStore,
     normalize_chat_submission,
     select_conversation_attachments,

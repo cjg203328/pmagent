@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 
 import pytest
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
-sys.path.insert(0, str(APP_ROOT))
 
-from profiles import (
+from artpm_agent.profiles import (
     AgentProfile,
     ProfileChangeParseError,
     format_profile_changes,

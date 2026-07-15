@@ -3,10 +3,10 @@ import asyncio
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path.cwd()))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.mcp_client_enhanced import get_enhanced_mcp_client
-from skills.mcp_skills import get_mcp_skill, list_mcp_skills
+from artpm_agent.core.mcp_client_enhanced import get_enhanced_mcp_client
+from artpm_agent.skills.mcp_skills import get_mcp_skill, list_mcp_skills
 
 
 async def main():
