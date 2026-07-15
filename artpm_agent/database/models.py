@@ -6,10 +6,40 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker, selecti
 from datetime import datetime
 from typing import List, Dict, Optional
 import json
+import atexit
 import logging
 from pathlib import Path
+from weakref import WeakSet, finalize
 
 logger = logging.getLogger(__name__)
+
+# --- 资源生命周期治理（技术债 #7）---
+# 集中登记 DatabaseManager 创建的 SQLAlchemy Engine，便于统一回收，
+# 消除未关闭连接导致的 "unclosed database" ResourceWarning。
+_ACTIVE_ENGINES: WeakSet = WeakSet()
+
+
+def _dispose_engine(engine):
+    """Dispose one Engine and remove it from the process registry."""
+    _ACTIVE_ENGINES.discard(engine)
+    try:
+        engine.dispose()
+    except Exception:  # noqa: BLE001 - cleanup must remain best effort
+        pass
+
+
+def _dispose_all_engines():
+    """解释器退出时回收所有仍存活的 Engine（最后安全网）。"""
+    for _engine in list(_ACTIVE_ENGINES):
+        try:
+            _engine.dispose()
+        except Exception:  # noqa: BLE001 - 退出阶段不再抛出
+            pass
+    _ACTIVE_ENGINES.clear()
+
+
+atexit.register(_dispose_all_engines)
+
 
 Base = declarative_base()
 
@@ -312,19 +342,49 @@ class DatabaseManager:
             db_url = f"sqlite:///{db_path.as_posix()}"
         self.engine = create_engine(db_url, echo=False)
         self.SessionLocal = sessionmaker(bind=self.engine, expire_on_commit=False)
+        _ACTIVE_ENGINES.add(self.engine)
+        self._engine_finalizer = finalize(self, _dispose_engine, self.engine)
 
-        # Validate existing shared tables before running any DDL.
-        self._validate_existing_schema()
-        # 优先通过 Alembic 管理 schema（幂等、可演进）；不可用时回退 create_all。
         try:
-            from database.migrate import ensure_schema
+            # Validate existing shared tables before running any DDL.
+            self._validate_existing_schema()
+            # 优先通过 Alembic 管理 schema（幂等、可演进）；不可用时回退 create_all。
+            try:
+                from artpm_agent.database.migrate import ensure_schema
 
-            ensure_schema(self.engine)
-        except Exception as exc:
-            logger.warning(
-                "Alembic 迁移不可用，回退至 Base.metadata.create_all: %s", exc
-            )
-            Base.metadata.create_all(self.engine)
+                ensure_schema(self.engine)
+            except Exception as exc:
+                logger.warning(
+                    "Alembic 迁移不可用，回退至 Base.metadata.create_all: %s", exc
+                )
+                Base.metadata.create_all(self.engine)
+        except BaseException:
+            self.close()
+            raise
+
+    # ===== 资源回收（技术债 #7）=====
+    def close(self):
+        """释放 Engine 与连接池，并从全局登记表中移除。
+
+        幂等：重复调用安全。测试或长生命周期场景结束后应调用，
+        避免未关闭的 SQLite 连接触发 ResourceWarning。
+        """
+        finalizer = getattr(self, "_engine_finalizer", None)
+        if finalizer is not None and finalizer.alive:
+            finalizer()
+        else:
+            _dispose_engine(self.engine)
+
+    def dispose(self):
+        """SQLAlchemy 命名习惯别名，等同于 close()。"""
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
 
     def get_session(self):
         """获取数据库会话"""

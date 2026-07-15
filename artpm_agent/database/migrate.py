@@ -11,7 +11,7 @@ Alembic 迁移运行器（程序化调用）
 
 典型用法::
 
-    from database.migrate import ensure_schema
+    from artpm_agent.database.migrate import ensure_schema
     ensure_schema(engine)   # engine 为 SQLAlchemy Engine
 """
 import logging
@@ -45,7 +45,7 @@ def _require_alembic():
 
 
 def _metadata():
-    from database.models import Base
+    from artpm_agent.database.models import Base
 
     return Base.metadata
 
