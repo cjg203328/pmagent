@@ -1,0 +1,25 @@
+{
+  "enabled": true,
+  "command": [
+    "{runtime_dir}/venv/Scripts/python.exe",
+    "-m",
+    "deployment_launcher",
+    "--model-path",
+    "{model_dir}",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "10000"
+  ],
+  "cwd": "{runtime_dir}",
+  "model_dir": "models/Unlimited-OCR",
+  "required_paths": [
+    "venv/Scripts/python.exe",
+    "deployment_launcher.py",
+    "models/Unlimited-OCR"
+  ],
+  "environment": {
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1"
+  }
+}
