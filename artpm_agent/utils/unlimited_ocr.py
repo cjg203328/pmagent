@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 import ipaddress
 import json
+import logging
 import os
 from pathlib import Path
 import socket
@@ -28,6 +29,7 @@ from urllib.request import (
 )
 
 from .image_validation import MAX_IMAGE_FILE_SIZE, load_validated_image
+from .ocr_runtime import OCRRuntimeConfig, OCRRuntimeManager, OCRRuntimeStatus
 
 
 DEFAULT_MODEL = "Unlimited-OCR"
@@ -36,6 +38,8 @@ DEFAULT_MULTI_PAGE_PROMPT = "Multi page parsing."
 MAX_IMAGES = 32
 MAX_TOTAL_IMAGE_BYTES = 64 * 1024 * 1024
 MAX_PROCESSOR_CHARS = 512 * 1024
+
+logger = logging.getLogger(__name__)
 
 
 class UnlimitedOCRError(RuntimeError):
@@ -319,15 +323,25 @@ class UnlimitedOCRClient:
         *,
         opener: OpenerDirector | None = None,
         remote_resolver: Callable[..., list[tuple[Any, ...]]] = socket.getaddrinfo,
+        runtime_manager: OCRRuntimeManager | None = None,
     ) -> None:
+        runtime_values: Mapping[str, Any] | None
         if isinstance(config, UnlimitedOCRConfig):
             self.config = config
+            runtime_values = {"enabled": config.enabled}
         else:
             self.config = UnlimitedOCRConfig.from_mapping(config)
+            runtime_values = config
         self._opener = opener or build_opener(ProxyHandler({}), _NoRedirectHandler())
         self._remote_resolver = remote_resolver
         self._ready_checked_at = 0.0
         self._ready_available = False
+        self.runtime_manager = runtime_manager or OCRRuntimeManager(
+            OCRRuntimeConfig.from_mapping(runtime_values),
+            base_url=self.config.base_url,
+            probe=self._probe_ready,
+            logger=logger,
+        )
 
     @property
     def configured(self) -> bool:
@@ -340,12 +354,20 @@ class UnlimitedOCRClient:
         return True
 
     def ready(self, *, cache_ttl: float = 30.0) -> bool:
-        """Fast, cached liveness probe used by automatic skill dispatch."""
+        """Probe or lazily start OCR when automatic skill dispatch needs it."""
         if not self.configured:
             return False
-        now = monotonic()
-        if now - self._ready_checked_at < max(0.0, cache_ttl):
-            return self._ready_available
+        try:
+            available = self.runtime_manager.ensure_ready(cache_ttl=cache_ttl)
+        except Exception as error:
+            logger.warning("Managed OCR runtime is unavailable: %s", error)
+            available = False
+        self._ready_checked_at = monotonic()
+        self._ready_available = available
+        return available
+
+    def _probe_ready(self) -> bool:
+        """Perform one bounded liveness probe without starting a process."""
         available = False
         try:
             request = Request(
@@ -364,9 +386,11 @@ class UnlimitedOCRClient:
             ValueError,
         ):
             available = False
-        self._ready_checked_at = now
-        self._ready_available = available
         return available
+
+    def runtime_status(self, *, refresh: bool = False) -> OCRRuntimeStatus:
+        """Expose read-only deployment diagnostics without starting OCR."""
+        return self.runtime_manager.inspect(refresh=refresh)
 
     def _endpoint(self, resource: str) -> str:
         base = normalize_unlimited_ocr_base_url(self.config.base_url)
@@ -473,34 +497,64 @@ class UnlimitedOCRClient:
         fallback: Fallback | None = None,
     ) -> UnlimitedOCRResult:
         paths = [str(image) for image in images]
-        try:
-            return self.parse_strict(
-                paths,
-                prompt=prompt,
-                image_mode=image_mode,
-                stream=stream,
-                on_delta=on_delta,
-            )
-        except (UnlimitedOCRError, HTTPError, URLError, OSError, ValueError) as error:
-            reason = self._safe_error(error)
-            if fallback is not None:
-                try:
-                    fallback_prompt = prompt or (
-                        DEFAULT_PROMPT if len(paths) == 1 else DEFAULT_MULTI_PAGE_PROMPT
+        recovery_attempted = False
+        while True:
+            try:
+                return self.parse_strict(
+                    paths,
+                    prompt=prompt,
+                    image_mode=image_mode,
+                    stream=stream,
+                    on_delta=on_delta,
+                )
+            except (UnlimitedOCRError, HTTPError, URLError, OSError, ValueError) as error:
+                recoverable = isinstance(
+                    error,
+                    (UnlimitedOCRRequestError, HTTPError, URLError, OSError),
+                )
+                error_text = str(error).casefold()
+                if any(
+                    marker in error_text
+                    for marker in (
+                        "service returned http 400",
+                        "service returned http 401",
+                        "service returned http 403",
+                        "service returned http 404",
+                        "service returned http 422",
                     )
-                    fallback_value = fallback(fallback_prompt, paths)
-                    if isinstance(fallback_value, UnlimitedOCRResult):
-                        return fallback_value
-                    return UnlimitedOCRResult(
-                        text=str(fallback_value or ""),
-                        ok=bool(fallback_value),
-                        degraded=True,
-                        source="fallback",
-                        error=reason,
-                    )
-                except Exception:
-                    reason = f"{reason}; fallback failed"
-            return UnlimitedOCRResult(degraded=True, error=reason)
+                ):
+                    recoverable = False
+                recovered = False
+                if recoverable and not recovery_attempted:
+                    try:
+                        recovered = self.runtime_manager.recover()
+                    except Exception as recovery_error:
+                        logger.debug("OCR runtime recovery failed: %s", recovery_error)
+                if recovered:
+                    recovery_attempted = True
+                    continue
+
+                reason = self._safe_error(error)
+                if fallback is not None:
+                    try:
+                        fallback_prompt = prompt or (
+                            DEFAULT_PROMPT
+                            if len(paths) == 1
+                            else DEFAULT_MULTI_PAGE_PROMPT
+                        )
+                        fallback_value = fallback(fallback_prompt, paths)
+                        if isinstance(fallback_value, UnlimitedOCRResult):
+                            return fallback_value
+                        return UnlimitedOCRResult(
+                            text=str(fallback_value or ""),
+                            ok=bool(fallback_value),
+                            degraded=True,
+                            source="fallback",
+                            error=reason,
+                        )
+                    except Exception:
+                        reason = f"{reason}; fallback failed"
+                return UnlimitedOCRResult(degraded=True, error=reason)
 
     def parse_strict(
         self,

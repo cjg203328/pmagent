@@ -2,7 +2,7 @@
 统一异常处理体系
 """
 from functools import wraps
-from utils.logger import get_logger
+from artpm_agent.utils.logger import get_logger
 
 class ArtPMError(Exception):
     """基础异常类"""

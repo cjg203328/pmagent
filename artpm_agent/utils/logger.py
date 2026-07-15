@@ -69,8 +69,11 @@ def setup_logging(
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
 
-    # 清除现有handlers
-    root_logger.handlers.clear()
+    # Remove and close previous handlers before reconfiguration. FileHandler
+    # owns an open stream; clearing the list alone leaks that descriptor.
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+        handler.close()
 
     # 文件Handler
     file_handler = logging.FileHandler(log_path, encoding='utf-8')

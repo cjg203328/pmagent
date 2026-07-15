@@ -9,6 +9,7 @@ from .file_utils import (
     format_currency
 )
 from .validators import validate_data, check_rule
+from .ocr_runtime import OCRRuntimeConfig, OCRRuntimeManager, OCRRuntimeStatus
 
 __all__ = [
     'create_llm_client',
@@ -21,5 +22,8 @@ __all__ = [
     'get_nested_value',
     'format_currency',
     'validate_data',
-    'check_rule'
+    'check_rule',
+    'OCRRuntimeConfig',
+    'OCRRuntimeManager',
+    'OCRRuntimeStatus',
 ]

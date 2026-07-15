@@ -160,5 +160,5 @@ def chat_processing_label(prompt: str, model_id: Optional[str] = None) -> str:
     if display_model:
         if len(display_model) > 28:
             display_model = f"{display_model[:28]}…"
-        return f"{display_model} 正在思考并生成回答"
-    return "正在思考并生成回答"
+        return f"{display_model} 正在生成回答"
+    return "正在生成回答"

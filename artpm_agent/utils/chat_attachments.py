@@ -45,6 +45,20 @@ _ATTACHMENT_REFERENCE_WORDS = (
 )
 
 
+_ATTACHMENT_REFERENCE_WORDS = _ATTACHMENT_REFERENCE_WORDS + (
+    "附件",
+    "文件",
+    "这份",
+    "这个",
+    "模板",
+    "格式",
+    "表格",
+    "样式",
+    "template",
+    "format",
+)
+
+
 class ChatAttachmentStore:
     """Persist uploaded chat files below an isolated workspace directory."""
 

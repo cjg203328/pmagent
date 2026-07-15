@@ -3,10 +3,10 @@ LLM Client Module - Unified interface for OpenAI and Anthropic
 """
 import base64
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Iterator, List, Optional
 from abc import ABC, abstractmethod
 
-from utils.image_validation import load_validated_image
+from artpm_agent.utils.image_validation import load_validated_image
 
 
 def is_valid_api_key(value: Optional[str]) -> bool:
@@ -38,6 +38,17 @@ class BaseLLMClient(ABC):
     ) -> str:
         """Send chat completion request"""
         pass
+
+    def stream_chat(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Iterator[str]:
+        """Yield a complete response for clients without native streaming."""
+        response = self.chat(prompt, system_prompt=system_prompt, history=history)
+        if response:
+            yield response
 
     def _prepare_history(
         self,
@@ -230,6 +241,63 @@ class OpenAIClient(BaseLLMClient):
         except ImportError:
             raise ImportError("openai package not installed. Run: pip install openai")
 
+    def _build_messages(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        history: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, str]]:
+        messages: List[Dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.extend(self._prepare_history(prompt, history))
+        messages.append({"role": "user", "content": prompt})
+        return messages
+
+    @staticmethod
+    def _extract_stream_content(chunk: Any) -> str:
+        """Extract text from OpenAI and common compatible stream chunks."""
+        if chunk is None:
+            return ""
+        choices = (
+            chunk.get("choices")
+            if isinstance(chunk, dict)
+            else getattr(chunk, "choices", None)
+        )
+        if not choices:
+            return ""
+
+        choice = choices[0]
+        if choice is None:
+            return ""
+        delta = (
+            choice.get("delta")
+            if isinstance(choice, dict)
+            else getattr(choice, "delta", None)
+        )
+        if delta is None:
+            return ""
+        content = (
+            delta.get("content")
+            if isinstance(delta, dict)
+            else getattr(delta, "content", None)
+        )
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+
+        text_parts: List[str] = []
+        for part in content:
+            text = (
+                part.get("text")
+                if isinstance(part, dict)
+                else getattr(part, "text", None)
+            )
+            if isinstance(text, str):
+                text_parts.append(text)
+        return "".join(text_parts)
+
     def chat(
         self,
         prompt: str,
@@ -239,17 +307,9 @@ class OpenAIClient(BaseLLMClient):
         """Send chat completion request to GPT"""
 
         def _request():
-            messages = []
-
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-
-            messages.extend(self._prepare_history(prompt, history))
-            messages.append({"role": "user", "content": prompt})
-
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=messages,
+                messages=self._build_messages(prompt, system_prompt, history),
                 temperature=self.temperature,
                 max_tokens=self.max_tokens
             )
@@ -257,6 +317,26 @@ class OpenAIClient(BaseLLMClient):
             return response.choices[0].message.content
 
         return self._retry_request(_request)
+
+    def stream_chat(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Iterator[str]:
+        """Yield text deltas from an OpenAI-compatible chat completion."""
+        stream = self._retry_request(
+            self.client.chat.completions.create,
+            model=self.model,
+            messages=self._build_messages(prompt, system_prompt, history),
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            stream=True,
+        )
+        for chunk in stream:
+            content = self._extract_stream_content(chunk)
+            if content:
+                yield content
 
     def chat_with_images(
         self,

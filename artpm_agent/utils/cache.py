@@ -13,7 +13,7 @@ from typing import Any, Optional, Callable
 from functools import wraps
 
 try:
-    from utils.logger import get_logger
+    from artpm_agent.utils.logger import get_logger
     logger = get_logger(__name__)
 except ImportError:
     import logging
@@ -309,7 +309,7 @@ disk_cache = DiskCache(cache_dir=".cache", ttl=86400)  # 24小时
 # 使用示例
 if __name__ == "__main__":
     from time import sleep
-    from utils.logger import setup_logging
+    from artpm_agent.utils.logger import setup_logging
 
     setup_logging()
 
