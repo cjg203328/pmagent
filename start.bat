@@ -1,71 +1,47 @@
 @echo off
-set PYTHONUTF8=1
-title ArtPM
+chcp 65001 >nul 2>&1
+REM ArtPM Agent Windows 启动脚本
 
-echo.
-echo ===============================================================
-echo                            ArtPM
-echo        Professional AI Project Management Tool
-echo ===============================================================
+echo   ArtPM Agent starting...
 echo.
 
-python --version >nul 2>&1
+REM ---- 查找有依赖的 Python（优先 E:\python，再走 PATH）----
+set "PYTHON_CMD="
+where /q "E:\python\python.exe" 2>nul && (
+    set "PYTHON_CMD=E:\python\python.exe"
+) || (
+    where /q "python" 2>nul && set "PYTHON_CMD=python"
+)
+
+if "%PYTHON_CMD%"=="" (
+    echo [ERROR] No Python found.
+    pause & exit /b 1
+)
+
+REM 验证依赖可用
+"%PYTHON_CMD%" -c "import streamlit" >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Python not found. Install Python 3.8+ first.
-    pause
-    exit /b 1
+    echo [ERROR] Python at "%PYTHON_CMD%" is missing streamlit.
+    echo         Run:  pip install -r artpm_agent\requirements.txt
+    pause & exit /b 1
 )
 
-python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)"
-if errorlevel 1 (
-    echo [ERROR] Python 3.8 or newer is required.
-    pause
-    exit /b 1
-)
+for %%A in ("%PYTHON_CMD%") do set "PY_VER=%%~dpA"
+echo   Python: %PYTHON_CMD%
+call "%PYTHON_CMD%" --version
 
-echo [OK] Python found
+REM ---- 环境准备 ----
+if not exist .env copy .env.example .env >nul 2>&1
+if not exist data mkdir data >nul 2>&1
+if not exist artpm_agent\logs mkdir artpm_agent\logs >nul 2>&1
+
+REM ---- 关键：设置 PYTHONPATH 让多页面导入不报错 ----
+set "PYTHONPATH=%~dp0"
+
+echo.
+echo   http://localhost:8501
 echo.
 
-echo [*] Checking dependencies...
-python -c "import streamlit, pandas, plotly, sqlalchemy, openpyxl, dotenv, requests" 2>nul
-if errorlevel 1 (
-    echo [*] Installing dependencies...
-    python -m pip install -r requirements.txt -q
-    if errorlevel 1 (
-        echo [ERROR] Installation failed
-        echo Run manually: python -m pip install -r requirements.txt
-        pause
-        exit /b 1
-    )
-    echo [OK] Installed
-) else (
-    echo [OK] Dependencies ready
-)
-echo.
-
-if not exist "data" mkdir data >nul 2>&1
-if not exist "temp" mkdir temp >nul 2>&1
-
-if not exist ".env" (
-    echo [*] Creating config...
-    echo OPENAI_API_KEY= > .env
-    echo ANTHROPIC_API_KEY= >> .env
-    echo ZHIPU_API_KEY= >> .env
-    echo. >> .env
-    echo LLM_PROVIDER=anthropic >> .env
-    echo LLM_MODEL=claude-3-5-sonnet-20241022 >> .env
-    echo MEMORY_DB_PATH=./data/memory.db >> .env
-    echo [OK] Config created. The app can run offline; edit .env to enable LLM chat
-    echo.
-)
-
-echo [*] Starting ArtPM...
-echo ===============================================================
-echo Open in browser: http://localhost:8501
-echo Press Ctrl+C to stop
-echo ===============================================================
-echo.
-
-python -m streamlit run artpm_agent\app.py --server.headless true --server.address 127.0.0.1
+"%PYTHON_CMD%" -m streamlit run artpm_agent\app.py --server.address 127.0.0.1 --server.port 8501
 
 pause
