@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from io import BytesIO, StringIO
+import csv
 from datetime import date, datetime, timezone
 from hashlib import sha256
 import math
@@ -15,6 +17,9 @@ from uuid import uuid4
 
 from docx import Document
 from openpyxl import Workbook
+from openpyxl import load_workbook
+
+from artpm_agent.utils.multimodal_markdown import LocalMarkdownConverter
 
 
 _INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -142,6 +147,23 @@ class WorkspaceArtifactGenerator:
             raise ValueError("Artifacts must be direct children of the workspace root")
         return candidate
 
+    def artifact_path(self, stored_path: str) -> Path:
+        """Resolve one direct-child artifact path below this workspace root."""
+        if not isinstance(stored_path, str) or not stored_path.strip():
+            raise ValueError("stored_path must be a non-empty string")
+        if "/" in stored_path or "\\" in stored_path or _WINDOWS_DRIVE.match(stored_path):
+            raise ValueError("stored_path must be a direct artifact filename")
+        path = (self.root / stored_path).resolve()
+        try:
+            path.relative_to(self.root)
+        except ValueError as error:
+            raise ValueError("Artifact path escapes its workspace root") from error
+        if path.parent != self.root or not path.is_file():
+            raise ValueError("artifact does not exist")
+        if path.stat().st_size > self.max_file_size:
+            raise ValueError("artifact exceeds the configured file size limit")
+        return path
+
     @staticmethod
     def _versioned_name(filename: str, version: int) -> str:
         path = Path(filename)
@@ -166,7 +188,8 @@ class WorkspaceArtifactGenerator:
                 raise
             return destination, version
         raise FileExistsError(
-            f"No free artifact version found after {self.max_versions} attempts"
+            f"No free artifact version found for {filename!r} "
+            f"after {self.max_versions} attempts"
         )
 
     def _finalize(
@@ -186,6 +209,7 @@ class WorkspaceArtifactGenerator:
             )
         digest = sha256(temporary_path.read_bytes()).hexdigest()
         destination, version = self._publish_new(temporary_path, filename)
+        preview = self.preview_path(destination)
         return {
             "id": uuid4().hex,
             "name": destination.name,
@@ -199,11 +223,196 @@ class WorkspaceArtifactGenerator:
             "created_at": datetime.now(timezone.utc).isoformat(
                 timespec="microseconds"
             ),
+            "preview_markdown": preview.get("preview_markdown", ""),
+            "export_formats": self.available_export_formats(artifact_format),
             **dict(details),
         }
 
     def _temporary_path(self) -> Path:
         return self._safe_path(f".artifact-{uuid4().hex}.tmp")
+
+    @staticmethod
+    def available_export_formats(artifact_format: str) -> list[str]:
+        """Return browser-safe export formats for a generated artifact."""
+        normalized = str(artifact_format or "").lower().lstrip(".")
+        if normalized == "xlsx":
+            return ["csv", "md", "txt", "docx"]
+        if normalized == "docx":
+            return ["md", "txt"]
+        if normalized == "csv":
+            return ["md", "txt", "xlsx"]
+        if normalized in {"md", "txt"}:
+            return ["docx"]
+        return []
+
+    @staticmethod
+    def _mime_type_for_format(target_format: str) -> str:
+        return {
+            "csv": "text/csv",
+            "docx": (
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            "md": "text/markdown",
+            "txt": "text/plain",
+            "xlsx": (
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+        }.get(target_format, "application/octet-stream")
+
+    def preview_path(self, path: str | Path, *, max_chars: int = 4_000) -> dict[str, Any]:
+        """Create a bounded Markdown preview from a trusted local artifact path."""
+        artifact_path = Path(path).expanduser().resolve()
+        try:
+            artifact_path.relative_to(self.root)
+        except ValueError as error:
+            raise ValueError("Artifact path escapes its workspace root") from error
+        if artifact_path.parent != self.root or not artifact_path.is_file():
+            raise ValueError("artifact does not exist")
+        converter = LocalMarkdownConverter(max_chars=max(max_chars, 1024))
+        converted = converter.convert(artifact_path)
+        preview_markdown = converted.markdown[:max_chars].strip()
+        return {
+            "success": converted.success,
+            "name": artifact_path.name,
+            "format": artifact_path.suffix.lower().lstrip("."),
+            "preview_markdown": preview_markdown,
+            "truncated": converted.truncated or len(converted.markdown) > max_chars,
+            "error": converted.error,
+        }
+
+    def preview_artifact(
+        self,
+        stored_path: str,
+        *,
+        max_chars: int = 4_000,
+    ) -> dict[str, Any]:
+        """Create a bounded Markdown preview for a stored generated artifact."""
+        return self.preview_path(self.artifact_path(stored_path), max_chars=max_chars)
+
+    @staticmethod
+    def _markdown_to_docx_bytes(markdown: str) -> bytes:
+        document = Document()
+        lines = str(markdown or "").splitlines()
+        has_content = False
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line:
+                continue
+            has_content = True
+            if line.startswith("#"):
+                hashes = len(line) - len(line.lstrip("#"))
+                text = line[hashes:].strip()
+                document.add_heading(text or "Section", level=max(1, min(hashes, 9)))
+            elif line.startswith("- "):
+                document.add_paragraph(line[2:].strip(), style="List Bullet")
+            elif line[:3].replace(".", "").isdigit() and ". " in line[:5]:
+                document.add_paragraph(line.split(". ", 1)[1], style="List Number")
+            else:
+                document.add_paragraph(line)
+        if not has_content:
+            document.add_paragraph("")
+        stream = BytesIO()
+        document.save(stream)
+        return stream.getvalue()
+
+    @staticmethod
+    def _xlsx_to_csv_bytes(path: Path) -> bytes:
+        workbook = load_workbook(path, read_only=True, data_only=True)
+        try:
+            worksheet = workbook.worksheets[0]
+            stream = StringIO(newline="")
+            writer = csv.writer(stream)
+            for row in worksheet.iter_rows(values_only=True):
+                writer.writerow(["" if value is None else value for value in row])
+            return stream.getvalue().encode("utf-8-sig")
+        finally:
+            workbook.close()
+
+    @staticmethod
+    def _csv_to_xlsx_bytes(path: Path) -> bytes:
+        raw = path.read_bytes()
+        text = ""
+        for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+            try:
+                text = raw.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if not text:
+            text = raw.decode("utf-8", errors="replace")
+        workbook = Workbook(write_only=True)
+        worksheet = workbook.create_sheet(title="Sheet1")
+        for row in csv.reader(text.splitlines()):
+            worksheet.append(row)
+        stream = BytesIO()
+        workbook.save(stream)
+        return stream.getvalue()
+
+    def export_artifact_bytes(
+        self,
+        stored_path: str,
+        target_format: str,
+    ) -> dict[str, Any]:
+        """Return converted bytes for browser download without mutating storage."""
+        source = self.artifact_path(stored_path)
+        source_format = source.suffix.lower().lstrip(".")
+        target = str(target_format or "").lower().lstrip(".")
+        if target == source_format:
+            data = source.read_bytes()
+        elif target == "csv" and source_format == "xlsx":
+            data = self._xlsx_to_csv_bytes(source)
+        elif target in {"md", "txt"}:
+            converted = LocalMarkdownConverter(max_chars=1_000_000).convert(source)
+            if not converted.success:
+                raise ValueError(converted.error or "artifact cannot be exported")
+            data = converted.markdown.encode("utf-8")
+        elif target == "docx" and source_format in {"xlsx", "csv", "md", "txt"}:
+            if source_format in {"md", "txt"}:
+                markdown = source.read_text(encoding="utf-8", errors="replace")
+            else:
+                converted = LocalMarkdownConverter(max_chars=1_000_000).convert(source)
+                if not converted.success:
+                    raise ValueError(converted.error or "artifact cannot be exported")
+                markdown = converted.markdown
+            data = self._markdown_to_docx_bytes(markdown)
+        elif target == "xlsx" and source_format == "csv":
+            data = self._csv_to_xlsx_bytes(source)
+        else:
+            raise ValueError(
+                f"cannot export {source_format or 'artifact'} as {target or 'unknown'}"
+            )
+        if len(data) > self.max_file_size:
+            raise ValueError("exported artifact exceeds the configured file size limit")
+        filename = f"{source.stem}.{target}"
+        return {
+            "filename": filename,
+            "format": target,
+            "mime_type": self._mime_type_for_format(target),
+            "data": data,
+            "size": len(data),
+        }
+
+    def export_artifact(
+        self,
+        stored_path: str,
+        target_format: str,
+    ) -> dict[str, Any]:
+        """Save a converted copy as a new versioned artifact."""
+        exported = self.export_artifact_bytes(stored_path, target_format)
+        temporary_path = self._temporary_path()
+        try:
+            temporary_path.write_bytes(exported["data"])
+            return self._finalize(
+                temporary_path,
+                exported["filename"],
+                exported["format"],
+                exported["mime_type"],
+                {"source_artifact": stored_path},
+            )
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
     def _cell_value(self, value: Any, field: str) -> Any:
         if value is None:
@@ -312,6 +521,129 @@ class WorkspaceArtifactGenerator:
         finally:
             temporary_path.unlink(missing_ok=True)
 
+    def _normalized_columns(
+        self,
+        raw_columns: Sequence[Any],
+        field: str,
+    ) -> tuple[list[str], list[str]]:
+        if not raw_columns or len(raw_columns) > self.max_columns:
+            raise ValueError(
+                f"{field} must contain 1 to {self.max_columns} columns"
+            )
+        columns: list[str] = []
+        header_values: list[str] = []
+        for index, column in enumerate(raw_columns):
+            if not isinstance(column, str) or not column.strip():
+                raise ValueError(f"{field}[{index}] must be non-empty text")
+            column = column.strip()
+            columns.append(column)
+            header_values.append(self._cell_value(column, f"{field}[{index}]"))
+        if len(columns) != len(set(columns)):
+            raise ValueError(f"{field} must be unique")
+        return columns, header_values
+
+    @staticmethod
+    def _template_rows_for_sheet(
+        rows_by_sheet: Mapping[str, Any] | Sequence[Any] | None,
+        sheet_name: str,
+        sheet_index: int,
+    ) -> Iterable[Any]:
+        if rows_by_sheet is None:
+            return []
+        if isinstance(rows_by_sheet, Mapping):
+            return (
+                rows_by_sheet.get(sheet_name)
+                or rows_by_sheet.get(str(sheet_index))
+                or rows_by_sheet.get(sheet_index)
+                or []
+            )
+        if isinstance(rows_by_sheet, Sequence) and not isinstance(
+            rows_by_sheet,
+            (str, bytes, bytearray),
+        ):
+            if sheet_index < len(rows_by_sheet):
+                return rows_by_sheet[sheet_index] or []
+            return []
+        raise ValueError("rows_by_sheet must be a mapping, sequence, or None")
+
+    def generate_xlsx_from_template(
+        self,
+        filename: str,
+        template: Mapping[str, Any],
+        *,
+        rows_by_sheet: Mapping[str, Any] | Sequence[Any] | None = None,
+    ) -> dict[str, Any]:
+        """Generate a workbook that preserves saved worksheet names and columns."""
+        if not isinstance(template, Mapping):
+            raise ValueError("template must be a mapping")
+        raw_sheets = self._sequence(template.get("sheets"), "template.sheets")
+        if not raw_sheets:
+            raise ValueError("template.sheets must contain at least one sheet")
+
+        safe_name = self._safe_filename(filename, "xlsx")
+        temporary_path = self._temporary_path()
+        total_rows = 0
+        max_columns = 0
+        sheet_details: list[dict[str, Any]] = []
+        try:
+            workbook = Workbook(write_only=True)
+            for sheet_index, raw_sheet in enumerate(raw_sheets):
+                if not isinstance(raw_sheet, Mapping):
+                    raise ValueError(
+                        f"template.sheets[{sheet_index}] must be a mapping"
+                    )
+                sheet_name = self._sheet_name(
+                    raw_sheet.get("name") or f"Sheet{sheet_index + 1}"
+                )
+                raw_columns = self._sequence(
+                    raw_sheet.get("columns"),
+                    f"template.sheets[{sheet_index}].columns",
+                )
+                columns, header_values = self._normalized_columns(
+                    raw_columns,
+                    f"template.sheets[{sheet_index}].columns",
+                )
+                normalized_rows = list(
+                    self._table_rows(
+                        tuple(columns),
+                        self._template_rows_for_sheet(
+                            rows_by_sheet,
+                            sheet_name,
+                            sheet_index,
+                        ),
+                    )
+                )
+                worksheet = workbook.create_sheet(title=sheet_name)
+                worksheet.append(header_values)
+                for values in normalized_rows:
+                    worksheet.append(values)
+                total_rows += len(normalized_rows)
+                max_columns = max(max_columns, len(columns))
+                sheet_details.append(
+                    {
+                        "name": sheet_name,
+                        "rows": len(normalized_rows),
+                        "columns": len(columns),
+                    }
+                )
+            workbook.save(temporary_path)
+            return self._finalize(
+                temporary_path,
+                safe_name,
+                "xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                {
+                    "rows": total_rows,
+                    "columns": max_columns,
+                    "sheet_name": sheet_details[0]["name"],
+                    "sheets": sheet_details,
+                    "template_id": template.get("id"),
+                    "template_name": template.get("name"),
+                },
+            )
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
     def _paragraph(self, value: Any, index: int) -> dict[str, Any]:
         if isinstance(value, str):
             paragraph: dict[str, Any] = {"text": value}
@@ -346,6 +678,61 @@ class WorkspaceArtifactGenerator:
             "bold": paragraph.get("bold", False),
             "italic": paragraph.get("italic", False),
         }
+
+    def _template_paragraphs(
+        self,
+        template: Mapping[str, Any],
+        paragraphs: Sequence[Any] | None,
+    ) -> list[dict[str, Any]]:
+        raw_outline = self._sequence(
+            template.get("paragraphs"),
+            "template.paragraphs",
+        )
+        if not raw_outline:
+            raise ValueError("template.paragraphs must contain at least one item")
+        outline = [
+            self._paragraph(item, index)
+            for index, item in enumerate(raw_outline[: self.max_paragraphs])
+        ]
+
+        if paragraphs is None:
+            return outline
+
+        raw_paragraphs = self._sequence(paragraphs, "paragraphs")
+        if not raw_paragraphs:
+            return outline
+
+        normalized: list[dict[str, Any]] = []
+        for index, raw in enumerate(raw_paragraphs):
+            incoming = self._paragraph(raw, index)
+            if index < len(outline):
+                style = outline[index]
+                incoming.update(
+                    {
+                        "kind": style["kind"],
+                        "level": style["level"],
+                        "bold": style["bold"] or incoming["bold"],
+                        "italic": style["italic"] or incoming["italic"],
+                    }
+                )
+            normalized.append(incoming)
+        return normalized
+
+    def generate_docx_from_template(
+        self,
+        filename: str,
+        template: Mapping[str, Any],
+        *,
+        paragraphs: Sequence[Any] | None = None,
+    ) -> dict[str, Any]:
+        """Generate a document while preserving saved paragraph structure."""
+        if not isinstance(template, Mapping):
+            raise ValueError("template must be a mapping")
+        normalized = self._template_paragraphs(template, paragraphs)
+        artifact = self.generate_docx(filename, normalized)
+        artifact["template_id"] = template.get("id")
+        artifact["template_name"] = template.get("name")
+        return artifact
 
     def generate_docx(
         self,
@@ -395,6 +782,35 @@ class WorkspaceArtifactGenerator:
                     "paragraphs": len(normalized),
                     "text_chars": total_chars,
                 },
+            )
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    def store_versioned_bytes(
+        self,
+        filename: str,
+        data: bytes,
+        artifact_format: str,
+        mime_type: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist already-built artifact bytes as a NEW versioned file.
+
+        Used by the editing subsystem: the original file is never overwritten,
+        the change is always written next to it as ``name (n).ext``.
+        """
+        if not isinstance(data, (bytes, bytearray)) or len(data) == 0:
+            raise ValueError("artifact bytes must be non-empty")
+        safe_name = self._safe_filename(filename, artifact_format)
+        temporary_path = self._temporary_path()
+        temporary_path.write_bytes(bytes(data))
+        try:
+            return self._finalize(
+                temporary_path,
+                safe_name,
+                artifact_format,
+                mime_type,
+                details or {},
             )
         finally:
             temporary_path.unlink(missing_ok=True)
