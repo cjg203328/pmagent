@@ -13,3 +13,24 @@ data/vector_store/
 data/backups/
 .streamlit/
 temp/
+
+# --- 构建产物与生成物（非源码，不入库）---
+build/
+artpm_agent.egg-info/
+*.egg-info/
+coverage.xml
+.coverage
+.pytest-*.log
+.pytest-tmp/
+.reasonix/
+_legacy_backup/
+*.wip_bak
+*.bak
+data/artifacts/
+data/*.faiss
+artifacts/*.png
+artifacts/*.html
+
+# --- 助手专属记忆/配置（非项目源码）---
+.workbuddy/
+.claude/
