@@ -2,10 +2,105 @@
 Enhanced MCP Client - 连接Claude Code能力
 利用Claude Code的工具能力(Read, Write, Glob, Grep, Bash, Agent)
 """
+from copy import deepcopy
 import os
 import shlex
 from typing import Dict, Any, List
 from pathlib import Path
+
+
+MAX_TOOL_FILE_BYTES = 10 * 1024 * 1024
+MAX_TOOL_OUTPUT_CHARS = 32 * 1024
+_SENSITIVE_FILE_NAMES = frozenset(
+    {
+        ".env",
+        "credentials.json",
+        "secrets.json",
+        "service-account.json",
+        "service_account.json",
+    }
+)
+_SENSITIVE_FILE_SUFFIXES = frozenset(
+    {".db", ".sqlite", ".sqlite3", ".pem", ".key", ".p12", ".pfx"}
+)
+_SENSITIVE_DIRECTORIES = frozenset({".git", ".ssh", ".aws", ".azure", ".gnupg"})
+
+
+_JSON_DATA_SOURCE_SCHEMA = {
+    "oneOf": [
+        {"type": "string", "minLength": 1},
+        {"type": "array"},
+        {"type": "object"},
+    ]
+}
+
+_ENHANCED_MCP_INPUT_SCHEMAS = {
+    "read_file": {
+        "type": "object",
+        "required": ["file_path"],
+        "properties": {
+            "file_path": {"type": "string", "minLength": 1},
+            "encoding": {"type": "string", "minLength": 1},
+            "lines_limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+        },
+        "additionalProperties": False,
+    },
+    "search_files": {
+        "type": "object",
+        "required": ["pattern"],
+        "properties": {
+            "pattern": {"type": "string", "minLength": 1},
+            "directory": {"type": "string"},
+            "recursive": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        },
+        "additionalProperties": False,
+    },
+    "search_content": {
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+            "query": {"type": "string", "minLength": 1},
+            "file_pattern": {"type": "string", "minLength": 1},
+            "directory": {"type": "string"},
+            "case_sensitive": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        },
+        "additionalProperties": False,
+    },
+    "analyze_data": {
+        "type": "object",
+        "required": ["data_source"],
+        "properties": {
+            "data_source": _JSON_DATA_SOURCE_SCHEMA,
+            "analysis_type": {
+                "type": "string",
+                "enum": ["descriptive", "summary", "statistics"],
+            },
+            "metrics": {"type": "array", "items": {"type": "string"}},
+        },
+        "additionalProperties": False,
+    },
+    "execute_command": {
+        "type": "object",
+        "required": ["command"],
+        "properties": {
+            "command": {
+                "oneOf": [
+                    {"type": "string", "minLength": 1},
+                    {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string", "minLength": 1},
+                    },
+                ]
+            },
+            "cwd": {"type": "string"},
+            "timeout": {"type": "integer", "minimum": 1, "maximum": 120},
+        },
+        "additionalProperties": False,
+    },
+}
 
 
 class EnhancedMCPClient:
@@ -32,27 +127,32 @@ class EnhancedMCPClient:
             "read_file": {
                 "name": "read_file",
                 "description": "读取文件内容(支持 TXT, MD, JSON, CSV, Excel等)",
-                "execute": self._read_file
+                "execute": self._read_file,
+                "input_schema": _ENHANCED_MCP_INPUT_SCHEMAS["read_file"],
             },
             "search_files": {
                 "name": "search_files",
                 "description": "搜索文件(支持 glob pattern)",
-                "execute": self._search_files
+                "execute": self._search_files,
+                "input_schema": _ENHANCED_MCP_INPUT_SCHEMAS["search_files"],
             },
             "search_content": {
                 "name": "search_content",
                 "description": "搜索文件内容(支持正则表达式)",
-                "execute": self._search_content
+                "execute": self._search_content,
+                "input_schema": _ENHANCED_MCP_INPUT_SCHEMAS["search_content"],
             },
             "analyze_data": {
                 "name": "analyze_data",
                 "description": "分析结构化数据(Excel, CSV, JSON)",
-                "execute": self._analyze_data
+                "execute": self._analyze_data,
+                "input_schema": _ENHANCED_MCP_INPUT_SCHEMAS["analyze_data"],
             },
             "execute_command": {
                 "name": "execute_command",
                 "description": "执行系统命令",
-                "execute": self._execute_command
+                "execute": self._execute_command,
+                "input_schema": _ENHANCED_MCP_INPUT_SCHEMAS["execute_command"],
             }
         }
 
@@ -70,6 +170,29 @@ class EnhancedMCPClient:
             raise ValueError("Path is outside the workspace") from exc
         if common != self.workspace_path:
             raise ValueError("Path is outside the workspace")
+        return path
+
+    def _is_sensitive_path(self, path: Path) -> bool:
+        """Return whether a workspace path may expose deployment credentials."""
+        try:
+            relative = path.resolve().relative_to(self.workspace_path)
+        except ValueError:
+            return True
+        parts = {part.casefold() for part in relative.parts[:-1]}
+        name = relative.name.casefold()
+        return (
+            bool(parts & _SENSITIVE_DIRECTORIES)
+            or name in _SENSITIVE_FILE_NAMES
+            or name.startswith(".env.")
+            or name.startswith("credentials.")
+            or name.startswith("secrets.")
+            or relative.suffix.casefold() in _SENSITIVE_FILE_SUFFIXES
+        )
+
+    def _resolve_readable_path(self, value: str = None) -> Path:
+        path = self._resolve_path(value)
+        if self._is_sensitive_path(path):
+            raise PermissionError("Sensitive workspace files are not readable by tools")
         return path
 
     @staticmethod
@@ -107,22 +230,21 @@ class EnhancedMCPClient:
         """
         try:
             # 解析路径
-            path = self._resolve_path(file_path)
+            path = self._resolve_readable_path(file_path)
 
             if not path.is_file():
                 return {
                     "success": False,
                     "error": f"File not found: {file_path}"
                 }
-            max_size = self._bounded_int(kwargs.get("max_size_mb"), 50, 1, 500) * 1024 * 1024
-            if path.stat().st_size > max_size:
-                return {"success": False, "error": f"File is larger than {max_size // (1024 * 1024)} MB"}
+            if path.stat().st_size > MAX_TOOL_FILE_BYTES:
+                return {"success": False, "error": "File is larger than 10 MB"}
 
             # 读取文件
             encoding = kwargs.get("encoding", "utf-8")
             lines_limit = kwargs.get("lines_limit")
             if lines_limit is not None:
-                lines_limit = self._bounded_int(lines_limit, 1000, 1, 10000)
+                lines_limit = self._bounded_int(lines_limit, 1000, 1, 1000)
 
             suffix = path.suffix.lower()
             if suffix in {".xlsx", ".xls"}:
@@ -134,10 +256,12 @@ class EnhancedMCPClient:
                     content = "\n".join(page.extract_text() or "" for page in pdf.pages)
             else:
                 with open(path, 'r', encoding=encoding, errors='replace') as f:
-                    content = f.read()
+                    content = f.read(MAX_TOOL_OUTPUT_CHARS + 1)
 
             if lines_limit is not None:
                 content = "\n".join(content.splitlines()[:lines_limit])
+            truncated = len(content) > MAX_TOOL_OUTPUT_CHARS
+            content = content[:MAX_TOOL_OUTPUT_CHARS]
 
             # 统计信息
             line_count = len(content.splitlines())
@@ -151,7 +275,8 @@ class EnhancedMCPClient:
                     "file_size": path.stat().st_size,
                     "file_ext": path.suffix,
                     "lines": line_count,
-                    "encoding": encoding
+                    "encoding": encoding,
+                    "truncated": truncated,
                 }
             }
 
@@ -181,7 +306,7 @@ class EnhancedMCPClient:
         try:
             search_dir = self._resolve_path(directory)
             recursive = kwargs.get("recursive", True)
-            limit = self._bounded_int(kwargs.get("limit"), 100, 1, 1000)
+            limit = self._bounded_int(kwargs.get("limit"), 100, 1, 100)
 
             if not search_dir.is_dir():
                 return {"success": False, "error": f"Directory not found: {directory}"}
@@ -197,7 +322,7 @@ class EnhancedMCPClient:
             for file_path in files:
                 try:
                     resolved = self._resolve_path(str(file_path))
-                    if resolved.is_file():
+                    if resolved.is_file() and not self._is_sensitive_path(resolved):
                         safe_files.append(file_path)
                 except ValueError:
                     continue
@@ -250,7 +375,7 @@ class EnhancedMCPClient:
 
             search_dir = self._resolve_path(kwargs.get("directory"))
             case_sensitive = kwargs.get("case_sensitive", False)
-            limit = self._bounded_int(kwargs.get("limit"), 50, 1, 1000)
+            limit = self._bounded_int(kwargs.get("limit"), 50, 1, 100)
 
             # 编译正则表达式
             flags = 0 if case_sensitive else re.IGNORECASE
@@ -269,17 +394,24 @@ class EnhancedMCPClient:
                     break
 
                 try:
-                    full_path = self._resolve_path(file_path)
+                    full_path = self._resolve_readable_path(file_path)
                     if full_path.stat().st_size > 10 * 1024 * 1024:
                         continue
+                    emitted_chars = sum(
+                        len(item["content"]) for item in matches
+                    )
                     with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
                         for line_num, line in enumerate(f, 1):
                             if pattern.search(line):
+                                snippet = line.strip()[:2000]
+                                if emitted_chars + len(snippet) > MAX_TOOL_OUTPUT_CHARS:
+                                    break
                                 matches.append({
                                     "file": file_path,
                                     "line": line_num,
-                                    "content": line.strip()
+                                    "content": snippet,
                                 })
+                                emitted_chars += len(snippet)
 
                                 if len(matches) >= limit:
                                     break
@@ -325,10 +457,12 @@ class EnhancedMCPClient:
             # 加载数据
             if isinstance(data_source, str):
                 # 从文件加载
-                path = self._resolve_path(data_source)
+                path = self._resolve_readable_path(data_source)
 
                 if not path.is_file():
                     return {"success": False, "error": f"File not found: {data_source}"}
+                if path.stat().st_size > MAX_TOOL_FILE_BYTES:
+                    return {"success": False, "error": "File is larger than 10 MB"}
 
                 if path.suffix in ['.xlsx', '.xls']:
                     df = pd.read_excel(path)
@@ -489,7 +623,8 @@ class EnhancedMCPClient:
         return [
             {
                 "name": tool["name"],
-                "description": tool["description"]
+                "description": tool["description"],
+                "input_schema": deepcopy(tool["input_schema"]),
             }
             for tool in self.available_tools.values()
         ]

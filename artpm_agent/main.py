@@ -3,7 +3,7 @@ Main entry point for ArtPM Copilot
 """
 import sys
 
-from agent import ArtPMAgent
+from artpm_agent.agent import ArtPMAgent
 
 
 def print_banner():

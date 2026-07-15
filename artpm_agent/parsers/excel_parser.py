@@ -10,7 +10,7 @@ import re
 from datetime import datetime
 
 try:
-    from utils.logger import get_logger
+    from artpm_agent.utils.logger import get_logger
     logger = get_logger(__name__)
 except ImportError:
     import logging

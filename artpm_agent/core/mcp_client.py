@@ -5,7 +5,7 @@ MCP (Model Context Protocol) Client - 简化版
 import os
 import requests
 from typing import Dict, Any, List, Optional
-from utils.llm_client import is_valid_api_key
+from artpm_agent.utils.llm_client import is_valid_api_key
 
 
 class MCPClient:

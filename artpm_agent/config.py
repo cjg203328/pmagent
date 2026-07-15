@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
+from artpm_agent.config_data import load_default_config
+
 # Project-local configuration is authoritative for this application.
 PROJECT_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=PROJECT_ENV_PATH, override=True)
@@ -25,10 +27,8 @@ class Config:
         """
         self.base_dir = Path(__file__).parent
 
-        # Load default config
-        default_config_path = self.base_dir / "config" / "default_config.json"
-        with open(default_config_path, 'r', encoding='utf-8') as f:
-            self.config = json.load(f)
+        # Load the packaged resource so source and wheel installations behave alike.
+        self.config = load_default_config()
 
         # Override with custom config if provided
         if config_path:
@@ -61,6 +61,36 @@ class Config:
             self.config["llm"]["provider"] = os.getenv("LLM_PROVIDER")
         if os.getenv("LLM_MODEL"):
             self.config["llm"]["model"] = os.getenv("LLM_MODEL")
+        if os.getenv("LLM_VISION_MODEL"):
+            self.config["llm"]["vision_model"] = os.getenv("LLM_VISION_MODEL")
+        if os.getenv("LLM_REQUEST_TIMEOUT_SECONDS"):
+            try:
+                self.config["llm"]["request_timeout_seconds"] = float(
+                    os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "")
+                )
+            except ValueError:
+                pass
+        if os.getenv("LLM_MAX_TOKENS"):
+            try:
+                self.config["llm"]["max_tokens"] = int(
+                    os.getenv("LLM_MAX_TOKENS", "")
+                )
+            except ValueError:
+                pass
+        if os.getenv("LLM_HISTORY_MAX_MESSAGES"):
+            try:
+                self.config["llm"]["history_max_messages"] = int(
+                    os.getenv("LLM_HISTORY_MAX_MESSAGES", "")
+                )
+            except ValueError:
+                pass
+        if os.getenv("LLM_HISTORY_MAX_CHARS"):
+            try:
+                self.config["llm"]["history_max_chars"] = int(
+                    os.getenv("LLM_HISTORY_MAX_CHARS", "")
+                )
+            except ValueError:
+                pass
         if os.getenv("LLM_AVAILABLE_MODELS"):
             try:
                 models = json.loads(os.getenv("LLM_AVAILABLE_MODELS", "[]"))
@@ -87,8 +117,16 @@ class Config:
         if os.getenv("ZHIPU_API_BASE"):
             self.config["llm"]["zhipu_api_base"] = os.getenv("ZHIPU_API_BASE")
 
-        # Optional external Unlimited-OCR OpenAI-compatible service. The model
-        # runtime stays outside this process; only bounded HTTP settings live here.
+        # The structured tool loop is opt-in until a host approval boundary is
+        # supplied. Sensitive data-access and write tools fail closed without it.
+        model_tool_calls = os.getenv("AGENT_MODEL_TOOL_CALLS_ENABLED")
+        if model_tool_calls is not None:
+            self.config.setdefault("agent_runtime", {})[
+                "model_tool_calls_enabled"
+            ] = model_tool_calls.strip().lower() in {"1", "true", "yes", "on"}
+
+        # Hidden OCR skill configuration. The deployment bundle owns the runtime,
+        # model weights, and environment; the end-user settings page never does.
         unlimited_ocr = self.config.setdefault("unlimited_ocr", {})
         env_map = {
             "UNLIMITED_OCR_ENABLED": (
@@ -131,6 +169,20 @@ class Config:
             self.config["database"]["conversation_db_path"] = os.getenv("CONVERSATION_DB_PATH")
         if os.getenv("VECTOR_DB_PATH"):
             self.config["database"]["vector_db_path"] = os.getenv("VECTOR_DB_PATH")
+
+        # Operator-managed embedding settings. These are intentionally not
+        # exposed in the end-user settings page because index compatibility is
+        # a deployment concern, not a per-conversation preference.
+        memory_config = self.config.setdefault("memory", {})
+        if os.getenv("EMBEDDING_PROVIDER"):
+            memory_config["embedding_provider"] = os.getenv("EMBEDDING_PROVIDER")
+        if os.getenv("EMBEDDING_DIMENSION"):
+            try:
+                memory_config["embedding_dimension"] = int(
+                    os.getenv("EMBEDDING_DIMENSION", "")
+                )
+            except ValueError:
+                pass
 
         # Cost configuration
         if os.getenv("OVERHEAD_RATE"):

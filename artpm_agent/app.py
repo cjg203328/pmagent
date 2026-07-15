@@ -1,16 +1,26 @@
+# ruff: noqa: E402 - bootstrap adjusts sys.path before package imports
 """
 ArtPM Agent - 智能项目管理助手
 瘦启动器：负责日志初始化、页面配置、样式注入与主路由。
-所有 UI 助手函数见 ui_helpers.py，页面见 pages/。
+所有 UI 助手函数见 ui_helpers.py，页面见 views/。
 """
-from utils.logger import setup_logging, get_logger
+import sys
+from pathlib import Path
+
+# 确保项目根目录在 Python 路径中（解决 Streamlit 运行时找不到模块的问题）
+# 先 resolve(__file__) 为绝对路径再取 parent，避免 __file__ 为相对路径时多退一层目录。
+_project_root = Path(__file__).resolve().parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+from artpm_agent.utils.logger import setup_logging, get_logger
 import streamlit as st
-from ui_helpers import *  # noqa: F401,F403
-from ui_style import STYLE_CSS
-from pages.chat import chat_page
-from pages.settings import settings_page
+from artpm_agent.ui_helpers import *  # noqa: F401,F403
+from artpm_agent.ui_style import STYLE_CSS
+from artpm_agent.views.chat import chat_page
+from artpm_agent.views.settings import settings_page
 # 向后兼容：拆分前 persist_settings 直接挂在 app 模块上，用户 WIP 代码/测试仍按 app.persist_settings 调用。
-from pages.settings import persist_settings  # noqa: F401
+from artpm_agent.views.settings import persist_settings  # noqa: F401
 
 # 日志系统只需初始化一次
 setup_logging()
@@ -32,6 +42,7 @@ def main():
     """主入口"""
     init_session()
     render_sidebar()
+    render_global_navigation()
 
     # 路由
     view = st.session_state.view

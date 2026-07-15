@@ -3,7 +3,7 @@ MCP Skills Integration
 将 MCP 技能集成到 Agent 工作流
 """
 from typing import Dict, Any, List
-from core.mcp_client import get_mcp_client
+from artpm_agent.core.mcp_client import get_mcp_client
 
 
 class MCPSkillsAdapter:

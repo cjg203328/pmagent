@@ -16,8 +16,8 @@ Pillow>=10.0.0
 pdfplumber>=0.10.0
 PyMuPDF>=1.24.0
 
-# Vector database (optional)
-# faiss-cpu>=1.7.4
+# Vector database (required)
+faiss-cpu>=1.14.3,<2.0.0
 # chromadb>=0.4.0
 
 # Database
@@ -29,4 +29,5 @@ streamlit>=1.44.0
 # Utilities
 python-dotenv>=1.0.0
 pydantic>=2.5.0
+jsonschema>=4.23.0,<5.0.0
 loguru>=0.7.0

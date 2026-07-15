@@ -44,7 +44,7 @@ class UnifiedMCPClient:
 
     def _get_enhanced(self):
         if self._enhanced is None:
-            from core.mcp_client_enhanced import EnhancedMCPClient
+            from artpm_agent.core.mcp_client_enhanced import EnhancedMCPClient
 
             self._enhanced = EnhancedMCPClient(self._workspace_path)
         return self._enhanced
@@ -57,7 +57,7 @@ class UnifiedMCPClient:
             self._remote_failed = True
             return None
         try:
-            from core.mcp_client import MCPClient
+            from artpm_agent.core.mcp_client import MCPClient
 
             self._remote = MCPClient(self._api_key)
         except Exception:

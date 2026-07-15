@@ -66,19 +66,21 @@ class WorkflowStore:
 
     @contextmanager
     def _connection(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
-        conn = self._connect()
+        conn = None
         try:
+            conn = self._connect()
             if write:
                 conn.execute("BEGIN IMMEDIATE")
             yield conn
             if write:
                 conn.commit()
         except Exception:
-            if conn.in_transaction:
+            if conn is not None and conn.in_transaction:
                 conn.rollback()
             raise
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
     def _enable_wal(self) -> None:
         with self._connection() as conn:

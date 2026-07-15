@@ -7,8 +7,7 @@
 ### 方式一：Web界面 (推荐)
 
 ```bash
-cd artpm_agent
-streamlit run app.py
+python -m streamlit run artpm_agent/app.py
 ```
 
 访问 http://localhost:8501 即可使用
@@ -16,8 +15,7 @@ streamlit run app.py
 ### 方式二：命令行界面
 
 ```bash
-cd artpm_agent
-python main.py
+python -m artpm_agent.main
 ```
 
 ## 📋 前置条件
@@ -80,7 +78,7 @@ ANTHROPIC_API_KEY=sk-ant-your-key-here
 
 1. **启动应用**
    ```bash
-   streamlit run app.py
+   python -m streamlit run artpm_agent/app.py
    ```
 
 2. **选择功能**
@@ -137,7 +135,7 @@ ANTHROPIC_API_KEY=sk-ant-your-key-here
 
 ## 🔧 自定义配置
 
-编辑 `config/default_config.json` 可以调整:
+编辑 `config_data/default_config.json` 可以调整:
 
 - LLM模型和参数
 - 成本配置（人员等级单价）

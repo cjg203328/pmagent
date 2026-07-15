@@ -2,16 +2,22 @@
   "llm": {
     "provider": "anthropic",
     "model": "claude-3-5-sonnet-20241022",
+    "vision_model": "",
     "available_models": [],
     "models_synced_at": null,
-    "temperature": 0.7,
-    "max_tokens": 4000,
+    "temperature": 0.4,
+    "max_tokens": 1200,
     "retry_max_attempts": 1,
     "retry_backoff_factor": 2,
-    "request_timeout_seconds": 30,
-    "history_max_messages": 12,
-    "history_max_chars": 8000,
+    "request_timeout_seconds": 12,
+    "history_max_messages": 8,
+    "history_max_chars": 4000,
     "intent_classification_enabled": false
+  },
+  "agent_runtime": {
+    "model_tool_calls_enabled": false,
+    "max_turns": 8,
+    "max_tool_calls_per_turn": 16
   },
   "unlimited_ocr": {
     "enabled": true,
@@ -24,7 +30,18 @@
     "no_repeat_ngram_size": 35,
     "ngram_window_single": 128,
     "ngram_window_multi": 1024,
-    "custom_logit_processor": ""
+    "custom_logit_processor": "",
+    "runtime": {
+      "managed": true,
+      "manifest_path": "",
+      "startup_timeout": 90,
+      "health_interval": 10,
+      "restart_cooldown": 5,
+      "max_restarts": 2,
+      "lock_timeout": 180,
+      "state_dir": "./temp/unlimited_ocr",
+      "log_path": "./logs/unlimited-ocr-runtime.log"
+    }
   },
   "database": {
     "db_path": "./data/artpm.db",
@@ -81,7 +98,9 @@
     "check_interval_hours": 24
   },
   "memory": {
-    "embedding_model": "text-embedding-3-small",
+    "embedding_provider": "local_feature_hash",
+    "embedding_model": "char-ngram-feature-hash-v1",
+    "embedding_dimension": 1536,
     "vector_top_k": 5,
     "short_term_memory_days": 7
   }

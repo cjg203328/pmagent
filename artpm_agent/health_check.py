@@ -3,6 +3,7 @@
 """
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from typing import Dict, Any
 import json
@@ -69,15 +70,46 @@ def check_llm_providers() -> Dict[str, Any]:
     return results
 
 
+def check_vector_search() -> Dict[str, Any]:
+    """Verify the required FAISS runtime and local vector index contract."""
+    try:
+        import faiss
+        from artpm_agent.memory import DeterministicEmbeddingProvider, VectorStore
+
+        provider = DeterministicEmbeddingProvider()
+        with TemporaryDirectory(prefix="artpm-faiss-health-") as temp_dir:
+            store = VectorStore(
+                temp_dir,
+                dimension=provider.dimension,
+                embedding_fingerprint=provider.fingerprint,
+            )
+            store.add(
+                "health-check",
+                provider.embed("向量检索健康检查"),
+                {"kind": "health-check"},
+            )
+            matches = store.search(provider.embed("向量检索健康检查"))
+            status = store.status()
+            if not matches or matches[0]["id"] != "health-check":
+                raise RuntimeError("FAISS write/read verification failed")
+        return {
+            "status": "ok" if status["available"] else "error",
+            "version": getattr(faiss, "__version__", "unknown"),
+            "index": status,
+        }
+    except Exception as error:
+        return {"status": "error", "message": str(error)}
+
+
 def check_database() -> Dict[str, Any]:
     """检查数据库连接"""
     try:
-        from database.models import DatabaseManager
-        from config import get_config
+        from artpm_agent.database.models import DatabaseManager
+        from artpm_agent.config import get_config
 
         db_path = Path(get_config().get("database.db_path"))
-        db = DatabaseManager(f"sqlite:///{db_path.as_posix()}")
-        stats = db.get_project_stats()
+        with DatabaseManager(f"sqlite:///{db_path.as_posix()}") as db:
+            stats = db.get_project_stats()
 
         return {
             'status': 'ok',
@@ -94,8 +126,8 @@ def check_database() -> Dict[str, Any]:
 def check_config() -> Dict[str, Any]:
     """检查配置文件"""
     try:
-        from config import get_config
-        from utils.llm_client import is_valid_api_key
+        from artpm_agent.config import get_config
+        from artpm_agent.utils.llm_client import is_valid_api_key
 
         config = get_config()
         cfg_data = config.get_all()
@@ -124,16 +156,25 @@ def check_config() -> Dict[str, Any]:
 def check_agent() -> Dict[str, Any]:
     """检查Agent是否可以初始化"""
     try:
-        from agent import ArtPMAgent
+        from artpm_agent.agent import ArtPMAgent
 
         agent = ArtPMAgent()
         skills = agent.list_skills()
+        ocr_runtime = agent.unlimited_ocr_client.runtime_status()
 
         return {
             'status': 'ok',
             'skills_count': len(skills),
             'llm_available': agent.llm_client is not None,
-            'mcp_enabled': agent.mcp_client.enabled if hasattr(agent, 'mcp_client') else False
+            'mcp_enabled': agent.mcp_client.enabled if hasattr(agent, 'mcp_client') else False,
+            # Read-only diagnostics: health checks must not eagerly start OCR.
+            'ocr_runtime': {
+                'enabled': ocr_runtime.enabled,
+                'managed': ocr_runtime.managed,
+                'package_available': ocr_runtime.package_available,
+                'available': ocr_runtime.available,
+                'detail': ocr_runtime.detail,
+            },
         }
     except Exception as e:
         return {
@@ -152,6 +193,7 @@ def run_health_check() -> Dict[str, Any]:
     results = {
         'imports': check_imports(),
         'llm_providers': check_llm_providers(),
+        'vector_search': check_vector_search(),
         'database': check_database(),
         'config': check_config(),
         'agent': check_agent()
@@ -169,6 +211,15 @@ def run_health_check() -> Dict[str, Any]:
         status = "✓" if result['status'] == 'available' else "✗"
         version = f"v{result.get('version', 'N/A')}" if result['status'] == 'available' else 'Not installed'
         print(f"  {status} {name:20s} {version}")
+
+    vector_result = results['vector_search']
+    if vector_result['status'] == 'ok':
+        print(
+            f"\n🔎 向量检索: ✓ FAISS {vector_result.get('version', 'unknown')} "
+            f"({vector_result.get('index', {}).get('count', 0)} vectors)"
+        )
+    else:
+        print(f"\n🔎 向量检索: ✗ {vector_result.get('message', 'unavailable')}")
 
     print("\n💾 数据库:")
     db_result = results['database']
@@ -205,6 +256,7 @@ def run_health_check() -> Dict[str, Any]:
     imports_ok = all(item.get('status') == 'ok' for item in results['imports'].values())
     all_ok = imports_ok and all(
         r.get('status') == 'ok' for r in [
+            results['vector_search'],
             results['database'],
             results['config'],
             results['agent']

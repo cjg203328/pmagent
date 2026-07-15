@@ -3,6 +3,7 @@ Token监控系统 - 实时监控和预算管理
 """
 import json
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta
 from typing import Dict, List
 from pathlib import Path
@@ -21,35 +22,34 @@ class TokenMonitor:
 
     def _init_db(self):
         """初始化数据库"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            cursor = conn.cursor()
 
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS token_usage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            provider TEXT NOT NULL,
-            model TEXT NOT NULL,
-            feature TEXT,
-            input_tokens INTEGER NOT NULL,
-            output_tokens INTEGER NOT NULL,
-            total_tokens INTEGER NOT NULL,
-            cost REAL NOT NULL,
-            latency REAL,
-            session_id TEXT
-        )
-        """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS token_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                feature TEXT,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                total_tokens INTEGER NOT NULL,
+                cost REAL NOT NULL,
+                latency REAL,
+                session_id TEXT
+            )
+            """)
 
-        cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_timestamp ON token_usage(timestamp)
-        """)
+            cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_timestamp ON token_usage(timestamp)
+            """)
 
-        cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_model ON token_usage(model)
-        """)
+            cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_model ON token_usage(model)
+            """)
 
-        conn.commit()
-        conn.close()
+            conn.commit()
 
     def track(self, provider: str, model: str, input_tokens: int,
               output_tokens: int, cost: float, feature: str = None,
@@ -57,50 +57,47 @@ class TokenMonitor:
         """记录Token使用"""
         if input_tokens < 0 or output_tokens < 0 or cost < 0:
             raise ValueError("token counts and cost cannot be negative")
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
 
-        cursor.execute("""
-        INSERT INTO token_usage
-        (timestamp, provider, model, feature, input_tokens, output_tokens,
-         total_tokens, cost, latency, session_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            datetime.now().isoformat(),
-            provider,
-            model,
-            feature,
-            input_tokens,
-            output_tokens,
-            input_tokens + output_tokens,
-            cost,
-            latency,
-            session_id
-        ))
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            cursor = conn.cursor()
 
-        conn.commit()
-        conn.close()
+            cursor.execute("""
+            INSERT INTO token_usage
+            (timestamp, provider, model, feature, input_tokens, output_tokens,
+             total_tokens, cost, latency, session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                datetime.now().isoformat(),
+                provider,
+                model,
+                feature,
+                input_tokens,
+                output_tokens,
+                input_tokens + output_tokens,
+                cost,
+                latency,
+                session_id
+            ))
+
+            conn.commit()
 
     def get_today_stats(self) -> Dict:
         """获取今日统计"""
         today = datetime.now().date()
         yesterday = today - timedelta(days=1)
 
-        conn = sqlite3.connect(self.db_path)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            # 今日数据
+            today_df = pd.read_sql_query(f"""
+            SELECT * FROM token_usage
+            WHERE DATE(timestamp) = '{today}'
+            """, conn)
 
-        # 今日数据
-        today_df = pd.read_sql_query(f"""
-        SELECT * FROM token_usage
-        WHERE DATE(timestamp) = '{today}'
-        """, conn)
-
-        # 昨日数据（用于计算变化）
-        yesterday_df = pd.read_sql_query(f"""
-        SELECT * FROM token_usage
-        WHERE DATE(timestamp) = '{yesterday}'
-        """, conn)
-
-        conn.close()
+            # 昨日数据（用于计算变化）
+            yesterday_df = pd.read_sql_query(f"""
+            SELECT * FROM token_usage
+            WHERE DATE(timestamp) = '{yesterday}'
+            """, conn)
 
         today_tokens = today_df['total_tokens'].sum() if len(today_df) > 0 else 0
         today_cost = today_df['cost'].sum() if len(today_df) > 0 else 0
@@ -123,21 +120,20 @@ class TokenMonitor:
         """按模型统计"""
         start_date = (datetime.now() - timedelta(days=days)).date()
 
-        conn = sqlite3.connect(self.db_path)
-        df = pd.read_sql_query(f"""
-        SELECT
-            model,
-            provider,
-            COUNT(*) as requests,
-            SUM(total_tokens) as tokens,
-            SUM(cost) as cost,
-            AVG(latency) as avg_latency
-        FROM token_usage
-        WHERE DATE(timestamp) >= '{start_date}'
-        GROUP BY model, provider
-        ORDER BY tokens DESC
-        """, conn)
-        conn.close()
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            df = pd.read_sql_query(f"""
+            SELECT
+                model,
+                provider,
+                COUNT(*) as requests,
+                SUM(total_tokens) as tokens,
+                SUM(cost) as cost,
+                AVG(latency) as avg_latency
+            FROM token_usage
+            WHERE DATE(timestamp) >= '{start_date}'
+            GROUP BY model, provider
+            ORDER BY tokens DESC
+            """, conn)
 
         return df.to_dict('records')
 
@@ -145,19 +141,18 @@ class TokenMonitor:
         """按功能统计"""
         start_date = (datetime.now() - timedelta(days=days)).date()
 
-        conn = sqlite3.connect(self.db_path)
-        df = pd.read_sql_query(f"""
-        SELECT
-            COALESCE(feature, '未分类') as feature,
-            COUNT(*) as requests,
-            SUM(total_tokens) as tokens,
-            SUM(cost) as cost
-        FROM token_usage
-        WHERE DATE(timestamp) >= '{start_date}'
-        GROUP BY feature
-        ORDER BY tokens DESC
-        """, conn)
-        conn.close()
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            df = pd.read_sql_query(f"""
+            SELECT
+                COALESCE(feature, '未分类') as feature,
+                COUNT(*) as requests,
+                SUM(total_tokens) as tokens,
+                SUM(cost) as cost
+            FROM token_usage
+            WHERE DATE(timestamp) >= '{start_date}'
+            GROUP BY feature
+            ORDER BY tokens DESC
+            """, conn)
 
         return df.to_dict('records')
 
@@ -165,19 +160,18 @@ class TokenMonitor:
         """获取趋势数据"""
         start_date = (datetime.now() - timedelta(days=days)).date()
 
-        conn = sqlite3.connect(self.db_path)
-        df = pd.read_sql_query(f"""
-        SELECT
-            DATE(timestamp) as date,
-            model,
-            SUM(total_tokens) as tokens,
-            SUM(cost) as cost
-        FROM token_usage
-        WHERE DATE(timestamp) >= '{start_date}'
-        GROUP BY DATE(timestamp), model
-        ORDER BY date, model
-        """, conn)
-        conn.close()
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            df = pd.read_sql_query(f"""
+            SELECT
+                DATE(timestamp) as date,
+                model,
+                SUM(total_tokens) as tokens,
+                SUM(cost) as cost
+            FROM token_usage
+            WHERE DATE(timestamp) >= '{start_date}'
+            GROUP BY DATE(timestamp), model
+            ORDER BY date, model
+            """, conn)
 
         return df
 
@@ -185,19 +179,18 @@ class TokenMonitor:
         """获取小时级使用情况（今日）"""
         today = datetime.now().date()
 
-        conn = sqlite3.connect(self.db_path)
-        df = pd.read_sql_query(f"""
-        SELECT
-            strftime('%H', timestamp) as hour,
-            SUM(total_tokens) as tokens,
-            SUM(cost) as cost,
-            COUNT(*) as requests
-        FROM token_usage
-        WHERE DATE(timestamp) = '{today}'
-        GROUP BY strftime('%H', timestamp)
-        ORDER BY hour
-        """, conn)
-        conn.close()
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            df = pd.read_sql_query(f"""
+            SELECT
+                strftime('%H', timestamp) as hour,
+                SUM(total_tokens) as tokens,
+                SUM(cost) as cost,
+                COUNT(*) as requests
+            FROM token_usage
+            WHERE DATE(timestamp) = '{today}'
+            GROUP BY strftime('%H', timestamp)
+            ORDER BY hour
+            """, conn)
 
         return df.to_dict('records')
 
