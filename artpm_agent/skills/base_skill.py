@@ -10,7 +10,7 @@ import threading
 import time
 
 try:
-    from utils.logger import get_logger
+    from artpm_agent.utils.logger import get_logger
     LOGGER_AVAILABLE = True
 except ImportError:
     LOGGER_AVAILABLE = False

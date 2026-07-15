@@ -5,7 +5,7 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 
 try:
-    from utils.logger import get_logger
+    from artpm_agent.utils.logger import get_logger
     logger = get_logger(__name__)
 except ImportError:
     import logging
@@ -136,7 +136,7 @@ class SmartProgressTracker:
 
         try:
             # 获取项目的所有任务
-            from database.models import Task
+            from artpm_agent.database.models import Task
 
             session = self.db.get_session()
             try:
@@ -314,7 +314,7 @@ class SmartProgressTracker:
 
 # 使用示例
 if __name__ == "__main__":
-    from utils.logger import setup_logging
+    from artpm_agent.utils.logger import setup_logging
     setup_logging()
 
     tracker = SmartProgressTracker()

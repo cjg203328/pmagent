@@ -14,6 +14,7 @@ QA 阈值优先读取 config.qa，缺失时回退到 DEFAULT_QA_CONFIG（不强�
 from typing import Dict, Any, Optional
 
 from .base_skill import BaseSkill
+from .input_schemas import BUILTIN_SKILL_INPUT_SCHEMAS
 
 
 DEFAULT_QA_CONFIG = {
@@ -42,6 +43,7 @@ class QualityControlSkill(BaseSkill):
     description = "美术外包质量把控：提交评审、通过/驳回/返工状态机、质量评分与质检报告"
     version = "1.0"
     requires_llm = False
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def __init__(self, context: Optional[Dict[str, Any]] = None):
         super().__init__(context)

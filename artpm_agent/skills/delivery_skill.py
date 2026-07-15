@@ -12,6 +12,7 @@ Delivery Skill - 产品交付
 from typing import Dict, Any, Optional, List
 
 from .base_skill import BaseSkill
+from .input_schemas import BUILTIN_SKILL_INPUT_SCHEMAS
 
 
 class DeliverySkill(BaseSkill):
@@ -21,6 +22,7 @@ class DeliverySkill(BaseSkill):
     description = "产品交付：交付清单、验收单、交付与版本记录"
     version = "1.0"
     requires_llm = False
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def __init__(self, context: Optional[Dict[str, Any]] = None):
         super().__init__(context)

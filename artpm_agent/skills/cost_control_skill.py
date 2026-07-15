@@ -12,6 +12,7 @@ Cost Control Skill - 成本管控
 from typing import Dict, Any, Optional
 
 from .base_skill import BaseSkill
+from .input_schemas import BUILTIN_SKILL_INPUT_SCHEMAS
 
 
 # 内置默认费率（与 default_config.json 对齐，缺失时回退）
@@ -34,6 +35,7 @@ class CostControlSkill(BaseSkill):
     description = "成本管控：人天成本推导、预算跟踪、超支告警"
     version = "1.0"
     requires_llm = False
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def __init__(self, context: Optional[Dict[str, Any]] = None):
         super().__init__(context)

@@ -13,6 +13,7 @@ Requirements Assessment Skill - 需求评估
 from typing import Dict, Any, List, Optional
 
 from .base_skill import BaseSkill
+from .input_schemas import BUILTIN_SKILL_INPUT_SCHEMAS
 
 
 # 复杂度关键词（按强度分级）。命中即累加评分。
@@ -56,6 +57,7 @@ class RequirementsAssessmentSkill(BaseSkill):
     description = "需求评估增强：资产复杂度判定、需求范围确认清单、报价解析自动建库"
     version = "1.0"
     requires_llm = False
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def __init__(self, context: Optional[Dict[str, Any]] = None):
         super().__init__(context)

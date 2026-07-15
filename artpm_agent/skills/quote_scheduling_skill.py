@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
 from .base_skill import BaseSkill
+from .input_schemas import BUILTIN_SKILL_INPUT_SCHEMAS
 
 
 # 复杂度 → 基准工时（小时）。替换此前写死的 8h 假设。
@@ -57,6 +58,7 @@ class QuoteSchedulingSkill(BaseSkill):
     description = "报价排期：人天估算引擎、排期时间线、里程碑计划"
     version = "1.0"
     requires_llm = False
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     # ── 人天估算 ──
     def estimate_man_days(self, complexity: str, asset_type: Optional[str] = None,

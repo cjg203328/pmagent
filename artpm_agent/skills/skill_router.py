@@ -21,9 +21,10 @@ from .quote_scheduling_skill import QuoteSchedulingSkill
 from .progress_management_skill import ProgressManagementSkill
 from .delivery_skill import DeliverySkill
 from .retrospective_skill import RetrospectiveSkill
-from parsers.excel_parser import ExcelQuoteParser
-from utils.image_validation import MAX_IMAGE_FILE_SIZE, load_validated_image
-from utils.unlimited_ocr import UnlimitedOCRClient
+from .input_schemas import BUILTIN_SKILL_INPUT_SCHEMAS
+from artpm_agent.parsers.excel_parser import ExcelQuoteParser
+from artpm_agent.utils.image_validation import MAX_IMAGE_FILE_SIZE, load_validated_image
+from artpm_agent.utils.unlimited_ocr import UnlimitedOCRClient
 
 
 _REMINDER_DISPATCH_RESULTS: Dict[str, Dict[str, Any]] = {}
@@ -67,6 +68,7 @@ class DocumentClassifierParser(BaseSkill):
     skill_name = "document_classifier_parser"
     description = "智能识别和分类各类业务文档(报价单/排期表/反馈单等),提取结构化数据"
     version = "1.0"
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         file_path = inputs.get("file_path", "")
@@ -133,7 +135,7 @@ class DocumentClassifierParser(BaseSkill):
                 "native_text_pages": page_count - len(blank_page_indices),
                 "pages_requiring_ocr": [index + 1 for index in blank_page_indices],
             }
-            ocr_status = "not_needed" if not blank_page_indices else "disabled"
+            ocr_status = "not_needed" if not blank_page_indices else "unavailable"
             if blank_page_indices:
                 ocr_client = self.context.get("unlimited_ocr_client")
                 if ocr_client is None:
@@ -237,6 +239,10 @@ class DocumentClassifierParser(BaseSkill):
                 "extracted_data": extracted_data,
                 "raw_text": content[:MAX_EXTRACTED_TEXT_CHARS],
                 "ocr_status": ocr_status,
+                "ocr_available": ocr_status == "completed",
+                "requires_vision": bool(
+                    blank_page_indices and ocr_status != "completed"
+                ),
                 "confidence": (
                     None
                     if blank_page_indices
@@ -276,7 +282,7 @@ class DocumentClassifierParser(BaseSkill):
             raw_text = ""
             requires_vision = True
             ocr_available = False
-            ocr_status = "disabled"
+            ocr_status = "unavailable"
             ocr_client = self.context.get("unlimited_ocr_client")
             if ocr_client is None:
                 configured_ocr = self.context.get("unlimited_ocr")
@@ -355,6 +361,7 @@ class QuoteCalculator(BaseSkill):
     skill_name = "quote_calculator"
     description = "基于报价单数据计算利润、毛利率、净利率,进行风险评估"
     version = "1.0"
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         quote_data = inputs.get("quote_data", {})
@@ -448,6 +455,7 @@ class TaskAllocator(BaseSkill):
     skill_name = "task_allocator"
     description = "根据需求环节智能匹配人员,生成任务分配方案"
     version = "1.0"
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         tasks = inputs.get("tasks", [])
@@ -470,6 +478,7 @@ class ProgressTracker(BaseSkill):
     skill_name = "progress_tracker"
     description = "跟踪任务进度,提前预警,记录延期"
     version = "1.0"
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         check_type = inputs.get("check_type", "manual")
@@ -495,6 +504,7 @@ class ReminderBot(BaseSkill):
     description = "生成催办消息预览，不执行外部发送"
     version = "1.0"
     requires_llm = True
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         reminder_type = inputs.get("type", "进度催办")
@@ -546,6 +556,7 @@ class ReminderDispatch(BaseSkill):
     skill_name = "reminder_dispatch"
     description = "发送已批准的催办消息，具有幂等保护且不自动重试"
     version = "1.0"
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def _idempotency_store(self) -> Dict[str, Dict[str, Any]]:
         injected = self.context.get("reminder_dispatch_idempotency_store")

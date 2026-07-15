@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 
 from .base_skill import BaseSkill
+from .input_schemas import BUILTIN_SKILL_INPUT_SCHEMAS
 
 
 _STATUS_ORDER = ["待开始", "进行中", "待审核", "已完成", "已取消"]
@@ -37,6 +38,7 @@ class ProgressManagementSkill(BaseSkill):
     description = "进度管理：里程碑视图、阻塞卡点、每日站会摘要"
     version = "1.0"
     requires_llm = False
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def __init__(self, context: Optional[Dict[str, Any]] = None):
         super().__init__(context)

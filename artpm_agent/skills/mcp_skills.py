@@ -7,7 +7,8 @@ from typing import Dict, Any, List, Optional
 import numpy as np
 import pandas as pd
 from .base_skill import BaseSkill
-from core.mcp_client_enhanced import get_enhanced_mcp_client
+from .input_schemas import BUILTIN_SKILL_INPUT_SCHEMAS
+from artpm_agent.core.mcp_client_enhanced import get_enhanced_mcp_client
 
 
 # ═══════════════════════════════════════════════════════════
@@ -21,6 +22,7 @@ class FileReaderSkill(BaseSkill):
     description = "读取和分析项目文件(Excel, PDF, TXT, CSV等)"
     version = "1.0.0"
     required_tools = ["read_file"]
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def __init__(self, context: Dict[str, Any]):
         super().__init__(context)
@@ -85,6 +87,7 @@ class FileSearchSkill(BaseSkill):
     description = "搜索项目目录中的文件和文档"
     version = "1.0.0"
     required_tools = ["search_files"]
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def __init__(self, context: Dict[str, Any]):
         super().__init__(context)
@@ -149,6 +152,7 @@ class DataAnalyzerSkill(BaseSkill):
     description = "分析结构化数据(Excel, CSV, JSON)"
     version = "1.0.0"
     required_tools = ["analyze_data"]
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def __init__(self, context: Dict[str, Any]):
         super().__init__(context)
@@ -212,6 +216,7 @@ class TrendAnalyzerSkill(BaseSkill):
     description = "分析项目利润、成本、进度等趋势"
     version = "1.0.0"
     required_tools = ["analyze_data"]
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def __init__(self, context: Dict[str, Any]):
         super().__init__(context)
@@ -367,6 +372,7 @@ class ProjectEvaluatorSkill(BaseSkill):
     description = "评估项目的可行性、风险和收益"
     version = "1.0.0"
     required_tools = ["analyze_data", "read_file"]
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def __init__(self, context: Dict[str, Any]):
         super().__init__(context)
@@ -534,7 +540,8 @@ def list_mcp_skills() -> List[Dict[str, Any]]:
         {
             "name": skill_class.skill_name,
             "description": skill_class.description,
-            "version": skill_class.version
+            "version": skill_class.version,
+            "input_schema": skill_class.input_schema,
         }
         for skill_class in MCP_SKILLS.values()
     ]

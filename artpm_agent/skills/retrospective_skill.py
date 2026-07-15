@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List
 
 from .base_skill import BaseSkill
+from .input_schemas import BUILTIN_SKILL_INPUT_SCHEMAS
 
 
 def _to_date(value):
@@ -33,6 +34,7 @@ class RetrospectiveSkill(BaseSkill):
     description = "复盘总结：结项复盘报告、经验教训自动沉淀"
     version = "1.0"
     requires_llm = False
+    input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def __init__(self, context: Optional[Dict[str, Any]] = None):
         super().__init__(context)

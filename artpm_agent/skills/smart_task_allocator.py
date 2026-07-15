@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import math
 
 try:
-    from utils.logger import get_logger
+    from artpm_agent.utils.logger import get_logger
     logger = get_logger(__name__)
 except ImportError:
     import logging
@@ -354,7 +354,7 @@ class SmartTaskAllocator:
 
 # 使用示例
 if __name__ == "__main__":
-    from utils.logger import setup_logging
+    from artpm_agent.utils.logger import setup_logging
     setup_logging()
 
     allocator = SmartTaskAllocator()
