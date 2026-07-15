@@ -8,8 +8,22 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
+from threading import Lock, RLock
 from typing import Any, Iterable, Iterator, Mapping, Optional
 from uuid import uuid4
+
+from .embeddings import DeterministicEmbeddingProvider, EmbeddingProvider
+from .vector_store import VectorStore
+
+
+_VECTOR_LOCKS_GUARD = Lock()
+_VECTOR_SYNC_LOCKS: dict[str, RLock] = {}
+
+
+def _vector_sync_lock(path: Path) -> RLock:
+    key = str(path.resolve())
+    with _VECTOR_LOCKS_GUARD:
+        return _VECTOR_SYNC_LOCKS.setdefault(key, RLock())
 
 
 class KnowledgeProposalConflictError(RuntimeError):
@@ -19,22 +33,55 @@ class KnowledgeProposalConflictError(RuntimeError):
 class WorkspaceKnowledgeStore:
     """Store versioned knowledge without coupling ingestion to a parser or LLM."""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
     DEFAULT_WORKSPACE_ID = "local-default"
     MAX_SEARCHABLE_TEXT_CHARS = 2_000_000
     MAX_SEARCH_LIMIT = 100
     MAX_INGESTION_RESOURCES = 20
     MAX_INGESTION_PAYLOAD_BYTES = 2 * 1024 * 1024
     MAX_AUDIT_PAYLOAD_BYTES = 64 * 1024
+    VECTOR_CHUNK_CHARS = 1200
+    VECTOR_CHUNK_OVERLAP = 200
+    MAX_VECTOR_CHUNKS_PER_RESOURCE = 64
+    VECTOR_MIN_SCORE = 0.08
     RESOURCE_STATUSES = frozenset({"active", "archived"})
     RULE_STATUSES = frozenset({"proposed", "accepted", "rejected", "revoked"})
     CONFIRMER_TYPES = frozenset({"user", "admin"})
 
-    def __init__(self, db_path: str | Path):
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        vector_store_path: str | Path | None = None,
+        embedding_provider: Optional[EmbeddingProvider] = None,
+        enable_vector_search: bool = True,
+    ):
         self.db_path = Path(db_path).expanduser().resolve()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate()
         self._enable_wal()
+        self.embedding_provider = (
+            embedding_provider or DeterministicEmbeddingProvider()
+        )
+        default_vector_path = (
+            self.db_path.parent
+            / "vector_store"
+            / f"{self.db_path.stem}_workspace_knowledge"
+        )
+        self.vector_store_path = Path(
+            vector_store_path or default_vector_path
+        ).expanduser().resolve()
+        self.vector_store = (
+            VectorStore(
+                self.vector_store_path,
+                dimension=self.embedding_provider.dimension,
+                embedding_fingerprint=self.embedding_provider.fingerprint,
+            )
+            if enable_vector_search
+            else None
+        )
+        self._vector_lock = _vector_sync_lock(self.vector_store_path)
+        self.last_search_mode = "not-searched"
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.db_path), timeout=10)
@@ -45,19 +92,21 @@ class WorkspaceKnowledgeStore:
 
     @contextmanager
     def _connection(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
-        connection = self._connect()
+        connection = None
         try:
+            connection = self._connect()
             if write:
                 connection.execute("BEGIN IMMEDIATE")
             yield connection
             if write:
                 connection.commit()
         except Exception:
-            if connection.in_transaction:
+            if connection is not None and connection.in_transaction:
                 connection.rollback()
             raise
         finally:
-            connection.close()
+            if connection is not None:
+                connection.close()
 
     def _enable_wal(self) -> None:
         with self._connection() as connection:
@@ -215,9 +264,64 @@ class WorkspaceKnowledgeStore:
                     (2, self._utc_now()),
                 )
 
+            if current_version < 3:
+                # Phase 2 — 知识炼化字段：置信度/炼化状态/版本覆盖/来源episode/命中时间
+                self._ensure_knowledge_consolidation_columns(connection)
+                connection.execute(
+                    "INSERT INTO knowledge_schema_migrations(version, applied_at) "
+                    "VALUES (?, ?)",
+                    (3, self._utc_now()),
+                )
+
     @staticmethod
     def _utc_now() -> str:
         return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+    @staticmethod
+    def _ensure_knowledge_consolidation_columns(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Add Phase 2 consolidation columns if missing (idempotent)."""
+        resource_cols = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(knowledge_resources)"
+            ).fetchall()
+        }
+        resource_alters = [
+            "ALTER TABLE knowledge_resources "
+            "ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0",
+            "ALTER TABLE knowledge_resources ADD COLUMN consolidation_status "
+            "TEXT NOT NULL DEFAULT 'active' "
+            "CHECK(consolidation_status IN ('active', 'superseded', 'conflict'))",
+            "ALTER TABLE knowledge_resources ADD COLUMN supersedes TEXT",
+            "ALTER TABLE knowledge_resources ADD COLUMN last_hit TEXT",
+        ]
+        for stmt in resource_alters:
+            col = stmt.split("ADD COLUMN ", 1)[1].split(" ", 1)[0]
+            if col not in resource_cols:
+                connection.execute(stmt)
+
+        version_cols = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(knowledge_versions)"
+            ).fetchall()
+        }
+        version_alters = [
+            "ALTER TABLE knowledge_versions ADD COLUMN source_episode TEXT",
+            "ALTER TABLE knowledge_versions ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0",
+        ]
+        for stmt in version_alters:
+            col = stmt.split("ADD COLUMN ", 1)[1].split(" ", 1)[0]
+            if col not in version_cols:
+                connection.execute(stmt)
+
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS "
+            "idx_knowledge_resources_consolidation "
+            "ON knowledge_resources(workspace_id, consolidation_status)"
+        )
 
     @staticmethod
     def _required_text(value: Any, field: str) -> str:
@@ -333,7 +437,7 @@ class WorkspaceKnowledgeStore:
             searchable_text, structured_json, mime_type
         )
         with self._connection(write=True) as connection:
-            return self._ingest_prepared_resource(
+            result = self._ingest_prepared_resource(
                 connection,
                 title=title,
                 searchable_text=searchable_text,
@@ -352,6 +456,8 @@ class WorkspaceKnowledgeStore:
                 content_hash=content_hash,
                 now=self._utc_now(),
             )
+        self._sync_vector_index_best_effort()
+        return result
 
     def _ingest_prepared_resource(
         self,
@@ -587,7 +693,10 @@ class WorkspaceKnowledgeStore:
                 """,
                 (self._utc_now(), resource_id),
             )
-        return cursor.rowcount > 0
+        archived = cursor.rowcount > 0
+        if archived:
+            self._sync_vector_index_best_effort()
+        return archived
 
     def propose_ingestion(
         self,
@@ -932,6 +1041,7 @@ class WorkspaceKnowledgeStore:
 
         if conflict_reason is not None:
             raise KnowledgeProposalConflictError(conflict_reason)
+        self._sync_vector_index_best_effort()
         result = self.get_ingestion_proposal(
             proposal_id, workspace_id=workspace_id
         )
@@ -1483,6 +1593,352 @@ class WorkspaceKnowledgeStore:
             limit=limit,
         )
 
+    # ===== Phase 2: 知识炼化（consolidation）写入接口 =====
+
+    CONSOLIDATION_STATUSES = frozenset(
+        {"active", "superseded", "conflict"}
+    )
+
+    def record_hit(self, resource_id: str) -> bool:
+        """Stamp ``last_hit`` for decay/reinforcement bookkeeping."""
+        resource_id = self._required_text(resource_id, "resource_id")
+        with self._connection(write=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE knowledge_resources
+                SET last_hit = ?, updated_at = updated_at
+                WHERE id = ?
+                """,
+                (self._utc_now(), resource_id),
+            )
+        return cursor.rowcount > 0
+
+    def set_confidence(self, resource_id: str, confidence: float) -> bool:
+        """Set a resource's quality confidence in [0, 1]."""
+        resource_id = self._required_text(resource_id, "resource_id")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            raise ValueError("confidence must be a number")
+        confidence = max(0.0, min(1.0, float(confidence)))
+        with self._connection(write=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE knowledge_resources
+                SET confidence = ?, updated_at = updated_at
+                WHERE id = ?
+                """,
+                (confidence, resource_id),
+            )
+        return cursor.rowcount > 0
+
+    def mark_consolidation_status(
+        self, resource_id: str, status: str
+    ) -> bool:
+        """Mark a resource as active / superseded / conflict."""
+        resource_id = self._required_text(resource_id, "resource_id")
+        status = self._required_text(status, "status")
+        if status not in self.CONSOLIDATION_STATUSES:
+            raise ValueError(
+                f"status must be one of {sorted(self.CONSOLIDATION_STATUSES)}"
+            )
+        with self._connection(write=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE knowledge_resources
+                SET consolidation_status = ?, updated_at = updated_at
+                WHERE id = ?
+                """,
+                (status, resource_id),
+            )
+        return cursor.rowcount > 0
+
+    def set_supersedes(
+        self, resource_id: str, superseded_id: Optional[str]
+    ) -> bool:
+        """Link a newer resource to the one it supersedes."""
+        resource_id = self._required_text(resource_id, "resource_id")
+        superseded_id = self._optional_text(superseded_id, "superseded_id")
+        with self._connection(write=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE knowledge_resources
+                SET supersedes = ?, updated_at = updated_at
+                WHERE id = ?
+                """,
+                (superseded_id, resource_id),
+            )
+        return cursor.rowcount > 0
+
+    def set_source_episode(
+        self,
+        resource_id: str,
+        episode_id: str,
+        version: Optional[int] = None,
+    ) -> bool:
+        """Tag a version with the episode that produced/confirmed it."""
+        resource_id = self._required_text(resource_id, "resource_id")
+        episode_id = self._required_text(episode_id, "episode_id")
+        with self._connection() as connection:
+            if version is None:
+                row = connection.execute(
+                    "SELECT current_version FROM knowledge_resources WHERE id = ?",
+                    (resource_id,),
+                ).fetchone()
+                if row is None:
+                    return False
+                version = int(row["current_version"])
+        with self._connection(write=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE knowledge_versions
+                SET source_episode = ?
+                WHERE resource_id = ? AND version = ?
+                """,
+                (episode_id, resource_id, version),
+            )
+        return cursor.rowcount > 0
+
+    def iter_active_resources(
+        self,
+        *,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        consolidation_status: Optional[str] = None,
+        limit: int = 5000,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield current versions of resources for consolidation scanning."""
+        workspace_id = self._required_text(workspace_id, "workspace_id")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or limit < 1
+        ):
+            raise ValueError("limit must be a positive integer")
+        # Consolidation scans the whole base; allow a larger ceiling than the
+        # public search limit but keep it bounded.
+        limit = min(limit, self.MAX_SEARCH_LIMIT * 50)
+        clauses = ["r.workspace_id = ?", "r.status = 'active'"]
+        params: list[Any] = [workspace_id]
+        if consolidation_status is not None:
+            if consolidation_status not in self.CONSOLIDATION_STATUSES:
+                raise ValueError("unsupported consolidation_status")
+            clauses.append("r.consolidation_status = ?")
+            params.append(consolidation_status)
+        params.append(limit)
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT r.id, r.title, r.resource_type, r.source_type,
+                    r.current_version, r.confidence, r.consolidation_status,
+                    r.supersedes, r.last_hit, r.metadata_json, r.updated_at,
+                    v.content_hash, v.searchable_text, v.source_episode
+                FROM knowledge_resources r
+                JOIN knowledge_versions v
+                  ON v.resource_id = r.id AND v.version = r.current_version
+                WHERE {' AND '.join(clauses)}
+                ORDER BY r.updated_at DESC LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        for row in rows:
+            yield {
+                "id": row["id"],
+                "title": row["title"],
+                "resource_type": row["resource_type"],
+                "source_type": row["source_type"],
+                "current_version": int(row["current_version"]),
+                "confidence": float(row["confidence"]),
+                "consolidation_status": row["consolidation_status"],
+                "supersedes": row["supersedes"],
+                "last_hit": row["last_hit"],
+                "updated_at": row["updated_at"],
+                "metadata": self._decode_json(row["metadata_json"], {}),
+                "content_hash": row["content_hash"],
+                "searchable_text": row["searchable_text"],
+                "source_episode": row["source_episode"],
+            }
+
+    def vector_status(self) -> dict[str, Any]:
+        """Return a user-safe summary of the knowledge vector backend."""
+        if self.vector_store is None:
+            return {
+                "available": False,
+                "count": 0,
+                "last_search_mode": self.last_search_mode,
+                "last_error": "vector search disabled",
+            }
+        status = self.vector_store.status()
+        status["last_search_mode"] = self.last_search_mode
+        return status
+
+    def rebuild_vector_index(self) -> dict[str, Any]:
+        """Rebuild all active current-version resource chunks."""
+        self._sync_vector_index(force=True)
+        return self.vector_status()
+
+    def _sync_vector_index(self, *, force: bool = False) -> None:
+        vector_store = self.vector_store
+        if vector_store is None or not vector_store.available:
+            return
+        with self._vector_lock:
+            current = {
+                item["id"]: item["metadata"]
+                for item in vector_store.list_entries()
+            }
+            with self._connection() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT r.id, r.workspace_id, r.title, r.resource_type,
+                        r.source_type, r.current_version, v.content_hash,
+                        v.searchable_text, v.structured_data_json
+                    FROM knowledge_resources r
+                    JOIN knowledge_versions v
+                      ON v.resource_id = r.id AND v.version = r.current_version
+                    WHERE r.status = 'active'
+                    ORDER BY r.workspace_id, r.id
+                    """
+                ).fetchall()
+            specs = self._vector_specs(rows)
+            desired = {item["id"]: item["metadata"] for item in specs}
+            if force or vector_store.needs_rebuild:
+                vector_store.replace(
+                    [self._embedded_vector_entry(item) for item in specs]
+                )
+                return
+
+            changed = [
+                item for item in specs
+                if current.get(item["id"]) != item["metadata"]
+            ]
+            removed_ids = set(current) - set(desired)
+            if changed or removed_ids:
+                vector_store.sync(
+                    [self._embedded_vector_entry(item) for item in changed],
+                    delete_ids=removed_ids,
+                )
+
+    def _sync_vector_index_best_effort(self) -> None:
+        """Keep committed knowledge authoritative when the derived index fails."""
+        try:
+            self._sync_vector_index()
+        except Exception as error:
+            if self.vector_store is not None:
+                self.vector_store.needs_rebuild = True
+                self.vector_store.last_error = f"knowledge vector sync pending: {error}"
+
+    def _vector_specs(
+        self, rows: Iterable[sqlite3.Row]
+    ) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        for row in rows:
+            structured_text = (
+                row["structured_data_json"]
+                if row["structured_data_json"] != "null"
+                else ""
+            )
+            body = "\n".join(
+                part
+                for part in (
+                    str(row["title"]),
+                    str(row["searchable_text"]),
+                    structured_text,
+                )
+                if part.strip()
+            )
+            chunks = self._chunk_vector_text(body)
+            for chunk_index, chunk_text in enumerate(chunks):
+                logical_id = (
+                    f"knowledge:{row['workspace_id']}:{row['id']}:"
+                    f"v{int(row['current_version'])}:c{chunk_index}"
+                )
+                metadata = {
+                    "resource_id": row["id"],
+                    "workspace_id": row["workspace_id"],
+                    "current_version": int(row["current_version"]),
+                    "content_hash": row["content_hash"],
+                    "title": row["title"],
+                    "resource_type": row["resource_type"],
+                    "source_type": row["source_type"],
+                    "chunk_index": chunk_index,
+                    "chunk_text": chunk_text,
+                }
+                entries.append(
+                    {
+                        "id": logical_id,
+                        "text": chunk_text,
+                        "metadata": metadata,
+                    }
+                )
+        return entries
+
+    def _embedded_vector_entry(
+        self, item: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return {
+            "id": item["id"],
+            "vector": self.embedding_provider.embed(str(item["text"])),
+            "metadata": item["metadata"],
+        }
+
+    @classmethod
+    def _chunk_vector_text(cls, text: str) -> list[str]:
+        normalized = "\n".join(
+            line.strip() for line in str(text).splitlines() if line.strip()
+        )
+        if not normalized:
+            return []
+        chunks = []
+        start = 0
+        while start < len(normalized) and len(chunks) < cls.MAX_VECTOR_CHUNKS_PER_RESOURCE:
+            end = min(len(normalized), start + cls.VECTOR_CHUNK_CHARS)
+            if end < len(normalized):
+                boundary = normalized.rfind("\n", start, end)
+                if boundary <= start + cls.VECTOR_CHUNK_CHARS // 2:
+                    boundary = normalized.rfind("。", start, end)
+                if boundary > start + cls.VECTOR_CHUNK_CHARS // 2:
+                    end = boundary + 1
+            chunk = normalized[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            if end >= len(normalized):
+                break
+            start = max(end - cls.VECTOR_CHUNK_OVERLAP, start + 1)
+        return chunks
+
+    def _search_vectors(
+        self,
+        query: str,
+        *,
+        workspace_id: str,
+        limit: int,
+        resource_types: frozenset[str],
+        source_types: frozenset[str],
+    ) -> list[dict[str, Any]]:
+        vector_store = self.vector_store
+        if vector_store is None or not vector_store.available:
+            return []
+        self._sync_vector_index()
+        filters: dict[str, Any] = {"workspace_id": workspace_id}
+        if resource_types:
+            filters["resource_type"] = resource_types
+        if source_types:
+            filters["source_type"] = source_types
+        query_vector = self.embedding_provider.embed(query)
+        candidate_k = min(vector_store.count, max(32, limit * 8))
+        while candidate_k > 0:
+            matches = vector_store.search(
+                query_vector,
+                top_k=candidate_k,
+                filters=filters,
+            )
+            resource_ids = {
+                (item.get("metadata") or {}).get("resource_id")
+                for item in matches
+                if (item.get("metadata") or {}).get("resource_id")
+            }
+            if len(resource_ids) >= limit or candidate_k >= vector_store.count:
+                return matches
+            candidate_k = min(vector_store.count, candidate_k * 2)
+        return []
+
     def search(
         self,
         query: str,
@@ -1493,6 +1949,8 @@ class WorkspaceKnowledgeStore:
         source_types: Optional[Iterable[str]] = None,
         include_rules: bool = True,
         max_text_chars: int = 4000,
+        use_confidence: bool = False,
+        confidence_floor: float = 0.0,
     ) -> list[dict[str, Any]]:
         """Search current active resource versions and accepted rules."""
         query = self._required_text(query, "query")
@@ -1504,52 +1962,120 @@ class WorkspaceKnowledgeStore:
             or not 100 <= max_text_chars <= 20_000
         ):
             raise ValueError("max_text_chars must be between 100 and 20000")
+        if (
+            isinstance(confidence_floor, bool)
+            or not isinstance(confidence_floor, (int, float))
+            or not 0.0 <= confidence_floor <= 1.0
+        ):
+            raise ValueError("confidence_floor must be between 0 and 1")
         resource_type_filter = self._normalized_filter(
             resource_types, "resource_types"
         )
         source_type_filter = self._normalized_filter(source_types, "source_types")
 
+        resource_sql = """
+            SELECT r.*, v.version AS v_version, v.content_hash,
+                v.searchable_text, v.mime_type,
+                v.source_uri AS version_source_uri,
+                v.source_id AS version_source_id,
+                v.structured_data_json,
+                v.metadata_json AS version_metadata_json,
+                v.created_by, v.change_note, v.created_at AS version_created_at
+            FROM knowledge_resources r
+            JOIN knowledge_versions v
+                ON v.resource_id = r.id AND v.version = r.current_version
+            WHERE r.workspace_id = ? AND r.status = 'active'
+        """
+        resource_params: list[Any] = [workspace_id]
+        if resource_type_filter:
+            placeholders = ", ".join("?" for _ in resource_type_filter)
+            resource_sql += f" AND r.resource_type IN ({placeholders})"
+            resource_params.extend(resource_type_filter)
+        if source_type_filter:
+            placeholders = ", ".join("?" for _ in source_type_filter)
+            resource_sql += f" AND r.source_type IN ({placeholders})"
+            resource_params.extend(source_type_filter)
+        resource_sql += " ORDER BY r.updated_at DESC LIMIT 2000"
+
         with self._connection() as connection:
-            resource_rows = connection.execute(
-                """
-                SELECT r.*, v.version AS v_version, v.content_hash,
-                    v.searchable_text, v.mime_type,
-                    v.source_uri AS version_source_uri,
-                    v.source_id AS version_source_id,
-                    v.structured_data_json,
-                    v.metadata_json AS version_metadata_json,
-                    v.created_by, v.change_note, v.created_at AS version_created_at
-                FROM knowledge_resources r
-                JOIN knowledge_versions v
-                    ON v.resource_id = r.id AND v.version = r.current_version
-                WHERE r.workspace_id = ? AND r.status = 'active'
-                ORDER BY r.updated_at DESC
-                LIMIT 2000
-                """,
-                (workspace_id,),
-            ).fetchall()
+            resource_rows = connection.execute(resource_sql, resource_params).fetchall()
+            rule_sql = (
+                "SELECT * FROM knowledge_rules "
+                "WHERE workspace_id = ? AND status = 'accepted'"
+            )
+            rule_params: list[Any] = [workspace_id]
+            # Pre-filter accepted rules by a literal query match so the LIMIT
+            # applies to already-relevant rows instead of silently dropping
+            # older-but-matching rules (the Python scorer only keeps
+            # score > 0, so any statement lacking a query term is dead weight).
+            like_terms = [
+                term
+                for term in dict.fromkeys([query.strip(), *query.strip().split()])
+                if term
+            ]
+            if like_terms:
+                escape_char = "\\"
+                like_clauses: list[str] = []
+                for term in like_terms:
+                    safe = (
+                        term.replace(escape_char, escape_char + escape_char)
+                        .replace("%", escape_char + "%")
+                        .replace("_", escape_char + "_")
+                    )
+                    like_clauses.append("statement LIKE ? ESCAPE ?")
+                    rule_params.append(f"%{safe}%")
+                    rule_params.append(escape_char)
+                rule_sql += " AND (" + " OR ".join(like_clauses) + ")"
+            rule_sql += " ORDER BY updated_at DESC LIMIT 1000"
             rule_rows = (
-                connection.execute(
-                    """
-                    SELECT * FROM knowledge_rules
-                    WHERE workspace_id = ? AND status = 'accepted'
-                    ORDER BY updated_at DESC LIMIT 1000
-                    """,
-                    (workspace_id,),
-                ).fetchall()
+                connection.execute(rule_sql, rule_params).fetchall()
                 if include_rules
                 else []
             )
 
-        results = []
-        for row in resource_rows:
+        eligible_rows = {
+            row["id"]: row
+            for row in resource_rows
             if (
-                resource_type_filter
-                and row["resource_type"] not in resource_type_filter
-            ):
+                not resource_type_filter
+                or row["resource_type"] in resource_type_filter
+            )
+            and (
+                not source_type_filter
+                or row["source_type"] in source_type_filter
+            )
+        }
+        vector_hits: list[dict[str, Any]] = []
+        vector_available = bool(
+            self.vector_store is not None and self.vector_store.available
+        )
+        if vector_available and eligible_rows:
+            try:
+                vector_hits = self._search_vectors(
+                    query,
+                    workspace_id=workspace_id,
+                    limit=limit,
+                    resource_types=resource_type_filter,
+                    source_types=source_type_filter,
+                )
+                self.last_search_mode = "vector"
+            except Exception as error:
+                self.last_search_mode = "literal-fallback"
+                if self.vector_store is not None:
+                    self.vector_store.last_error = f"knowledge search failed: {error}"
+        else:
+            self.last_search_mode = (
+                "vector" if vector_available else "literal-fallback"
+            )
+
+        results_by_id: dict[str, dict[str, Any]] = {}
+        for hit in vector_hits:
+            metadata = hit.get("metadata") or {}
+            resource_id = metadata.get("resource_id")
+            row = eligible_rows.get(resource_id)
+            if row is None:
                 continue
-            if source_type_filter and row["source_type"] not in source_type_filter:
-                continue
+            vector_score = float(hit.get("score", 0.0))
             haystack = "\n".join(
                 [
                     row["title"],
@@ -1558,18 +2084,67 @@ class WorkspaceKnowledgeStore:
                     row["structured_data_json"],
                 ]
             )
-            score = self._literal_score(query, haystack)
-            if score <= 0:
+            literal_score = self._literal_score(query, haystack)
+            if vector_score < self.VECTOR_MIN_SCORE and literal_score <= 0:
+                continue
+            current = results_by_id.get(resource_id)
+            if current is not None and current["vector_score"] >= vector_score:
                 continue
             record = self._joined_resource_record(row)
-            record.update({
-                "record_type": "resource",
-                "score": score,
-                "text": self._excerpt(
-                    row["searchable_text"], query, max_text_chars
-                ),
-            })
-            results.append(record)
+            chunk_text = str(metadata.get("chunk_text") or row["searchable_text"])
+            record.update(
+                {
+                    "record_type": "resource",
+                    "retrieval_mode": "vector",
+                    "vector_score": vector_score,
+                    "literal_score": literal_score,
+                    "score": vector_score + min(literal_score, 10.0) * 0.1,
+                    "text": self._excerpt(chunk_text, query, max_text_chars),
+                }
+            )
+            results_by_id[resource_id] = record
+
+        # Exact matching supplements FAISS and is the explicit compatibility
+        # fallback when the native extension cannot be loaded.
+        for resource_id, row in eligible_rows.items():
+            haystack = "\n".join(
+                [
+                    row["title"],
+                    row["searchable_text"],
+                    row["source_uri"] or "",
+                    row["structured_data_json"],
+                ]
+            )
+            literal_score = self._literal_score(query, haystack)
+            if literal_score <= 0:
+                continue
+            existing = results_by_id.get(resource_id)
+            if existing is not None:
+                existing["literal_score"] = literal_score
+                existing["score"] = float(existing["vector_score"]) + min(
+                    literal_score, 10.0
+                ) * 0.1
+                continue
+            record = self._joined_resource_record(row)
+            record.update(
+                {
+                    "record_type": "resource",
+                    "retrieval_mode": (
+                        "literal-supplement"
+                        if vector_available
+                        else "literal-fallback"
+                    ),
+                    "vector_score": None,
+                    "literal_score": literal_score,
+                    "score": min(literal_score, 10.0) * 0.1,
+                    "text": self._excerpt(
+                        row["searchable_text"], query, max_text_chars
+                    ),
+                }
+            )
+            results_by_id[resource_id] = record
+
+        results = list(results_by_id.values())
 
         if include_rules and (not resource_type_filter or "rule" in resource_type_filter):
             for row in rule_rows:
@@ -1579,11 +2154,25 @@ class WorkspaceKnowledgeStore:
                 record = self._rule_record(row)
                 record.update({
                     "record_type": "rule",
-                    "score": score,
+                    "retrieval_mode": "accepted-rule",
+                    "literal_score": score,
+                    "score": min(score, 10.0) * 0.1,
                     "text": row["statement"],
                     "title": "已采纳规则",
                 })
                 results.append(record)
+
+        if use_confidence:
+            weighted: list[dict[str, Any]] = []
+            for item in results:
+                conf = float(item.get("confidence", 1.0))
+                if conf < confidence_floor:
+                    continue
+                item = dict(item)
+                item["score"] = float(item.get("score", 0.0)) * conf
+                item["confidence_weighted"] = True
+                weighted.append(item)
+            results = weighted
 
         results.sort(
             key=lambda item: (item["score"], item["updated_at"], item["id"]),
@@ -1697,6 +2286,10 @@ class WorkspaceKnowledgeStore:
             "metadata": cls._decode_json(resource_row["metadata_json"], {}),
             "created_at": resource_row["created_at"],
             "updated_at": resource_row["updated_at"],
+            "confidence": float(resource_row["confidence"]),
+            "consolidation_status": resource_row["consolidation_status"],
+            "supersedes": resource_row["supersedes"],
+            "last_hit": resource_row["last_hit"],
             "version": cls._version_record(version_row),
         }
 
@@ -1717,6 +2310,10 @@ class WorkspaceKnowledgeStore:
             "metadata": cls._decode_json(row["metadata_json"], {}),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            "confidence": float(row["confidence"]),
+            "consolidation_status": row["consolidation_status"],
+            "supersedes": row["supersedes"],
+            "last_hit": row["last_hit"],
             "version": {
                 "version": int(row["v_version"]),
                 "content_hash": row["content_hash"],
@@ -1756,6 +2353,8 @@ class WorkspaceKnowledgeStore:
             "created_by": row["created_by"],
             "change_note": row["change_note"],
             "created_at": row["created_at"],
+            "source_episode": row["source_episode"],
+            "confidence": float(row["confidence"]),
         }
 
     @classmethod

@@ -1,18 +1,26 @@
 """
 Memory Manager - Unified interface for short-term and long-term memory
 """
+from hashlib import sha256
 import json
 from typing import Dict, Any, List, Optional
 
-from memory.sqlite_manager import SQLiteManager
-from memory.vector_store import VectorStore
-from utils import generate_uuid
+from artpm_agent.memory.embeddings import DeterministicEmbeddingProvider, EmbeddingProvider
+from artpm_agent.memory.sqlite_manager import SQLiteManager
+from artpm_agent.memory.vector_store import VectorStore
+from artpm_agent.utils import generate_uuid
 
 
 class MemoryManager:
     """Memory Manager for ArtPM Agent"""
 
-    def __init__(self, db_path: str, vector_db_path: str, llm_client=None):
+    def __init__(
+        self,
+        db_path: str,
+        vector_db_path: str,
+        llm_client=None,
+        embedding_provider: Optional[EmbeddingProvider] = None,
+    ):
         """
         Initialize memory manager
 
@@ -21,9 +29,17 @@ class MemoryManager:
             vector_db_path: Vector store path
             llm_client: LLM client for generating embeddings
         """
+        self.embedding_provider = (
+            embedding_provider or DeterministicEmbeddingProvider()
+        )
         self.db = SQLiteManager(db_path)
-        self.vector_db = VectorStore(vector_db_path)
+        self.vector_db = VectorStore(
+            vector_db_path,
+            dimension=self.embedding_provider.dimension,
+            embedding_fingerprint=self.embedding_provider.fingerprint,
+        )
         self.llm_client = llm_client
+        self._sync_vector_index()
 
     def save_document(self, doc_data: Dict[str, Any]) -> str:
         """
@@ -50,23 +66,15 @@ class MemoryManager:
         })
 
         # Generate embedding and save to vector store
-        if self.vector_db.index is not None:
+        if self.vector_db.available:
             try:
                 embedding_text = self._build_embedding_text(doc_data)
                 embedding = self._get_embedding(embedding_text)
 
-                extracted = doc_data.get("extracted_data", {})
-                project_info = extracted.get("project_info", {})
-
                 self.vector_db.add(
                     id=doc_id,
                     vector=embedding,
-                    metadata={
-                        "document_type": doc_data.get("document_type", "unknown"),
-                        "project_name": project_info.get("project_name", ""),
-                        "client_name": project_info.get("client_name", ""),
-                        "date": project_info.get("document_date", "")
-                    }
+                    metadata=self._vector_metadata(doc_data, embedding_text),
                 )
             except Exception as e:
                 print(f"[Warning] Failed to create vector embedding: {e}")
@@ -88,7 +96,7 @@ class MemoryManager:
         results = []
 
         # Vector search if available
-        if self.vector_db.index:
+        if self.vector_db.available:
             try:
                 query_embedding = self._get_embedding(query)
                 vector_results = self.vector_db.search(query_embedding, top_k=top_k * 2)
@@ -216,6 +224,81 @@ class MemoryManager:
 
         return " ".join(parts)
 
+    def _sync_vector_index(self) -> None:
+        """Reconcile persisted documents after FAISS installation or rebuild."""
+        if not self.vector_db.available:
+            return
+        current = {
+            item["id"]: item["metadata"]
+            for item in self.vector_db.list_entries()
+        }
+        documents = self.db.query("documents", {})
+        specs = []
+        for document in documents:
+            embedding_text = self._build_embedding_text(document)
+            specs.append(
+                {
+                    "id": document["id"],
+                    "text": embedding_text,
+                    "metadata": self._vector_metadata(document, embedding_text),
+                }
+            )
+        desired = {item["id"]: item["metadata"] for item in specs}
+        if self.vector_db.needs_rebuild:
+            self.vector_db.replace(
+                [
+                    {
+                        "id": item["id"],
+                        "vector": self._get_embedding(item["text"]),
+                        "metadata": item["metadata"],
+                    }
+                    for item in specs
+                ]
+            )
+            return
+        changed = [
+            item for item in specs
+            if current.get(item["id"]) != item["metadata"]
+        ]
+        removed_ids = set(current) - set(desired)
+        if changed or removed_ids:
+            self.vector_db.sync(
+                [
+                    {
+                        "id": item["id"],
+                        "vector": self._get_embedding(item["text"]),
+                        "metadata": item["metadata"],
+                    }
+                    for item in changed
+                ],
+                delete_ids=removed_ids,
+            )
+
+    @staticmethod
+    def _vector_metadata(
+        doc_data: Dict[str, Any], embedding_text: str
+    ) -> Dict[str, Any]:
+        extracted = doc_data.get("extracted_data", {})
+        if isinstance(extracted, str):
+            try:
+                extracted = json.loads(extracted)
+            except json.JSONDecodeError:
+                extracted = {}
+        project_info = (
+            extracted.get("project_info", {})
+            if isinstance(extracted, dict)
+            else {}
+        )
+        return {
+            "document_type": doc_data.get("document_type", "unknown"),
+            "project_name": project_info.get("project_name", ""),
+            "client_name": project_info.get("client_name", ""),
+            "date": project_info.get("document_date", ""),
+            "embedding_hash": sha256(
+                embedding_text.encode("utf-8")
+            ).hexdigest(),
+        }
+
     def _get_embedding(self, text: str) -> List[float]:
         """
         Get embedding vector for text using deterministic feature hashing.
@@ -233,35 +316,4 @@ class MemoryManager:
         Returns:
             Embedding vector as list of floats
         """
-        import hashlib
-        import struct
-
-        dim = 1536
-        # Normalize text
-        text = text.lower().strip()
-        if not text:
-            return [0.0] * dim
-
-        # Extract character n-grams (n=3,4,5) for better coverage
-        vector = [0.0] * dim
-        total_weight = 0.0
-
-        for n in (3, 4, 5):
-            for i in range(len(text) - n + 1):
-                ngram = text[i:i + n]
-                # Hash ngram to determine position and sign
-                h = hashlib.md5(ngram.encode('utf-8')).digest()
-                # Use first 8 bytes as two u32 ints: position and sign
-                pos, sign_val = struct.unpack('<II', h[:8])
-                idx = pos % dim
-                sign = 1.0 if (sign_val & 1) else -1.0
-                vector[idx] += sign
-                total_weight += 1.0
-
-        # L2-normalize
-        if total_weight > 0:
-            norm = sum(v * v for v in vector) ** 0.5
-            if norm > 0:
-                vector = [v / norm for v in vector]
-
-        return vector
+        return self.embedding_provider.embed(text)
