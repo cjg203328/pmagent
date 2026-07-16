@@ -188,6 +188,18 @@ class UnifiedMCPClient:
 
         return asyncio.run(self.call_skill(tool_name, params))
 
+    def close(self) -> None:
+        """关闭所有后端持有的长连接（stdio 后台线程 / npx 子进程）。幂等。"""
+        remote = self._remote
+        if remote is not None and hasattr(remote, "close"):
+            try:
+                remote.close()
+            except Exception:  # pragma: no cover - 防御性兜底
+                pass
+        self._remote = None
+        self._remote_failed = False
+        self._enhanced = None
+
     def get_skills_summary(self) -> str:
         """生成提示词可用的技能摘要（聚合两个后端）。"""
         lines: List[str] = []
@@ -237,4 +249,10 @@ def get_unified_mcp_client(
 def reset_unified_mcp_client() -> None:
     """清除统一客户端全局单例，下次 get_unified_mcp_client() 会重新初始化（读取最新环境变量）。"""
     global _unified_mcp_client
+    old = _unified_mcp_client
     _unified_mcp_client = None
+    if old is not None:
+        try:
+            old.close()
+        except Exception:  # pragma: no cover - 防御性兜底
+            pass
