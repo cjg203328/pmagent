@@ -438,12 +438,28 @@ def load_active_messages():
     return st.session_state.messages
 def activate_conversation(conversation_id):
     store = get_conversation_store()
-    if store is None or store.get_conversation(conversation_id) is None:
-        raise KeyError(f"未知会话: {conversation_id}")
+    if store is None:
+        logger.error("activate_conversation 失败: conversation_store 未初始化")
+        st.error("会话系统未就绪，请刷新页面重试")
+        return
+    try:
+        conversation = store.get_conversation(conversation_id)
+    except Exception as exc:
+        logger.error("activate_conversation 查询失败: %s", exc)
+        st.error(f"切换会话失败: {exc}")
+        return
+    if conversation is None:
+        logger.error("activate_conversation: 会话不存在 %s", conversation_id)
+        st.error("目标会话不存在，可能已被删除")
+        return
     st.session_state.active_conversation_id = conversation_id
     st.session_state.view = "对话"
     st.session_state.pop("pending_prompt", None)
+    # 离开编辑模式（如有），避免新会话残留旧编辑状态
+    st.session_state.pop("edit_mode", None)
     load_active_messages()
+    # 同步 messages_loaded_for，避免 _init_session_state 重复加载
+    st.session_state.messages_loaded_for = conversation_id
 def delete_conversation_and_activate_next(store, conversation_id):
     """Delete one conversation and keep the workspace on a valid active thread."""
     attachment_store = get_chat_attachment_store()
@@ -644,9 +660,16 @@ def render_conversation_sidebar():
             use_container_width=True,
             disabled=request_pending,
         ):
-            conversation = store.create_conversation()
-            activate_conversation(conversation["id"])
-            st.rerun()
+            try:
+                conversation = store.create_conversation()
+                activate_conversation(conversation["id"])
+                st.rerun()
+            except KeyError as exc:
+                logger.error("新建会话失败(workspace/DB): %s", exc)
+                st.error(f"新建会话失败: {exc}。请检查数据库状态或刷新页面。")
+            except Exception as exc:
+                logger.exception("新建会话异常")
+                st.error(f"新建会话时出错，请重试。({exc})")
 
         # 30 秒内的重复 rerun 复用缓存，避免高频刷新反复打库。
         _conv_cache = st.session_state.get("_conv_list_cache")
@@ -880,6 +903,40 @@ def _read_artifact_bytes(root, stored_path, max_size):
     return path.read_bytes()
 
 
+def _fmt_size(num_bytes):
+    """把字节数格式化为人类可读的字符串（B / KB / MB）。"""
+    if not isinstance(num_bytes, int) or num_bytes <= 0:
+        return ""
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    if num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.1f} KB"
+    return f"{num_bytes / (1024 * 1024):.1f} MB"
+
+
+def _artifact_subtitle(artifact):
+    """生成卡片头部右侧的元信息：行/列、段落数、文件大小。"""
+    fmt = str(artifact.get("format") or "").lower()
+    parts = []
+    if fmt == "xlsx":
+        rows = artifact.get("rows")
+        cols = artifact.get("columns")
+        if rows is not None and cols is not None:
+            parts.append(f"{rows} 行 · {cols} 列")
+        elif rows is not None:
+            parts.append(f"{rows} 行")
+    elif fmt == "docx":
+        paras = artifact.get("paragraphs")
+        if paras is not None:
+            parts.append(f"{paras} 段")
+    size = _fmt_size(artifact.get("size"))
+    if size:
+        parts.append(size)
+    if not parts and fmt:
+        parts.append(fmt.upper())
+    return " · ".join(parts)
+
+
 def _render_message_artifacts(metadata, message_key):
     generator = get_artifact_generator()
     artifacts = metadata.get("artifacts", []) if isinstance(metadata, dict) else []
@@ -907,121 +964,183 @@ def _render_message_artifacts(metadata, message_key):
         except (OSError, ValueError):
             logger.warning("忽略无效的生成文件记录: %s", stored_path)
             continue
-        st.download_button(
-            f"下载 {name}",
-            data=data,
-            file_name=name,
-            mime=artifact.get("mime_type") or "application/octet-stream",
-            key=f"artifact_{message_key}_{index}_{artifact.get('id', '')}",
-            icon=":material/download:",
-        )
-        preview_markdown = str(artifact.get("preview_markdown") or "").strip()
-        if not preview_markdown:
-            try:
-                preview = generator.preview_artifact(stored_path, max_chars=4000)
-                preview_markdown = str(preview.get("preview_markdown") or "").strip()
-            except (OSError, ValueError, RuntimeError):
-                preview_markdown = ""
-        if preview_markdown:
-            with st.expander(f"预览 {name}", expanded=False):
-                st.markdown(preview_markdown)
 
-        export_formats = artifact.get("export_formats")
-        if not isinstance(export_formats, list):
-            export_formats = generator.available_export_formats(
-                str(artifact.get("format") or "")
+        # ── Kimi 风格文件产物卡片 ──
+        with st.container():
+            # 锚点：供全局 CSS 选中该卡片并套用 Kimi 卡片样式
+            st.markdown('<span class="pm-artifact-anchor"></span>', unsafe_allow_html=True)
+
+            # 卡片头部：类型图标 + 文件名 + 元信息（行/列/大小）
+            fmt = str(artifact.get("format") or "").lower()
+            icon = {
+                "xlsx": "📊", "csv": "📋", "docx": "📄",
+                "md": "📝", "txt": "📃",
+            }.get(fmt, "📁")
+            head_html = (
+                '<div class="pm-artifact-head">'
+                f'<div class="pm-artifact-icon">{icon}</div>'
+                '<div class="pm-artifact-meta">'
+                f'<div class="pm-artifact-name" title="{escape(name)}">{escape(name)}</div>'
+                f'<div class="pm-artifact-sub">{escape(_artifact_subtitle(artifact))}</div>'
+                '</div></div>'
             )
-        export_formats = [
-            str(item).lower()
-            for item in export_formats
-            if str(item).lower() in {"csv", "docx", "md", "txt", "xlsx"}
-            and str(item).lower() != str(artifact.get("format") or "").lower()
-        ][:4]
-        if export_formats:
-            export_columns = st.columns(len(export_formats), gap="small")
-            for export_index, target_format in enumerate(export_formats):
-                with export_columns[export_index]:
-                    try:
-                        exported = generator.export_artifact_bytes(
-                            stored_path,
-                            target_format,
-                        )
-                    except (OSError, ValueError, RuntimeError):
-                        continue
-                    st.download_button(
-                        f"保存为 {target_format.upper()}",
-                        data=exported["data"],
-                        file_name=exported["filename"],
-                        mime=exported["mime_type"],
-                        key=(
-                            f"artifact_export_{message_key}_{index}_"
-                            f"{artifact.get('id', '')}_{target_format}"
-                        ),
-                        icon=":material/save_alt:",
-                        use_container_width=True,
-                    )
+            st.markdown(head_html, unsafe_allow_html=True)
 
-        coordinator = get_artifact_coordinator()
-        if coordinator is None:
-            continue
-        source_format = str(artifact.get("format") or "").lower()
-        if source_format not in {"xlsx", "docx"}:
-            continue
-        edit_state_key = (
-            f"artifact_edit_result_{message_key}_{index}_{artifact.get('id', '')}"
-        )
-        edit_result = st.session_state.get(edit_state_key)
-        if isinstance(edit_result, dict):
-            if edit_result.get("artifact"):
-                edited = edit_result["artifact"]
-                st.success(edit_result.get("message") or "已生成编辑版本。")
+            # 计算预览内容（docx 走 markdown；xlsx 优先渲染真正表格）
+            preview_markdown = str(artifact.get("preview_markdown") or "").strip()
+            if not preview_markdown:
                 try:
-                    edited_data = _read_artifact_bytes(
-                        generator.root,
-                        edited["stored_path"],
-                        generator.max_file_size,
-                    )
-                except (KeyError, OSError, ValueError):
-                    edited_data = None
-                if edited_data is not None:
-                    st.download_button(
-                        f"下载 {edited.get('name', '编辑版本')}",
-                        data=edited_data,
-                        file_name=edited.get("name", "edited-artifact"),
-                        mime=edited.get("mime_type") or "application/octet-stream",
-                        key=f"artifact_edit_download_{message_key}_{index}",
-                        icon=":material/download:",
-                    )
-            elif edit_result.get("message"):
-                st.warning(edit_result["message"])
+                    preview = generator.preview_artifact(stored_path, max_chars=4000)
+                    preview_markdown = str(preview.get("preview_markdown") or "").strip()
+                except (OSError, ValueError, RuntimeError):
+                    preview_markdown = ""
 
-        with st.expander("一句话编辑", expanded=False):
-            instruction = st.text_input(
-                "编辑要求",
-                key=f"artifact_edit_input_{message_key}_{index}_{artifact.get('id', '')}",
-                placeholder="例如：把金额列改成美元，并新增风险说明",
+            # 主操作行：下载 + 预览并排（对标 Kimi）
+            preview_open_key = (
+                f"preview_open_{message_key}_{index}_{artifact.get('id', '')}"
             )
-            target_options = [source_format]
-            if source_format == "xlsx":
-                target_options.append("docx")
-            target_format = st.selectbox(
-                "保存格式",
-                target_options,
-                key=f"artifact_edit_format_{message_key}_{index}_{artifact.get('id', '')}",
-            )
-            if st.button(
-                "生成新版本",
-                key=f"artifact_edit_submit_{message_key}_{index}_{artifact.get('id', '')}",
-                icon=":material/auto_fix_high:",
-                use_container_width=True,
-            ):
-                outcome = coordinator.edit_artifact(
-                    stored_path,
-                    instruction,
-                    target_format=target_format,
+            dl_col, prev_col = st.columns([1.4, 1])
+            with dl_col:
+                st.download_button(
+                    f"⬇ 下载 {name}",
+                    data=data,
+                    file_name=name,
+                    mime=artifact.get("mime_type") or "application/octet-stream",
+                    key=f"dl_main_{message_key}_{index}_{artifact.get('id', '')}",
+                    use_container_width=True,
                 )
-                st.session_state[edit_state_key] = outcome.to_dict()
-                st.rerun()
+            with prev_col:
+                if st.button(
+                    "▸ 预览",
+                    key=f"artifact_preview_{message_key}_{index}_{artifact.get('id', '')}",
+                    icon=":material/visibility:",
+                    use_container_width=True,
+                ):
+                    st.session_state[preview_open_key] = not st.session_state.get(
+                        preview_open_key, False
+                    )
+
+            # 预览区（下方全宽：xlsx 渲染真正表格，docx 渲染 markdown）
+            if st.session_state.get(preview_open_key, False):
+                st.markdown('<hr class="pm-artifact-hr">', unsafe_allow_html=True)
+                if fmt == "xlsx":
+                    try:
+                        df = pd.read_excel(path, sheet_name=0, nrows=200)
+                        st.dataframe(
+                            df,
+                            use_container_width=True,
+                            height=min(360, 40 * (len(df) + 1) + 20),
+                        )
+                    except Exception:
+                        if preview_markdown:
+                            st.markdown(preview_markdown)
+                        else:
+                            st.info("（暂无可预览的表格内容）")
+                elif preview_markdown:
+                    st.markdown(preview_markdown)
+                st.markdown('<hr class="pm-artifact-hr">', unsafe_allow_html=True)
+
+            # 多格式导出
+            export_formats = artifact.get("export_formats")
+            if not isinstance(export_formats, list):
+                export_formats = generator.available_export_formats(
+                    str(artifact.get("format") or "")
+                )
+            export_formats = [
+                str(item).lower()
+                for item in export_formats
+                if str(item).lower() in {"csv", "docx", "md", "txt", "xlsx"}
+                and str(item).lower() != str(artifact.get("format") or "").lower()
+            ][:4]
+            if export_formats:
+                st.markdown(
+                    '<div class="pm-artifact-export-label">另存为其他格式</div>',
+                    unsafe_allow_html=True,
+                )
+                export_columns = st.columns(len(export_formats), gap="small")
+                for export_index, target_format in enumerate(export_formats):
+                    with export_columns[export_index]:
+                        try:
+                            exported = generator.export_artifact_bytes(
+                                stored_path,
+                                target_format,
+                            )
+                        except (OSError, ValueError, RuntimeError):
+                            continue
+                        st.download_button(
+                            f"⬇ 保存为 {target_format.upper()}",
+                            data=exported["data"],
+                            file_name=exported["filename"],
+                            mime=exported["mime_type"],
+                            key=(
+                                f"artifact_export_{message_key}_{index}_"
+                                f"{artifact.get('id', '')}_{target_format}"
+                            ),
+                            use_container_width=True,
+                        )
+
+            # 一句话编辑（仅 xlsx / docx 支持）
+            coordinator = get_artifact_coordinator()
+            if coordinator is None:
+                continue
+            source_format = str(artifact.get("format") or "").lower()
+            if source_format not in {"xlsx", "docx"}:
+                continue
+            edit_state_key = (
+                f"artifact_edit_result_{message_key}_{index}_{artifact.get('id', '')}"
+            )
+            edit_result = st.session_state.get(edit_state_key)
+            if isinstance(edit_result, dict):
+                if edit_result.get("artifact"):
+                    edited = edit_result["artifact"]
+                    st.success(edit_result.get("message") or "已生成编辑版本。")
+                    try:
+                        edited_data = _read_artifact_bytes(
+                            generator.root,
+                            edited["stored_path"],
+                            generator.max_file_size,
+                        )
+                    except (KeyError, OSError, ValueError):
+                        edited_data = None
+                    if edited_data is not None:
+                        st.download_button(
+                            f"⬇ 下载 {edited.get('name', '编辑版本')}",
+                            data=edited_data,
+                            file_name=edited.get("name", "edited-artifact"),
+                            mime=edited.get("mime_type") or "application/octet-stream",
+                            key=f"artifact_edit_download_{message_key}_{index}",
+                            use_container_width=True,
+                        )
+                elif edit_result.get("message"):
+                    st.warning(edit_result["message"])
+
+            with st.expander("一句话编辑", expanded=False):
+                instruction = st.text_input(
+                    "编辑要求",
+                    key=f"artifact_edit_input_{message_key}_{index}_{artifact.get('id', '')}",
+                    placeholder="例如：把金额列改成美元，并新增风险说明",
+                )
+                target_options = [source_format]
+                if source_format == "xlsx":
+                    target_options.append("docx")
+                target_format = st.selectbox(
+                    "保存格式",
+                    target_options,
+                    key=f"artifact_edit_format_{message_key}_{index}_{artifact.get('id', '')}",
+                )
+                if st.button(
+                    "生成新版本",
+                    key=f"artifact_edit_submit_{message_key}_{index}_{artifact.get('id', '')}",
+                    icon=":material/auto_fix_high:",
+                    use_container_width=True,
+                ):
+                    outcome = coordinator.edit_artifact(
+                        stored_path,
+                        instruction,
+                        target_format=target_format,
+                    )
+                    st.session_state[edit_state_key] = outcome.to_dict()
+                    st.rerun()
 
 def _persist_workflow_response(run, content, *, status="complete"):
     """Persist one final assistant message for a workflow turn, idempotently."""

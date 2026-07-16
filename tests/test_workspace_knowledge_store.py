@@ -1,6 +1,7 @@
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import pytest
@@ -607,3 +608,116 @@ def test_ingestion_proposal_enforces_payload_and_resource_limits(
             "too-large",
         )
     assert store.list_ingestion_proposals() == []
+
+
+def test_search_keeps_old_matching_rule_beyond_limit(tmp_path, monkeypatch):
+    """回归测试：>1000 条已采纳规则时，较旧但命中查询词的规则不能被 LIMIT 1000 静默截断。
+
+    对应修复：search() 内规则查询改为先按查询词做 SQL LIKE 预过滤，
+    再套 LIMIT 1000，避免旧但相关的规则落在截断窗口之外而漏检。
+    若回退到「ORDER BY updated_at DESC LIMIT 1000」且无预过滤，本测试会失败。
+    """
+    store = WorkspaceKnowledgeStore(
+        tmp_path / "knowledge.db",
+        enable_vector_search=False,
+    )
+
+    # 可控时钟：保证“命中规则”拥有严格更早的 updated_at，
+    # 使其在无预过滤时必然排在 LIMIT 1000 之外（最旧的一条）。
+    clock = {"t": datetime(2024, 1, 1, tzinfo=timezone.utc)}
+
+    def fake_now():
+        now = clock["t"]
+        clock["t"] = now + timedelta(seconds=1)
+        return now.isoformat(timespec="microseconds")
+
+    monkeypatch.setattr(
+        WorkspaceKnowledgeStore, "_utc_now", staticmethod(fake_now)
+    )
+
+    query_term = "量子纠缠校准"
+    old_rule = store.propose_rule(
+        f"开展{query_term}实验前必须先预热设备",
+        workspace_id="ws-regression",
+    )
+    store.confirm_rule(
+        old_rule["id"],
+        confirmed_by="user-1",
+        confirmation_token="approve-old",
+    )
+
+    # 灌入 1001 条不命中查询词、但 updated_at 更新的已采纳规则，
+    # 把旧规则挤到 LIMIT 窗口之外。
+    for index in range(1001):
+        filler = store.propose_rule(
+            f"无关的填充规则 {index}：项目排期与进度管理",
+            workspace_id="ws-regression",
+        )
+        store.confirm_rule(
+            filler["id"],
+            confirmed_by="user-1",
+            confirmation_token=f"approve-filler-{index}",
+        )
+
+    results = store.search(query_term, workspace_id="ws-regression")
+    rule_results = [r for r in results if r.get("record_type") == "rule"]
+    assert any(
+        r["id"] == old_rule["id"] for r in rule_results
+    ), "较旧但命中查询词的已采纳规则被 LIMIT 1000 静默截断，未出现在搜索结果中"
+
+
+def test_search_keeps_old_matching_resource_beyond_limit(tmp_path, monkeypatch):
+    """回归测试：>2000 条活跃资源时，较旧但命中某 resource_type 的资源不能被 LIMIT 2000 静默截断。
+
+    对应修复：search() 内资源查询改为先按 resource_type/source_type 做 SQL 过滤，
+    再套 LIMIT 2000，避免旧但相关的资源落在截断窗口之外而漏检。
+    若回退到「ORDER BY updated_at DESC LIMIT 2000」且无类型过滤，本测试会失败。
+    """
+    store = WorkspaceKnowledgeStore(
+        tmp_path / "knowledge.db",
+        enable_vector_search=False,
+    )
+
+    # 可控时钟：保证“命中资源”拥有严格更早的 updated_at，
+    # 使其在无类型预过滤时必然排在 LIMIT 2000 之外（最旧的一条）。
+    clock = {"t": datetime(2024, 1, 1, tzinfo=timezone.utc)}
+
+    def fake_now():
+        now = clock["t"]
+        clock["t"] = now + timedelta(seconds=1)
+        return now.isoformat(timespec="microseconds")
+
+    monkeypatch.setattr(
+        WorkspaceKnowledgeStore, "_utc_now", staticmethod(fake_now)
+    )
+
+    query_term = "量子纠缠预热"
+    # 1 条较旧、但命中查询词、类型为 doc 的资源
+    old_resource = store.ingest_resource(
+        title=f"设备规范：{query_term}流程",
+        searchable_text=f"开展实验前必须先完成{query_term}",
+        workspace_id="ws-regression",
+        resource_type="doc",
+        source_type="manual",
+    )
+
+    # 灌入 2001 条不命中查询词、类型不同、且 updated_at 更新的填充资源，
+    # 把旧资源挤到 LIMIT 2000 窗口之外（活跃资源总数 2002 条，>2000）。
+    for index in range(2001):
+        store.ingest_resource(
+            title=f"填充资源 {index}",
+            searchable_text=f"项目排期与进度管理 {index}",
+            workspace_id="ws-regression",
+            resource_type="filler",
+            source_type="manual",
+        )
+
+    results = store.search(
+        query_term,
+        workspace_id="ws-regression",
+        resource_types=["doc"],
+    )
+    resource_results = [r for r in results if r.get("record_type") == "resource"]
+    assert any(
+        r["id"] == old_resource["id"] for r in resource_results
+    ), "较旧但命中 resource_type 的活跃资源被 LIMIT 2000 静默截断，未出现在搜索结果中"

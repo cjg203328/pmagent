@@ -81,6 +81,41 @@ class UnifiedMCPClient:
         remote = self._get_remote()
         return bool(remote is not None and remote.is_enabled())
 
+    # ── 诊断属性：透传远程后端的分类错误信息 ─────────
+
+    @property
+    def last_error(self) -> Optional[str]:
+        """远程后端最后一次错误的人类可读描述（本地工具无此概念）。"""
+        remote = self._get_remote()
+        if remote is not None:
+            return getattr(remote, "last_error", None)
+        return None
+
+    @property
+    def last_error_category(self) -> Optional[str]:
+        """远程后端错误类别: network | http | auth | parse | url | config | unknown"""
+        remote = self._get_remote()
+        if remote is not None:
+            return getattr(remote, "last_error_category", None)
+        return None
+
+    def ping(self) -> tuple[bool, str]:
+        """轻量连通性测试：先测远程，失败则返回原因；本地工具始终可用。"""
+        remote = self._get_remote()
+        if remote is not None:
+            ok, msg = remote.ping() if hasattr(remote, "ping") else (remote.is_enabled(), "")
+            if not ok:
+                return False, msg
+            return True, msg or f"Skills Forge 已连接 ({len(remote.list_skills())} skills)"
+        # 无远程后端时检查是否因配置缺失而未加载
+        if os.getenv("MCP_ENABLED", "false").lower() != "true":
+            return False, "Skills Forge 未启用（开关关闭）"
+        if not os.getenv("SKILLS_FORGE_URL"):
+            return False, "Skills Forge URL 未配置"
+        if not os.getenv("SKILLS_FORGE_KEY"):
+            return False, "Skills Forge API Key 未配置"
+        return False, "Skills Forge 远程后端初始化失败"
+
     def list_skills(self) -> List[Dict[str, Any]]:
         """聚合两个后端的技能/工具清单。"""
         result: List[Dict[str, Any]] = []

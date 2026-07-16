@@ -20,6 +20,15 @@ from typing import Any, Dict, List, Optional
 
 from artpm_agent.memory.sqlite_manager import SQLiteManager
 from artpm_agent.utils import generate_uuid
+import dataclasses
+
+from artpm_agent.core.redis_cache import (
+    get_redis,
+    cache_get_json,
+    cache_set_json,
+    cache_delete_prefix,
+    key,
+)
 
 
 @dataclass
@@ -128,10 +137,25 @@ class EpisodeStore:
                     row["created_at"],
                 ),
             )
+        self._invalidate_redis_caches()
         return row["id"]
+
+    def _invalidate_redis_caches(self) -> None:
+        """Drop Redis-cached episode queries after a write (best-effort)."""
+        try:
+            cache_delete_prefix(key("ep"))
+        except Exception:  # noqa: BLE001
+            pass
 
     def recent(self, limit: int = 50, handler: Optional[str] = None) -> List[Episode]:
         """Return the most recent episodes, optionally filtered by handler."""
+        r = get_redis()
+        ck = key("ep", "recent", str(limit), handler or "")
+        if r is not None:
+            cached = cache_get_json(ck)
+            if cached is not None:
+                return [Episode(**e) for e in cached]
+
         with self.db.get_connection() as conn:
             if handler:
                 rows = conn.execute(
@@ -142,22 +166,45 @@ class EpisodeStore:
                 rows = conn.execute(
                     "SELECT * FROM episodes ORDER BY created_at DESC LIMIT ?", (limit,)
                 ).fetchall()
-        return [_row_to_episode(r) for r in rows]
+        result = [_row_to_episode(r) for r in rows]
+        if r is not None:
+            cache_set_json(ck, [dataclasses.asdict(e) for e in result], ttl=30)
+        return result
 
     def recent_feedback(self, limit: int = 20) -> List[Episode]:
         """Return episodes that carry explicit user feedback."""
+        r = get_redis()
+        ck = key("ep", "recent_fb", str(limit))
+        if r is not None:
+            cached = cache_get_json(ck)
+            if cached is not None:
+                return [Episode(**e) for e in cached]
+
         with self.db.get_connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM episodes WHERE feedback IS NOT NULL AND feedback != '' "
                 "ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [_row_to_episode(r) for r in rows]
+        result = [_row_to_episode(r) for r in rows]
+        if r is not None:
+            cache_set_json(ck, [dataclasses.asdict(e) for e in result], ttl=30)
+        return result
 
     def count(self) -> int:
         """Total number of persisted episodes."""
+        r = get_redis()
+        ck = key("ep", "count")
+        if r is not None:
+            cached = cache_get_json(ck)
+            if cached is not None:
+                return int(cached)
+
         with self.db.get_connection() as conn:
-            return int(conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0])
+            n = int(conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0])
+        if r is not None:
+            cache_set_json(ck, n, ttl=30)
+        return n
 
     def set_feedback(self, turn_id: str, feedback_text: Optional[str]) -> int:
         """Tag every episode of a turn with explicit user feedback.
@@ -173,12 +220,21 @@ class EpisodeStore:
                 "UPDATE episodes SET feedback = ? WHERE turn_id = ?",
                 (feedback_text, turn_id),
             )
-            return cur.rowcount
+            rowcount = cur.rowcount
+        self._invalidate_redis_caches()
+        return rowcount
 
     def failure_rate(
         self, handler: Optional[str] = None, since: Optional[str] = None
     ) -> float:
         """Failure rate in [0, 1]; 0.0 when there is no data."""
+        r = get_redis()
+        ck = key("ep", "failure", handler or "", since or "")
+        if r is not None:
+            cached = cache_get_json(ck)
+            if cached is not None:
+                return float(cached)
+
         with self.db.get_connection() as conn:
             if handler and since:
                 total = conn.execute(
@@ -202,4 +258,7 @@ class EpisodeStore:
                 failed = conn.execute(
                     "SELECT COUNT(*) FROM episodes WHERE success = 0"
                 ).fetchone()[0]
-        return (failed / total) if total else 0.0
+        rate = (failed / total) if total else 0.0
+        if r is not None:
+            cache_set_json(ck, rate, ttl=30)
+        return rate

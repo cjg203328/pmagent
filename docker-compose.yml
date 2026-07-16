@@ -1,32 +1,107 @@
-version: '3.8'
+# ArtPM Agent — 轻量化单栈编排（Streamlit + Caddy 反向代理 + 自动 HTTPS + Redis）
+#
+# 用法：
+#   cp .env.example .env            # 至少填一个 LLM Key
+#   export SITE_ADDRESS=你的域名     # 可选；不填则默认 localhost（本机 HTTPS 测试）
+#   docker compose up -d --build    # 一条命令：构建 app + 起 Caddy + Redis + 证书
+#   docker compose logs -f          # 跟踪所有服务日志
+#   docker compose down             # 停止并移除容器
+#
+# 数据持久化：宿主 ./data 与 ./logs 挂载进容器 /app/data、/app/logs，
+# 所有库（artpm.db / memory.db / conversations.db / vector_store/）
+# 与缓存（token_usage.db / episodes.db）都派生自 DATA_ROOT，
+# 重启 / 重建镜像都不丢知识库、对话历史与缓存。
+# Caddy 证书与配置落在具名卷 caddy-data / caddy-config，续期状态持久化；
+# Redis 数据落在 redis-data 卷（AOF 持久化）。
+
+# 站点域名（用于自动 HTTPS）。留空则用 localhost（Caddy 用本地 CA 发证书，便于本机测试）。
+# 公网部署时改成已解析到本机公网 IP 的真实域名，如：SITE_ADDRESS=pmagent.example.com
+# 也可直接在 .env 里定义 SITE_ADDRESS，compose 会自动读取（此处 ${SITE_ADDRESS:-localhost} 兜底）。
 
 services:
   artpm-agent:
     build: .
-    ports:
-      - "8501:8501"
+    image: artpm-agent:latest
+    # 仅暴露到内部网络，由 Caddy 统一对外（更安全：无 TLS 直连被挡在门外）。
+    # 如确需局域网明文直连调试，可取消下一行注释：
+    # ports:
+    #   - "8501:8501"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - ./.env:/app/.env
+      - ./.env:/app/.env:ro
     environment:
-      - DB_PATH=/app/data/artpm.db
-      - MEMORY_DB_PATH=/app/data/memory.db
+      # 数据根目录：所有库与缓存都派生自此（见 artpm_agent.config.resolve_data_root）
+      - DATA_ROOT=/app/data
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+      # Redis 连接地址（应用目前默认仍用 SQLite + 内存，未消费此变量；
+      # 预留接入口，待接入 Redis 缓存 / 队列时让其读取 REDIS_URL 即可生效）
+      - REDIS_URL=redis://redis:6379/0
     restart: unless-stopped
+    networks:
+      - artpm-net
     healthcheck:
-      test: ["CMD", "python", "artpm_agent/health_check.py"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/healthz', timeout=4)"]
       interval: 30s
-      timeout: 10s
+      timeout: 5s
       retries: 3
+      start_period: 25s
+    # 轻量化资源上限（按机器配置调整；去掉则不限）
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
 
-  # 可选: Redis缓存
+  caddy:
+    image: caddy:2-alpine
+    # 80 用于 ACME 校验 / HTTP→HTTPS 重定向；443 提供 HTTPS（含 HTTP/3 所需的 UDP）
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      # Caddyfile 通过 {$SITE_ADDRESS:localhost} 读取此变量
+      - SITE_ADDRESS=${SITE_ADDRESS:-localhost}
+      # 自定义 basicauth 密码：取消下一行注释，把 <哈希> 换成
+      #   docker run --rm caddy:2-alpine caddy hash-password
+      # 生成的 $2a$... 值，即可覆盖 Caddyfile 中内嵌的默认哈希。
+      # - BASIC_AUTH_HASH=<哈希>
+    depends_on:
+      artpm-agent:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - artpm-net
+
+  # ── Redis 缓存（默认开启）──
+  # 应用目前默认用 SQLite + 内存，不强制依赖 Redis；此处默认拉起一个 Redis 实例，
+  # 通过 artpm-net 供 agent 以 redis://redis:6379 访问（见 agent 的 REDIS_URL）。
+  # 暂不暴露宿主端口（仅网络内可达）。如需从宿主调试可加 ports: - "6379:6379"
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
     restart: unless-stopped
+    networks:
+      - artpm-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  artpm-net:
+    driver: bridge
 
 volumes:
+  caddy-data:
+  caddy-config:
   redis-data:

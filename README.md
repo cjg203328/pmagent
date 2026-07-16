@@ -110,9 +110,38 @@ artpm_agent/parsers/               Excel 与可选 OCR 解析
 artpm_agent/database/models.py     SQLAlchemy 业务数据
 artpm_agent/memory/                文档记忆与离线检索
 artpm_agent/core/                  工具客户端和可选基础设施
+artpm_agent/runtime/telemetry.py   可观测系统：Token 消耗与连接情况（sqlite telemetry.db）
+artpm_agent/runtime/pricing.py     USD 定价表与成本估算
+artpm_agent/runtime/telemetry_dashboard.py  运营看板（HTML 报告 / Streamlit）
 ```
 
 业务库和记忆库必须分离：`artpm.db` 用于项目、任务和人员，`memory.db` 用于文档记忆。代码不会在 schema 不匹配时自动删表。
+
+## 可观测系统（Token 消耗与连接情况）
+
+为现有工程叠加了一层只读、非侵入的可观测能力，记录每次模型调用的 **Token 消耗** 与 **连接/链接情况**，便于核算成本与排查接口故障。所有新增行为默认开启、纯增量、不影响原有逻辑，且遥测写入为 best-effort（绝不会打断一次对话回合）。
+
+- **Token 消耗**：每次成功/缓存命中均记录 `prompt_tokens` / `completion_tokens` / `cached_tokens` / `total_tokens` 与估算 `cost_usd`。优先读取客户端返回的 `usage`（如 `client.last_usage`），不可用时回退到基于文本长度的启发式估算。成本通过 `runtime/pricing.py` 的 USD 定价表计算；未知模型按层级回退，缓存命中成本为 0。
+- **连接/链接情况**：每次 failover 候选尝试都写入一条 `connection_events` 记录（成功/失败、错误类型、HTTP 状态码、端点、延迟），从而能统计成功率、错误类型分布与端点健康度（含熔断器冷却状态）。
+- **存储**：`data/telemetry.db`（WAL 模式，独立库）。表结构以幂等 `ALTER TABLE` 向后兼容扩展，旧列保留。
+
+查看方式（任选其一）：
+
+```powershell
+# 1) 静态 HTML 报告
+python -m artpm_agent.runtime.telemetry_dashboard --out telemetry_report.html --window 500
+# 2) 独立 Streamlit 看板
+streamlit run telemetry_dashboard_app.py
+```
+
+看板新增两块面板：**Token 消耗**（总/输入/输出/缓存命中 Token、估算成本、按模型与按 Provider 明细、Token 趋势）与 **连接 / 链接情况**（成功率、连接趋势、错误类型分布、端点健康）。
+
+关键开关（环境变量，均为可选，默认开启遥测）：
+
+```text
+ARTPM_TELEMETRY=0               关闭遥测写入
+ARTPM_TELEMETRY_DB=path.db      指定遥测库路径
+```
 
 ## 测试与检查
 

@@ -14,6 +14,11 @@ from artpm_agent.config_data import load_default_config
 PROJECT_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=PROJECT_ENV_PATH, override=True)
 
+# User-chosen data root override (project-local, no secrets). The settings page
+# writes this file so the knowledge base and all caches can be relocated without
+# touching .env. DATA_ROOT env wins over this; both win over the ./data default.
+DATA_ROOT_OVERRIDE_PATH = Path(__file__).resolve().parent.parent / "data_root.json"
+
 
 class Config:
     """Configuration Manager"""
@@ -169,6 +174,8 @@ class Config:
             self.config["database"]["conversation_db_path"] = os.getenv("CONVERSATION_DB_PATH")
         if os.getenv("VECTOR_DB_PATH"):
             self.config["database"]["vector_db_path"] = os.getenv("VECTOR_DB_PATH")
+        if os.getenv("DATA_ROOT"):
+            self.config["database"]["data_root"] = os.getenv("DATA_ROOT")
 
         # Operator-managed embedding settings. These are intentionally not
         # exposed in the end-user settings page because index compatibility is
@@ -201,8 +208,24 @@ class Config:
             self.config["wecom"]["secret"] = os.getenv("WECOM_SECRET")
 
     def _ensure_directories(self):
-        """Ensure required directories exist"""
+        """Ensure required directories exist.
+
+        A single ``data_root`` governs every local database and cache so the
+        user can relocate the knowledge base and all derived files together.
+        Priority: ``DATA_ROOT`` env > persisted project override
+        (``data_root.json``) > project-local ``./data`` default.
+        """
         project_root = self.base_dir.parent
+        data_root = os.getenv("DATA_ROOT") or _load_data_root_override()
+        if data_root:
+            resolved_root = Path(data_root).expanduser()
+            if not resolved_root.is_absolute():
+                resolved_root = project_root / resolved_root
+            resolved_root = resolved_root.resolve()
+        else:
+            resolved_root = (project_root / "data").resolve()
+        self.config["database"]["data_root"] = str(resolved_root)
+
         for key in (
             "db_path",
             "memory_db_path",
@@ -210,9 +233,15 @@ class Config:
             "vector_db_path",
         ):
             configured = Path(self.config["database"][key]).expanduser()
-            if not configured.is_absolute():
-                configured = project_root / configured
-            configured = configured.resolve()
+            if configured.is_absolute():
+                configured = configured.resolve()
+            else:
+                # Rebase the default relative layout (e.g. "data/conversations.db")
+                # onto the chosen data root so everything lives in one directory.
+                leaf = configured
+                if leaf.parts and leaf.parts[0] in ("data", ".", ".."):
+                    leaf = Path(*leaf.parts[1:])
+                configured = (resolved_root / leaf).resolve()
             self.config["database"][key] = str(configured)
 
         Path(self.config["database"]["db_path"]).parent.mkdir(parents=True, exist_ok=True)
@@ -223,7 +252,7 @@ class Config:
         )
         Path(self.config["database"]["vector_db_path"]).mkdir(parents=True, exist_ok=True)
 
-        # Log directory
+        # Log directory stays with the install (operational logs, not user data).
         log_dir = self.base_dir / "logs"
         log_dir.mkdir(exist_ok=True)
 
@@ -305,3 +334,65 @@ def get_config(config_path: Optional[str] = None) -> Config:
         _config_instance = Config(config_path)
 
     return _config_instance
+
+
+def _load_data_root_override() -> Optional[str]:
+    """Read the persisted data-root override, if any."""
+    path = DATA_ROOT_OVERRIDE_PATH
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    root = data.get("data_root") if isinstance(data, dict) else None
+    return str(root) if root else None
+
+
+def resolve_data_root() -> Path:
+    """Resolve the active data root without constructing a full Config.
+
+    Mirrors the priority used by ``Config._ensure_directories`` so callers that
+    run before or outside a Config instance (e.g. token/episode caches) agree
+    on where user data lives.
+    """
+    project_root = Path(__file__).resolve().parent.parent
+    data_root = os.getenv("DATA_ROOT") or _load_data_root_override()
+    if data_root:
+        root = Path(data_root).expanduser()
+        if not root.is_absolute():
+            root = project_root / root
+        return root.resolve()
+    return (project_root / "data").resolve()
+
+
+def save_data_root(root: Optional[str]) -> None:
+    """Persist (or clear) the user-chosen data root override."""
+    path = DATA_ROOT_OVERRIDE_PATH
+    if not root:
+        if path.exists():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        return
+    resolved = Path(root).expanduser()
+    if not resolved.is_absolute():
+        resolved = (Path(__file__).resolve().parent.parent / resolved).resolve()
+    else:
+        resolved = resolved.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"data_root": str(resolved)}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def reset_config() -> None:
+    """Drop the cached Config singleton so the next get_config() rebuilds it.
+
+    Used by the settings page after the data root changes, so subsequent
+    ``Config()`` calls pick up the new location.
+    """
+    global _config_instance
+    _config_instance = None

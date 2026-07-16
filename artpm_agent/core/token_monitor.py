@@ -8,15 +8,28 @@ from datetime import datetime, timedelta
 from typing import Dict, List
 from pathlib import Path
 import pandas as pd
+import logging
+
+from artpm_agent.core.redis_cache import (
+    get_redis,
+    cache_get_json,
+    cache_set_json,
+    cache_delete_prefix,
+    key,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class TokenMonitor:
     """Token监控器 - 存储和分析Token使用情况"""
 
     def __init__(self, db_path: str = None):
-        self.db_path = str(Path(db_path).expanduser().resolve()) if db_path else str(
-            Path(__file__).resolve().parents[2] / "data" / "token_usage.db"
-        )
+        if db_path:
+            self.db_path = str(Path(db_path).expanduser().resolve())
+        else:
+            from artpm_agent.config import resolve_data_root
+            self.db_path = str(resolve_data_root() / "token_usage.db")
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -80,9 +93,23 @@ class TokenMonitor:
             ))
 
             conn.commit()
+        self._invalidate_cache()
+
+    def _invalidate_cache(self) -> None:
+        """Drop Redis-cached token aggregates after a write (best-effort)."""
+        try:
+            cache_delete_prefix(key("tok"))
+        except Exception:  # noqa: BLE001
+            pass
 
     def get_today_stats(self) -> Dict:
         """获取今日统计"""
+        r = get_redis()
+        if r is not None:
+            cached = cache_get_json(key("tok", "today"))
+            if cached is not None:
+                return cached
+
         today = datetime.now().date()
         yesterday = today - timedelta(days=1)
 
@@ -106,7 +133,7 @@ class TokenMonitor:
         yesterday_tokens = yesterday_df['total_tokens'].sum() if len(yesterday_df) > 0 else 0
         yesterday_cost = yesterday_df['cost'].sum() if len(yesterday_df) > 0 else 0
 
-        return {
+        result = {
             "tokens": int(today_tokens),
             "cost": float(today_cost),
             "avg_latency": float(today_avg_latency),
@@ -115,9 +142,19 @@ class TokenMonitor:
             "daily_limit": 100000,
             "requests": len(today_df)
         }
+        if r is not None:
+            cache_set_json(key("tok", "today"), result, ttl=15)
+        return result
 
     def get_model_stats(self, days: int = 7) -> List[Dict]:
         """按模型统计"""
+        r = get_redis()
+        ck = key("tok", "model", str(days))
+        if r is not None:
+            cached = cache_get_json(ck)
+            if cached is not None:
+                return cached
+
         start_date = (datetime.now() - timedelta(days=days)).date()
 
         with closing(sqlite3.connect(self.db_path)) as conn:
@@ -135,10 +172,20 @@ class TokenMonitor:
             ORDER BY tokens DESC
             """, conn)
 
-        return df.to_dict('records')
+        result = df.to_dict('records')
+        if r is not None:
+            cache_set_json(ck, result, ttl=30)
+        return result
 
     def get_feature_stats(self, days: int = 7) -> List[Dict]:
         """按功能统计"""
+        r = get_redis()
+        ck = key("tok", "feature", str(days))
+        if r is not None:
+            cached = cache_get_json(ck)
+            if cached is not None:
+                return cached
+
         start_date = (datetime.now() - timedelta(days=days)).date()
 
         with closing(sqlite3.connect(self.db_path)) as conn:
@@ -154,10 +201,25 @@ class TokenMonitor:
             ORDER BY tokens DESC
             """, conn)
 
-        return df.to_dict('records')
+        result = df.to_dict('records')
+        if r is not None:
+            cache_set_json(ck, result, ttl=30)
+        return result
 
     def get_trend_data(self, days: int = 7) -> pd.DataFrame:
         """获取趋势数据"""
+        r = get_redis()
+        ck = key("tok", "trend", str(days))
+        if r is not None:
+            cached = cache_get_json(ck)
+            if cached is not None:
+                # Rebuild the DataFrame from its serialized form.
+                if isinstance(cached, dict) and "records" in cached:
+                    return pd.DataFrame(
+                        cached["records"], columns=cached.get("columns")
+                    )
+                return cached
+
         start_date = (datetime.now() - timedelta(days=days)).date()
 
         with closing(sqlite3.connect(self.db_path)) as conn:
@@ -173,10 +235,25 @@ class TokenMonitor:
             ORDER BY date, model
             """, conn)
 
-        return df
+        result = df
+        if r is not None:
+            # DataFrames are not JSON-serializable; cache as records + columns.
+            cache_set_json(
+                ck,
+                {"columns": list(df.columns), "records": df.to_dict("records")},
+                ttl=30,
+            )
+        return result
 
     def get_hourly_usage(self) -> List[Dict]:
         """获取小时级使用情况（今日）"""
+        r = get_redis()
+        ck = key("tok", "hourly")
+        if r is not None:
+            cached = cache_get_json(ck)
+            if cached is not None:
+                return cached
+
         today = datetime.now().date()
 
         with closing(sqlite3.connect(self.db_path)) as conn:
@@ -192,10 +269,20 @@ class TokenMonitor:
             ORDER BY hour
             """, conn)
 
-        return df.to_dict('records')
+        result = df.to_dict('records')
+        if r is not None:
+            cache_set_json(ck, result, ttl=30)
+        return result
 
     def get_usage_since(self, start_date) -> Dict:
         """Aggregate token and cost usage since a date (inclusive)."""
+        r = get_redis()
+        ck = key("tok", "since", str(start_date))
+        if r is not None:
+            cached = cache_get_json(ck)
+            if cached is not None:
+                return cached
+
         conn = sqlite3.connect(self.db_path)
         try:
             row = conn.execute(
@@ -207,7 +294,10 @@ class TokenMonitor:
             ).fetchone()
         finally:
             conn.close()
-        return {"tokens": int(row[0]), "cost": float(row[1]), "requests": int(row[2])}
+        result = {"tokens": int(row[0]), "cost": float(row[1]), "requests": int(row[2])}
+        if r is not None:
+            cache_set_json(ck, result, ttl=15)
+        return result
 
 
 class TokenBudgetManager:

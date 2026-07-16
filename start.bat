@@ -2,6 +2,9 @@
 chcp 65001 >nul 2>&1
 REM ArtPM Agent Windows 启动脚本
 
+cd /d "%~dp0"
+set "ARTPM_PORT=8501"
+
 echo   ArtPM Agent starting...
 echo.
 
@@ -35,13 +38,21 @@ if not exist .env copy .env.example .env >nul 2>&1
 if not exist data mkdir data >nul 2>&1
 if not exist artpm_agent\logs mkdir artpm_agent\logs >nul 2>&1
 
+REM ---- 清理同项目旧实例，避免 localhost 命中残留的 IPv6 服务 ----
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\prepare_streamlit_port.ps1" -Port %ARTPM_PORT%
+if errorlevel 1 (
+    echo [ERROR] Port %ARTPM_PORT% is unavailable. ArtPM Agent was not started.
+    pause
+    exit /b 1
+)
+
 REM ---- 关键：设置 PYTHONPATH 让多页面导入不报错 ----
 set "PYTHONPATH=%~dp0"
 
 echo.
-echo   http://localhost:8501
+echo   http://127.0.0.1:%ARTPM_PORT%
 echo.
 
-"%PYTHON_CMD%" -m streamlit run artpm_agent\app.py --server.address 127.0.0.1 --server.port 8501
+"%PYTHON_CMD%" -m streamlit run artpm_agent\app.py --server.address 127.0.0.1 --server.port %ARTPM_PORT% --server.headless true --browser.gatherUsageStats false
 
 pause

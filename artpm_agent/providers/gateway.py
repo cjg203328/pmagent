@@ -347,6 +347,14 @@ class ModelGateway:
         cache_hit: bool,
         success: bool,
         error: Optional[str] = None,
+        *,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        cached_tokens: int = 0,
+        cost_usd: float = 0.0,
+        attempt: int = 0,
+        error_type: str = "",
+        http_status: Optional[int] = None,
     ) -> None:
         tel = self._telemetry
         if tel is None:
@@ -360,8 +368,181 @@ class ModelGateway:
                 cache_hit=cache_hit,
                 success=success,
                 error=error,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                cached_tokens=cached_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+                cost_usd=cost_usd,
+                provider=self._provider(),
+                endpoint=self._endpoint(),
+                attempt=attempt,
+                error_type=error_type,
+                http_status=http_status,
             )
         except Exception:  # noqa: BLE001 - telemetry must never break a turn
+            pass
+
+    # ── Observability helpers (token + connection) ──
+
+    def _provider(self) -> str:
+        return str(self._llm_config.get("provider", "") or "").strip().lower()
+
+    def _endpoint(self) -> str:
+        provider = self._provider()
+        for key in (f"{provider}_api_base", "base_url", "api_base", "openai_api_base"):
+            val = str(self._llm_config.get(key, "") or "").strip()
+            if val:
+                return val
+        return ""
+
+    @staticmethod
+    def _http_status(error: BaseException) -> Optional[int]:
+        current = error
+        seen = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            status_code = getattr(current, "status_code", None)
+            try:
+                status_code = int(status_code)
+            except (TypeError, ValueError):
+                status_code = None
+            if status_code is not None:
+                return status_code
+            current = current.__cause__ or current.__context__
+        return None
+
+    def _classify_error(self, error: BaseException) -> str:
+        status = self._http_status(error)
+        if status is not None:
+            if status in (401, 403):
+                return "auth"
+            if status == 404:
+                return "not_found"
+            if status == 429:
+                return "rate_limit"
+            if status >= 500:
+                return "server_error"
+        text = self._error_chain_text(error)
+        if any(m in text for m in ("invalid api key", "authentication", "unauthorized", "forbidden")):
+            return "auth"
+        if self._is_vision_capability_error(error):
+            return "vision_unsupported"
+        if any(m in text for m in ("rate limit", "too many requests", "429")):
+            return "rate_limit"
+        if any(
+            m in text
+            for m in (
+                "timeout",
+                "timed out",
+                "连接失败",
+                "超时",
+                "connection",
+                "connecterror",
+                "reset",
+            )
+        ):
+            return "timeout"
+        if any(m in text for m in ("model not found", "unsupported model", "404")):
+            return "not_found"
+        if any(m in text for m in ("500", "503", "service unavailable", "服务繁忙", "overloaded", "capacity")):
+            return "server_error"
+        return "other"
+
+    @staticmethod
+    def _extract_real_usage(client: Any) -> Optional[Dict[str, int]]:
+        usage = getattr(client, "last_usage", None)
+        if not isinstance(usage, dict):
+            return None
+
+        def _int(v: Any, key: str) -> int:
+            try:
+                return int(usage.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        pt = _int(usage, "prompt_tokens")
+        ct = _int(usage, "completion_tokens")
+        if pt or ct:
+            return {"prompt_tokens": pt, "completion_tokens": ct}
+        return None
+
+    def _estimate_usage(
+        self,
+        *,
+        system_prompt: str,
+        prompt: str,
+        history: Any,
+        output_text: str,
+        model: Optional[str],
+        client: Any = None,
+        cache_hit: bool = False,
+    ) -> Dict[str, Any]:
+        """Token + cost accounting for one request.
+
+        Prefers a real ``client.last_usage`` dict when the client exposes one;
+        otherwise falls back to a text-length heuristic. Never raises.
+        """
+        real = self._extract_real_usage(client) if client is not None else None
+        try:
+            if real is not None:
+                prompt_tokens = real["prompt_tokens"]
+                completion_tokens = real["completion_tokens"]
+            else:
+                from artpm_agent.harness.token_budget import estimate_tokens
+
+                input_text = "{sys}\n{usr}\n{hist}".format(
+                    sys=str(system_prompt or ""),
+                    usr=str(prompt or ""),
+                    hist=str(history if history is not None else ""),
+                )
+                prompt_tokens = estimate_tokens(input_text, model=model or "")
+                completion_tokens = estimate_tokens(output_text, model=model or "")
+        except Exception:  # noqa: BLE001 - estimation must never break a turn
+            prompt_tokens = 0
+            completion_tokens = 0
+        try:
+            from artpm_agent.runtime.pricing import estimate_cost
+
+            cost = 0.0 if cache_hit else estimate_cost(
+                model or "", prompt_tokens, completion_tokens, provider=self._provider()
+            )
+        except Exception:  # noqa: BLE001
+            cost = 0.0
+        cached_tokens = completion_tokens if cache_hit else 0
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "cached_tokens": cached_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "cost_usd": cost,
+        }
+
+    def _record_connection_attempt(
+        self,
+        *,
+        model_id: Optional[str],
+        attempt_index: int,
+        ok: bool,
+        error: Optional[BaseException],
+        latency_ms: float,
+        task_type: Optional[str],
+    ) -> None:
+        tel = self._telemetry
+        if tel is None:
+            return
+        try:
+            tel.record_connection(
+                provider=self._provider(),
+                model=model_id or "",
+                endpoint=self._endpoint(),
+                attempt=attempt_index,
+                ok=ok,
+                error_type=self._classify_error(error) if error is not None else "",
+                http_status=self._http_status(error) if error is not None else None,
+                latency_ms=latency_ms,
+                task_type=task_type or "chat",
+            )
+        except Exception:  # noqa: BLE001
             pass
 
     def _build_response_cache(self) -> Optional[Any]:
@@ -457,10 +638,38 @@ class ModelGateway:
         cache_hit = False
         if cache is not None:
             cached = cache.get(cache_model or "", system_prompt, prompt, history, image_paths)
-            if cached is not None:
-                cache_hit = True
-                self._record_telemetry(task_type, cache_model, 0.0, False, True, True)
-                return cached
+        if cached is not None:
+            cache_hit = True
+            usage = self._estimate_usage(
+                system_prompt=system_prompt,
+                prompt=prompt,
+                history=history,
+                output_text=cached,
+                model=cache_model,
+                cache_hit=True,
+            )
+            self._record_connection_attempt(
+                model_id=cache_model,
+                attempt_index=0,
+                ok=True,
+                error=None,
+                latency_ms=0.0,
+                task_type=task_type,
+            )
+            self._record_telemetry(
+                task_type,
+                cache_model,
+                0.0,
+                False,
+                True,
+                True,
+                prompt_tokens=usage["prompt_tokens"],
+                completion_tokens=usage["completion_tokens"],
+                cached_tokens=usage["cached_tokens"],
+                cost_usd=usage["cost_usd"],
+                attempt=0,
+            )
+            return cached
 
         attempts = self._attempts_with_preference(preferred, requires_vision)
         if not attempts:
@@ -470,7 +679,8 @@ class ModelGateway:
 
         start = time.monotonic()
         last_error = None
-        for model_id, client, is_fallback in attempts:
+        for i, (model_id, client, is_fallback) in enumerate(attempts):
+            attempt_start = time.monotonic()
             try:
                 client = client or self.client_for_model(model_id)
                 if image_paths:
@@ -495,15 +705,51 @@ class ModelGateway:
                 answer = response.strip()
                 if cache is not None:
                     cache.put(cache_model or "", system_prompt, prompt, history, image_paths, answer)
-                latency = (time.monotonic() - start) * 1000
+                latency = (time.monotonic() - attempt_start) * 1000
+                self._record_connection_attempt(
+                    model_id=model_id,
+                    attempt_index=i,
+                    ok=True,
+                    error=None,
+                    latency_ms=latency,
+                    task_type=task_type,
+                )
+                usage = self._estimate_usage(
+                    system_prompt=system_prompt,
+                    prompt=prompt,
+                    history=history,
+                    output_text=answer,
+                    model=model_id,
+                    client=client,
+                    cache_hit=False,
+                )
                 self._record_telemetry(
-                    task_type, model_id, latency, bool(is_fallback), cache_hit, True
+                    task_type,
+                    model_id,
+                    latency,
+                    bool(is_fallback),
+                    cache_hit,
+                    True,
+                    prompt_tokens=usage["prompt_tokens"],
+                    completion_tokens=usage["completion_tokens"],
+                    cached_tokens=usage["cached_tokens"],
+                    cost_usd=usage["cost_usd"],
+                    attempt=i,
                 )
                 if is_fallback and primary_model:
                     return self.fallback_notice(primary_model, model_id) + answer
                 return answer
             except Exception as error:
                 last_error = error
+                attempt_latency = (time.monotonic() - attempt_start) * 1000
+                self._record_connection_attempt(
+                    model_id=model_id,
+                    attempt_index=i,
+                    ok=False,
+                    error=error,
+                    latency_ms=attempt_latency,
+                    task_type=task_type,
+                )
                 if requires_vision and self._is_vision_capability_error(error):
                     logger.warning(
                         "模型 %s 不支持多模态输入，尝试候选模型",
@@ -516,9 +762,20 @@ class ModelGateway:
                 logger.warning("模型 %s 暂时不可用，尝试候选模型", model_id)
 
         latency = (time.monotonic() - start) * 1000
+        error_type = self._classify_error(last_error) if last_error is not None else ""
+        http_status = (
+            self._http_status(last_error) if last_error is not None else None
+        )
         self._record_telemetry(
-            task_type, primary_model, latency, False, cache_hit, False,
+            task_type,
+            primary_model,
+            latency,
+            False,
+            cache_hit,
+            False,
             error=str(last_error) if last_error else None,
+            error_type=error_type,
+            http_status=http_status,
         )
         raise RuntimeError("模型请求失败") from last_error
 
@@ -547,11 +804,39 @@ class ModelGateway:
         cache_hit = False
         if cache is not None:
             cached = cache.get(cache_model or "", system_prompt, user_input, history, image_paths)
-            if cached is not None:
-                cache_hit = True
-                self._record_telemetry(task_type, cache_model, 0.0, False, True, True)
-                yield cached
-                return
+        if cached is not None:
+            cache_hit = True
+            usage = self._estimate_usage(
+                system_prompt=system_prompt,
+                prompt=user_input,
+                history=history,
+                output_text=cached,
+                model=cache_model,
+                cache_hit=True,
+            )
+            self._record_connection_attempt(
+                model_id=cache_model,
+                attempt_index=0,
+                ok=True,
+                error=None,
+                latency_ms=0.0,
+                task_type=task_type,
+            )
+            self._record_telemetry(
+                task_type,
+                cache_model,
+                0.0,
+                False,
+                True,
+                True,
+                prompt_tokens=usage["prompt_tokens"],
+                completion_tokens=usage["completion_tokens"],
+                cached_tokens=usage["cached_tokens"],
+                cost_usd=usage["cost_usd"],
+                attempt=0,
+            )
+            yield cached
+            return
 
         attempts = self._attempts_with_preference(preferred, requires_vision)
         if not attempts:
@@ -561,8 +846,9 @@ class ModelGateway:
 
         start = time.monotonic()
         last_error = None
-        for model_id, client, is_fallback in attempts:
+        for i, (model_id, client, is_fallback) in enumerate(attempts):
             yielded = False
+            attempt_start = time.monotonic()
             try:
                 client = client or self.client_for_model(model_id)
                 stream_fn = getattr(client, "stream_chat_with_images", None)
@@ -579,6 +865,7 @@ class ModelGateway:
                         system_prompt=system_prompt,
                         history=history,
                     )
+                parts = []
                 for chunk in chunks:
                     if not isinstance(chunk, str) or not chunk:
                         continue
@@ -590,16 +877,54 @@ class ModelGateway:
                         if is_fallback and primary_model:
                             yield self.fallback_notice(primary_model, model_id)
                     yielded = True
+                    parts.append(chunk)
                     yield chunk
                 if not yielded:
                     raise RuntimeError("模型服务未返回有效回答")
-                latency = (time.monotonic() - start) * 1000
+                answer_text = "".join(parts)
+                latency = (time.monotonic() - attempt_start) * 1000
+                self._record_connection_attempt(
+                    model_id=model_id,
+                    attempt_index=i,
+                    ok=True,
+                    error=None,
+                    latency_ms=latency,
+                    task_type=task_type,
+                )
+                usage = self._estimate_usage(
+                    system_prompt=system_prompt,
+                    prompt=user_input,
+                    history=history,
+                    output_text=answer_text,
+                    model=model_id,
+                    client=client,
+                    cache_hit=False,
+                )
                 self._record_telemetry(
-                    task_type, model_id, latency, bool(is_fallback), cache_hit, True
+                    task_type,
+                    model_id,
+                    latency,
+                    bool(is_fallback),
+                    cache_hit,
+                    True,
+                    prompt_tokens=usage["prompt_tokens"],
+                    completion_tokens=usage["completion_tokens"],
+                    cached_tokens=usage["cached_tokens"],
+                    cost_usd=usage["cost_usd"],
+                    attempt=i,
                 )
                 return
             except Exception as error:
                 last_error = error
+                attempt_latency = (time.monotonic() - attempt_start) * 1000
+                self._record_connection_attempt(
+                    model_id=model_id,
+                    attempt_index=i,
+                    ok=False,
+                    error=error,
+                    latency_ms=attempt_latency,
+                    task_type=task_type,
+                )
                 if yielded:
                     self.mark_model_unavailable(model_id)
                     logger.warning("模型 %s 在返回部分内容后中断", model_id)
@@ -610,8 +935,19 @@ class ModelGateway:
                 logger.warning("模型 %s 流式请求失败，尝试候选模型", model_id)
 
         latency = (time.monotonic() - start) * 1000
+        error_type = self._classify_error(last_error) if last_error is not None else ""
+        http_status = (
+            self._http_status(last_error) if last_error is not None else None
+        )
         self._record_telemetry(
-            task_type, primary_model, latency, False, cache_hit, False,
+            task_type,
+            primary_model,
+            latency,
+            False,
+            cache_hit,
+            False,
             error=str(last_error) if last_error else None,
+            error_type=error_type,
+            http_status=http_status,
         )
         raise RuntimeError("模型请求失败") from last_error

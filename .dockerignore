@@ -1,0 +1,39 @@
+# ── 版本控制 & Python 缓存 ──
+.git
+.gitignore
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ── 构建 / 打包产物（不进镜像，减小体积）──
+build/
+dist/
+*.egg-info/
+artpm_agent.egg-info/
+
+# ── 运行时数据 & 日志（走挂载卷持久化，绝不打进镜像）──
+data/
+logs/
+temp/
+
+# ── 历史遗留备份 ──
+_legacy_backup/
+
+# ── 环境文件（由 compose 挂载，禁止烤进镜像泄露密钥）──
+.env
+.env.*
+!.env.example
+
+# ── 文档（保留 README.md 供 Dockerfile COPY，其余排除）──
+docs/
+*.md
+!README.md
+
+# ── 测试 & CI（部署镜像不需要，减小体积）──
+tests/
+.github/

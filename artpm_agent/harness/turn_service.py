@@ -136,6 +136,11 @@ def run_turn(
             handled_by="harness_error",
         )
 
+    # ── Step 0: 记忆系统 — 对话压缩 + 跨会话记忆注入 ──
+    # 在所有 handler 之前执行，确保 ctx.knowledge_context 携带完整记忆。
+    # best-effort：任何环节失败不阻塞主流程。
+    _inject_memory_context(ctx, knowledge_store)
+
     # Handler 1: Profile change proposal
     profile_result = try_profile_proposal(
         ctx, profile_store, request_conversation_id
@@ -312,3 +317,89 @@ def _run_response_handler(
 # Note: Future handlers (Stage 4+) may include:
 # - Workflow approval handler
 # - Response formatting/enrichment handler
+
+
+def _inject_memory_context(
+    ctx: "TurnContext",
+    knowledge_store: Optional[Any],
+) -> None:
+    """Step 0: 准备记忆上下文并注入 ctx.knowledge_context。
+
+    组合来源（按优先级）：
+      1. 已有 knowledge_context（不覆盖，只追加）
+      2. 跨会话记忆检索结果
+      3. 对话压缩摘要（如触发）
+
+    所有操作 best-effort，异常仅记录日志。
+    """
+    if knowledge_store is None:
+        return
+
+    try:
+        from artpm_agent.memory.memory_injector import MemoryInjector
+
+        injector = MemoryInjector(knowledge_store)
+
+        # 构建 LLM callable（从 agent 提取）
+        llm_fn = _make_llm_callable(ctx.agent)
+
+        memory_text = injector.prepare_context(
+            messages=ctx.conversation_history,
+            user_input=ctx.user_input,
+            conversation_id=ctx.conversation_id,
+            llm_callable=llm_fn,
+        )
+
+        if memory_text and memory_text.strip():
+            if ctx.knowledge_context:
+                ctx.knowledge_context = (
+                    f"{ctx.knowledge_context}\n\n{memory_text}"
+                )
+            else:
+                ctx.knowledge_context = memory_text
+            logger.debug(
+                "记忆注入完成: %d 字符", len(memory_text)
+            )
+
+    except ImportError:
+        # 记忆模块不可用时静默跳过
+        pass
+    except Exception as exc:
+        logger.warning("记忆系统 Step 0 跳过 (非致命): %s", exc)
+
+
+def _make_llm_callable(agent: Any):
+    """从 Agent 实例提取一个可用的 LLM 调用函数。
+
+    返回 Callable[[str], str] 或 None。
+    """
+    if agent is None:
+        return None
+
+    # 尝试获取 llm_client
+    llm_client = getattr(agent, "llm_client", None)
+    if llm_client is not None and hasattr(llm_client, "chat"):
+        def _fn(prompt: str) -> str:
+            try:
+                result = llm_client.chat(prompt)
+                # 兼容不同返回格式
+                if isinstance(result, dict):
+                    return result.get("content", result.get("text", str(result)))
+                return str(result)
+            except Exception:
+                return ""
+        return _fn
+
+    # fallback: agent.chat 本身
+    if hasattr(agent, "chat") and callable(agent.chat):
+        def _fn_fallback(prompt: str) -> str:
+            try:
+                result = agent.chat(prompt)
+                if isinstance(result, dict):
+                    return result.get("content", result.get("text", str(result)))
+                return str(result)
+            except Exception:
+                return ""
+        return _fn_fallback
+
+    return None

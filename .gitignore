@@ -1,36 +1,79 @@
-.env
-.cache/
+# Python
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.ruff_cache/
-artpm_agent/logs/
-logs/
-data/*.db
-data/*.db-shm
-data/*.db-wal
-data/vector_store/
-data/backups/
-.streamlit/
-temp/
-
-# --- 构建产物与生成物（非源码，不入库）---
+*$py.class
+*.so
+.Python
 build/
-artpm_agent.egg-info/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
 *.egg-info/
-coverage.xml
+.installed.cfg
+*.egg
+
+# 虚拟环境
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 数据文件
+data/*.db
+data/*.db-journal
+data/vector_store/
+data/chat_attachments/
+data/backups/
+data/artifacts/
+
+# 日志
+*.log
+logs/
+artpm_agent/logs/
+
+# 临时文件
+*.tmp
+*.bak
+*.old
+.DS_Store
+Thumbs.db
+
+# 环境配置
+.env
+.env.local
+
+# 测试
+.pytest_cache/
 .coverage
-.pytest-*.log
+htmlcov/
+.tox/
+
+# Alembic
+alembic/versions/*.py
+!alembic/versions/__init__.py
+
+# 构建 / 测试 / 临时产物（不入库）
+temp/
+_legacy_backup/
 .pytest-tmp/
 .reasonix/
-_legacy_backup/
+artifacts/
+coverage.xml
 *.wip_bak
-*.bak
-data/artifacts/
-data/*.faiss
-artifacts/*.png
-artifacts/*.html
 
-# --- 助手专属记忆/配置（非项目源码）---
+# 工具私有目录（非项目源码）
 .workbuddy/
-.claude/

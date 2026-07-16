@@ -6,6 +6,7 @@ import os
 import re
 import stat
 from pathlib import Path
+from typing import Optional
 
 # 确保项目根目录在 Python 路径中（Streamlit 以多页面方式加载本文件时也能找到包）
 # 先 resolve(__file__) 为绝对路径再取 parent，避免 __file__ 为相对路径时多退一层目录。
@@ -14,7 +15,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from artpm_agent.ui_helpers import *  # noqa: F401,F403
-from artpm_agent.config import PROJECT_ENV_PATH
+from artpm_agent.config import PROJECT_ENV_PATH, resolve_data_root, save_data_root, reset_config
 
 # 显式导入 Agent / Config，避免降级态（核心模块导入失败时）下
 # 依赖通配导入拿不到名字而触发 NameError。
@@ -103,6 +104,178 @@ def _replace_session_agent(refreshed_agent):
             )
 
 
+def _pick_directory() -> Optional[str]:
+    """Open the OS native folder picker when available (local Streamlit)."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception:
+        st.info("当前环境不支持系统文件选择器，请手动输入路径。")
+        return None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        chosen = filedialog.askdirectory(title="选择数据存储目录")
+        root.destroy()
+        return chosen or None
+    except Exception as error:
+        logger.warning(f"打开系统目录选择器失败: {error}")
+        st.info("无法打开系统文件选择器，请手动输入路径。")
+        return None
+
+
+def _render_storage_settings():
+    """让用户选择知识库与缓存的统一数据目录，并支持热重载与迁移。"""
+    render_section_heading("数据存储目录", "知识库与缓存统一存放处")
+    cfg = Config() if Config is not None else None
+    current_root = resolve_data_root()
+    db = (cfg.get("database", {}) if cfg is not None else {}) or {}
+
+    st.caption(
+        "所有本地知识库、向量索引、会话/业务数据库与运行缓存都会写入这个目录。"
+        "修改后点击「保存并重载」，应用会在不重启进程的情况下切换到新目录。"
+    )
+
+    with st.expander("查看当前目录结构", expanded=False):
+        st.code(
+            f"数据根目录: {current_root}\n"
+            f"  会话库:    {db.get('conversation_db_path')}\n"
+            f"  业务库:    {db.get('db_path')}\n"
+            f"  记忆库:    {db.get('memory_db_path')}\n"
+            f"  向量索引:  {db.get('vector_db_path')}\n"
+            f"  Token统计: {current_root / 'token_usage.db'}\n"
+            f"  轨迹库:    {current_root / 'episodes.db'}"
+        )
+
+    new_root = st.text_input(
+        "数据根目录",
+        value=str(current_root),
+        key="storage_data_root_input",
+        help="知识库与所有缓存将存放于此。留空或「恢复默认目录」会使用项目内的 data/ 目录。",
+    ).strip()
+
+    browse_col, _ = st.columns([1, 3])
+    with browse_col:
+        if st.button("📂 浏览…", key="storage_browse", use_container_width=True):
+            chosen = _pick_directory()
+            if chosen:
+                st.session_state.storage_data_root_input = chosen
+                st.rerun()
+
+    migrate = st.checkbox(
+        "同时把现有数据迁移到新目录",
+        value=True,
+        key="storage_migrate",
+        help="勾选后，当前目录下的数据库与缓存会被复制到新目录（旧目录保留、不删除）。",
+    )
+
+    save_col, reset_col = st.columns(2)
+    with save_col:
+        if st.button("保存并重载", key="storage_save", type="primary", use_container_width=True):
+            _apply_data_root(new_root if new_root else None, migrate=migrate, reset=False)
+    with reset_col:
+        if st.button("恢复默认目录", key="storage_reset", use_container_width=True):
+            _apply_data_root(None, migrate=False, reset=True)
+
+
+def _apply_mcp_env_preview(mcp_enabled: bool) -> None:
+    """将 MCP 设置页当前填写的 URL/Key/开关即时写入 os.environ，
+    使「刷新连接状态」按钮无需先保存即可测试新配置。
+    注意：这只影响当前进程内存，不写 .env 文件。"""
+    os.environ["MCP_ENABLED"] = "true" if mcp_enabled else "false"
+    # 从 session_state 的 widget 值读取（st.text_input 在 rerun 前已写入）
+    key = st.session_state.get("Skills Forge API Key", "")
+    url = st.session_state.get("Skills Forge URL", "").strip()
+    if key:
+        os.environ["SKILLS_FORGE_KEY"] = key
+    if url:
+        os.environ["SKILLS_FORGE_URL"] = url
+    # 重置 unified mcp_client 单例，让下次 get 重建时读新 env
+    from artpm_agent.core.mcp_client import reset_mcp_client
+    reset_mcp_client()
+    # 同时清除 agent 上缓存的 remote client，强制惰性重载
+    if AVAILABLE and st.session_state.get("agent"):
+        agent = st.session_state.agent
+        unified = getattr(agent, "mcp_client", None)
+        if unified:
+            unified._remote = None
+            unified._remote_failed = False
+
+
+def _apply_data_root(new_root, *, migrate, reset):
+    """Persist the chosen data root, optionally migrate data, then hot-reload."""
+    import shutil
+
+    old_root = resolve_data_root()
+    target = None
+    if new_root:
+        target = Path(new_root).expanduser()
+        if not target.is_absolute():
+            target = (
+                Path(__file__).resolve().parent.parent.parent / new_root
+            ).resolve()
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            st.error(f"无法创建目录 {target}：{error}")
+            return
+        if not os.access(str(target), os.W_OK):
+            st.error(f"目录不可写：{target}")
+            return
+
+    if migrate and target and old_root != target and old_root.exists():
+        try:
+            shutil.copytree(str(old_root), str(target), dirs_exist_ok=True)
+            st.toast(f"已迁移现有数据到 {target}")
+        except Exception as error:
+            logger.exception("迁移数据失败")
+            st.error(f"迁移现有数据失败：{error}；未切换目录。")
+            return
+
+    save_data_root(str(target) if target else None)
+    reset_config()
+
+    # 清空会话内已缓存的存储实例，迫使按新目录重建。
+    for key in (
+        "conversation_store",
+        "chat_attachment_store",
+        "artifact_generator",
+        "workflow_store",
+        "profile_store",
+        "knowledge_store",
+        "agent",
+        "db",
+        "messages_loaded_for",
+        "_conv_cache",
+        "mcp_skills_cache",
+        "mcp_error_cache",
+    ):
+        st.session_state.pop(key, None)
+
+    try:
+        init_session()
+    except Exception:
+        logger.exception("重载存储失败")
+        st.error("目录已切换，但重建存储失败，请重启服务。")
+        return
+
+    if ArtPMAgent is not None and Config is not None:
+        try:
+            refreshed = ArtPMAgent(Config())
+            _replace_session_agent(refreshed)
+        except Exception:
+            logger.exception("重建 Agent 失败")
+
+    try:
+        _load_knowledge_snapshot.clear()
+    except Exception:
+        pass
+
+    st.success("数据存储目录已切换并重新加载。")
+    st.rerun()
+
+
 def persist_settings(config, env_path=None):
     """只更新受管理的配置项，保留 .env 中的注释和其它设置。"""
     env_path = (
@@ -188,7 +361,7 @@ def settings_page():
     """设置页面"""
     render_page_header("系统 / 设置", "设置", "模型、工具与业务参数")
 
-    # MCP 连接状态：仅首次进入或显式刷新时拉取，避免每次 rerun 打远端。
+    # MCP 连接状态：仅首次进入或显式刷新时检测，避免每次 rerun 打远端。
     mcp_skills = st.session_state.get("mcp_skills_cache", [])
     mcp_error = st.session_state.get("mcp_error_cache", None)
     if st.session_state.get("mcp_skills_refresh") or "mcp_skills_cache" not in st.session_state:
@@ -196,11 +369,25 @@ def settings_page():
         if AVAILABLE and st.session_state.get("agent"):
             try:
                 mcp_client = getattr(st.session_state.agent, "mcp_client", None)
-                if mcp_client and mcp_client.is_enabled():
-                    mcp_skills = mcp_client.list_skills()
+                if mcp_client:
+                    # 用 ping() 做轻量连通性测试（不拉全量技能列表）
+                    if hasattr(mcp_client, "ping"):
+                        ok, msg = mcp_client.ping()
+                        if ok:
+                            mcp_skills = mcp_client.list_skills()
+                        else:
+                            mcp_error = msg
+                    elif mcp_client.enabled:
+                        mcp_skills = mcp_client.list_skills()
+                    else:
+                        # 未启用但有 remote client 实例 → 取诊断信息
+                        diag = getattr(mcp_client, "last_error", None)
+                        mcp_error = diag or "Skills Forge 未启用"
             except Exception as error:
-                logger.warning(f"MCP 状态检查失败: {error}")
-                mcp_error = "Skills Forge 状态读取失败"
+                logger.warning("MCP 状态检查失败: %s", error, exc_info=True)
+                mcp_error = f"Skills Forge 状态检查异常: {error}"
+        elif not AVAILABLE:
+            mcp_error = "Agent 运行时未就绪"
         st.session_state.mcp_skills_cache = mcp_skills
         st.session_state.mcp_error_cache = mcp_error
         st.session_state.mcp_skills_refresh = False
@@ -213,8 +400,8 @@ def settings_page():
         else 0
     )
 
-    model_tab, mcp_tab, workflow_tab, knowledge_tab, business_tab = st.tabs(
-        ["模型", "工具与连接", "工作流", "知识", "Agent"]
+    model_tab, mcp_tab, workflow_tab, knowledge_tab, storage_tab, business_tab = st.tabs(
+        ["模型", "工具与连接", "工作流", "知识", "存储", "Agent"]
     )
     with model_tab:
         llm_provider = st.selectbox(
@@ -354,7 +541,17 @@ def settings_page():
 
     with mcp_tab:
         if mcp_error:
-            st.error(f"{mcp_error}，请检查服务地址后重试。")
+            st.error(mcp_error)
+            # 如果错误类别是 url/parse，额外给一个可操作的提示
+            if AVAILABLE and st.session_state.get("agent"):
+                mc = getattr(st.session_state.agent, "mcp_client", None)
+                cat = getattr(mc, "last_error_category", None) if mc else None
+                if cat in ("url", "parse"):
+                    st.caption(
+                        "💡 **常见原因**：URL 填的是网站前台地址（如 `skillsforge.xyz`），"
+                        "而不是 API 服务端地址。请尝试改为 `https://api.skillsforge.xyz` "
+                        "或服务方提供的 API 地址。"
+                    )
         elif mcp_skills:
             st.success(f"Skills Forge 已连接，{len(mcp_skills)} 个技能可用")
             skill_rows = [
@@ -372,7 +569,7 @@ def settings_page():
                 key="mcp_skills_table",
             )
         else:
-            st.info("Skills Forge 当前未连接。保存有效配置并重启服务后生效。")
+            st.info("Skills Forge 当前未连接。保存有效配置并点击「刷新连接状态」测试。")
         mcp_enabled = st.toggle(
             "启用远程 Skills Forge",
             value=os.getenv("MCP_ENABLED", "false").lower() == "true",
@@ -381,8 +578,10 @@ def settings_page():
             "刷新连接状态",
             key="refresh_mcp_status",
             icon=":material/refresh:",
-            help="重新检测 Skills Forge 连接",
+            help="重新检测 Skills Forge 连接（用当前填写的 URL 和 Key）",
         ):
+            # 先把界面上的值写进 os.environ，让 ping() 能读到最新的配置
+            _apply_mcp_env_preview(mcp_enabled)
             st.session_state.mcp_skills_refresh = True
             st.rerun()
         mcp_key = st.text_input(
@@ -532,6 +731,9 @@ def settings_page():
             if not resources and not active_rules:
                 st.info("当前工作区还没有已确认的资料或规则。")
 
+    with storage_tab:
+        _render_storage_settings()
+
     with business_tab:
         current_profile = get_current_profile()
         if current_profile is not None:
@@ -622,6 +824,9 @@ def settings_page():
             logger.exception("保存配置失败")
             st.error(f"保存失败：{error}。请检查 .env 文件权限后重试。")
             return
+
+        # 保存后即时将 MCP 配置刷入进程环境，让后续 ping() 读到新值
+        _apply_mcp_env_preview(mcp_enabled)
 
         applied_profile = current_profile
         if profile_patch is not None:

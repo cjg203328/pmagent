@@ -31,14 +31,15 @@ _DEFAULT_STORE: Optional[EpisodeStore] = None
 def default_episode_db_path() -> str:
     """Resolve the default episodes database path.
 
-    Honors the ``ARTPM_EPISODE_DB`` environment variable; otherwise falls back
-    to ``<repo_root>/data/episodes.db``.
+    Honors the ``ARTPM_EPISODE_DB`` environment variable (explicit per-file
+    override); otherwise the episodes db lives under the user-chosen data root
+    so it relocates together with the knowledge base and caches.
     """
     env = os.environ.get("ARTPM_EPISODE_DB")
     if env:
         return env
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    return str(repo_root / "data" / "episodes.db")
+    from artpm_agent.config import resolve_data_root
+    return str(resolve_data_root() / "episodes.db")
 
 
 def _default_store() -> Optional[EpisodeStore]:

@@ -1043,6 +1043,170 @@ STYLE_CSS = """
     }
 
     /* ══════════════════════════════════════
+       文件产物卡片 — 对标 Kimi 智能体交互
+    ══════════════════════════════════════ */
+    .pm-artifact-anchor { display: none !important; }
+
+    [data-testid="stContainer"]:has(.pm-artifact-anchor) {
+        background: var(--pm-paper) !important;
+        border: 1px solid var(--pm-line) !important;
+        border-radius: var(--pm-radius-lg) !important;
+        box-shadow: var(--pm-shadow-card) !important;
+        padding: 16px 18px !important;
+        margin: 12px 0 4px !important;
+        transition: box-shadow 200ms ease, transform 200ms ease;
+    }
+    [data-testid="stContainer"]:has(.pm-artifact-anchor):hover {
+        box-shadow: var(--pm-shadow-md) !important;
+    }
+
+    /* 卡片头部：类型图标 + 文件名 + 元信息 */
+    .pm-artifact-head {
+        align-items: center;
+        display: flex;
+        gap: 12px;
+        margin-bottom: 14px;
+    }
+    .pm-artifact-icon {
+        align-items: center;
+        background: var(--pm-accent-soft);
+        border-radius: var(--pm-radius);
+        color: var(--pm-accent);
+        display: flex;
+        flex: 0 0 40px;
+        font-size: 20px;
+        height: 40px;
+        justify-content: center;
+        width: 40px;
+    }
+    .pm-artifact-meta { flex: 1 1 auto; min-width: 0; }
+    .pm-artifact-name {
+        color: var(--pm-ink);
+        font-size: 15px;
+        font-weight: 650;
+        line-height: 1.3;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .pm-artifact-sub {
+        color: var(--pm-muted);
+        font-size: 12.5px;
+        margin-top: 2px;
+    }
+
+    /* 主下载按钮（蓝底白字，独占一行） */
+    [data-testid="stContainer"]:has(.pm-artifact-anchor)
+        [class*="st-key-dl_main_"] button {
+        background: var(--pm-accent) !important;
+        border-color: var(--pm-accent) !important;
+        color: #fff !important;
+    }
+    [data-testid="stContainer"]:has(.pm-artifact-anchor)
+        [class*="st-key-dl_main_"] button:hover {
+        background: var(--pm-accent-hover) !important;
+        border-color: var(--pm-accent-hover) !important;
+        transform: translateY(-1px);
+        box-shadow: var(--pm-shadow-md) !important;
+    }
+
+    /* 导出区标签 */
+    .pm-artifact-export-label {
+        color: var(--pm-muted);
+        font-size: 12px;
+        font-weight: 600;
+        margin: 4px 0 8px;
+    }
+
+    /* 导出按钮（另存为 X）：浅色次级，hover 高亮 */
+    [data-testid="stContainer"]:has(.pm-artifact-anchor)
+        [class*="st-key-artifact_export_"] button {
+        background: var(--pm-surface) !important;
+        border-color: var(--pm-line) !important;
+        color: var(--pm-ink-secondary) !important;
+        font-size: 13px !important;
+        font-weight: 600 !important;
+        min-height: 38px !important;
+        padding: 0 12px !important;
+        box-shadow: none !important;
+    }
+    [data-testid="stContainer"]:has(.pm-artifact-anchor)
+        [class*="st-key-artifact_export_"] button:hover {
+        background: var(--pm-accent-soft) !important;
+        border-color: var(--pm-accent) !important;
+        color: var(--pm-accent) !important;
+        transform: translateY(-1px);
+    }
+
+    /* 预览触发按钮（与导出同级，次级浅色，与下载按钮等高并排） */
+    [data-testid="stContainer"]:has(.pm-artifact-anchor)
+        [class*="st-key-artifact_preview_"] button {
+        background: var(--pm-surface) !important;
+        border-color: var(--pm-line) !important;
+        color: var(--pm-ink-secondary) !important;
+        font-size: 13px !important;
+        font-weight: 600 !important;
+        padding: 0 12px !important;
+        box-shadow: none !important;
+    }
+    [data-testid="stContainer"]:has(.pm-artifact-anchor)
+        [class*="st-key-artifact_preview_"] button:hover {
+        background: var(--pm-accent-soft) !important;
+        border-color: var(--pm-accent) !important;
+        color: var(--pm-accent) !important;
+        transform: translateY(-1px);
+    }
+
+    /* 预览区分隔线 + 表格容器 */
+    .pm-artifact-hr {
+        border: 0;
+        border-top: 1px solid var(--pm-line-light);
+        margin: 12px 0 !important;
+    }
+    [data-testid="stContainer"]:has(.pm-artifact-anchor) [data-testid="stDataFrame"] {
+        margin: 0 0 4px !important;
+        border-radius: var(--pm-radius) !important;
+    }
+    [data-testid="stContainer"]:has(.pm-artifact-anchor) [data-testid="stDataFrame"] tbody {
+        font-size: 13px;
+    }
+
+    /* 一句话编辑展开器：去边框，顶部细线分隔，内敛紧凑 */
+    [data-testid="stContainer"]:has(.pm-artifact-anchor) [data-testid="stExpander"] {
+        border: 0 !important;
+        border-top: 1px solid var(--pm-line-light) !important;
+        border-radius: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    [data-testid="stContainer"]:has(.pm-artifact-anchor)
+        [data-testid="stExpander"] > summary,
+    [data-testid="stContainer"]:has(.pm-artifact-anchor)
+        [data-testid="stExpander"] [data-testid="stExpanderSummary"] {
+        color: var(--pm-ink-secondary);
+        font-size: 13px;
+        font-weight: 600;
+        padding: 12px 0 !important;
+    }
+
+    /* 编辑下载 + 生成新版本按钮：蓝底白字（行动点） */
+    [data-testid="stContainer"]:has(.pm-artifact-anchor)
+        [class*="st-key-artifact_edit_download_"] button,
+    [data-testid="stContainer"]:has(.pm-artifact-anchor)
+        [class*="st-key-artifact_edit_submit_"] button {
+        background: var(--pm-accent) !important;
+        border-color: var(--pm-accent) !important;
+        color: #fff !important;
+    }
+    [data-testid="stContainer"]:has(.pm-artifact-anchor)
+        [class*="st-key-artifact_edit_submit_"] button:hover {
+        background: var(--pm-accent-hover) !important;
+        border-color: var(--pm-accent-hover) !important;
+        transform: translateY(-1px);
+        box-shadow: var(--pm-shadow-md) !important;
+    }
+
+    /* ══════════════════════════════════════
        响应式适配
     ══════════════════════════════════════ */
     @media (prefers-reduced-motion: reduce) {
