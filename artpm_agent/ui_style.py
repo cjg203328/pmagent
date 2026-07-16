@@ -336,7 +336,7 @@ STYLE_CSS = """
         right: 18px;
         top: 52px;
         z-index: 2147483000;
-        width: 172px;
+        width: 208px;
         padding: 5px;
         background: rgba(255,255,255,0.98);
         border: 1px solid var(--pm-line-light);
@@ -352,7 +352,7 @@ STYLE_CSS = """
     .st-key-global_modes .stButton button {
         border-radius: var(--pm-radius-sm) !important;
         min-height: 34px !important;
-        padding: 0 8px !important;
+        padding: 0 6px !important;
         justify-content: center !important;
         box-shadow: none !important;
         white-space: nowrap !important;
@@ -367,7 +367,7 @@ STYLE_CSS = """
         .st-key-global_modes {
             right: 12px;
             top: 48px;
-            width: 152px;
+            width: 168px;
         }
     }
 

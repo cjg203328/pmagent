@@ -506,7 +506,7 @@ def init_session():
     """初始化应用状态，并从持久化存储恢复当前会话。"""
     if "view" not in st.session_state:
         st.session_state.view = "对话"
-    elif st.session_state.view not in {"对话", "设置"}:
+    elif st.session_state.view not in {"对话", "设置", "可观测"}:
         st.session_state.view = "对话"
 
     legacy_messages = list(st.session_state.get("messages", []))
@@ -714,9 +714,9 @@ def render_sidebar():
 
         render_conversation_sidebar()
 
-        # ── 底部导航模式切换（对话 / 设置）──
+        # ── 底部导航模式切换（对话 / 设置 / 可观测）──
         with st.container(key="sidebar_modes"):
-            chat_col, settings_col = st.columns(2)
+            chat_col, settings_col, obs_col = st.columns(3)
             with chat_col:
                 if st.button(
                     "对话",
@@ -739,12 +739,23 @@ def render_sidebar():
                     if st.session_state.view != "设置":
                         st.session_state.view = "设置"
                         st.rerun()
+            with obs_col:
+                if st.button(
+                    "可观测",
+                    key="nav_observability",
+                    icon=":material/monitoring:",
+                    type="primary" if st.session_state.view == "可观测" else "secondary",
+                    use_container_width=True,
+                ):
+                    if st.session_state.view != "可观测":
+                        st.session_state.view = "可观测"
+                        st.rerun()
 
 
 def render_global_navigation():
     """Render compact navigation that remains reachable when the sidebar is hidden."""
     with st.container(key="global_modes"):
-        chat_col, settings_col = st.columns(2)
+        chat_col, settings_col, obs_col = st.columns(3)
         with chat_col:
             if st.button(
                 "对话",
@@ -766,6 +777,17 @@ def render_global_navigation():
             ):
                 if st.session_state.view != "设置":
                     st.session_state.view = "设置"
+                    st.rerun()
+        with obs_col:
+            if st.button(
+                "可观测",
+                key="global_nav_observability",
+                icon=":material/monitoring:",
+                type="primary" if st.session_state.view == "可观测" else "secondary",
+                use_container_width=True,
+            ):
+                if st.session_state.view != "可观测":
+                    st.session_state.view = "可观测"
                     st.rerun()
 def normalize_agent_response(response):
     """Return displayable assistant text or fail loudly instead of rendering blank."""

@@ -19,6 +19,7 @@ from artpm_agent.ui_helpers import *  # noqa: F401,F403
 from artpm_agent.ui_style import STYLE_CSS
 from artpm_agent.views.chat import chat_page
 from artpm_agent.views.settings import settings_page
+from artpm_agent.views.observability import observability_page
 # 向后兼容：拆分前 persist_settings 直接挂在 app 模块上，用户 WIP 代码/测试仍按 app.persist_settings 调用。
 from artpm_agent.views.settings import persist_settings  # noqa: F401
 
@@ -49,6 +50,8 @@ def main():
 
     if view == "设置":
         settings_page()
+    elif view == "可观测":
+        observability_page()
     else:
         chat_page()
 
