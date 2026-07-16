@@ -148,13 +148,16 @@ class UnifiedMCPClient:
             pass
         return []
 
-    async def call_skill(self, skill_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def call_skill(
+        self, skill_name: str, params: Dict[str, Any], force: bool = False
+    ) -> Dict[str, Any]:
         """
         按名称路由到对应后端：本地工具优先，其次远程技能。
 
         Args:
             skill_name: 工具/技能名称
             params: 调用参数
+            force: 忽略市场技能缓存（透传到远程后端）
 
         Returns:
             {"success": bool, ...}
@@ -172,12 +175,20 @@ class UnifiedMCPClient:
         # 远程技能
         remote = self._get_remote()
         if remote is not None and remote.is_enabled():
-            return await remote.call_skill(skill_name, params)
+            return await remote.call_skill(skill_name, params, force=force)
 
         return {
             "success": False,
             "error": f"Skill or tool '{skill_name}' not found in any MCP backend",
         }
+
+    async def list_market_skills(self, force: bool = False) -> List[Dict[str, Any]]:
+        """拉取 Skills Forge 市场技能清单（远程后端，带 TTL 缓存）。"""
+        remote = self._get_remote()
+        if remote is not None and remote.is_enabled():
+            if hasattr(remote, "list_market_skills"):
+                return await remote.list_market_skills(force=force)
+        return []
 
     def call_tool(self, tool_name: str, params: Dict[str, Any]) -> Any:
         """同步调用本地工具（供非 async 上下文使用）。"""

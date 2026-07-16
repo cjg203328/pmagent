@@ -27,10 +27,12 @@ HTTP REST 的 ``MCPClient``。
 """
 import atexit
 import asyncio
+import json
 import logging
 import os
 import shutil
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 try:
@@ -74,6 +76,18 @@ class StdioMCPClient:
 
         self._tools_cache: Optional[List[Dict[str, Any]]] = None
         self._npx = _resolve_npx()
+
+        # ── 市场技能列表缓存（list_skills 这个 MCP 工具会去云端拉 88 个技能，
+        #    单次约 2.4s；按 TTL 缓存，命中后零网络开销）──
+        self._market_cache: Optional[Dict[str, Any]] = None
+        self._market_cache_ts: float = 0.0
+        self._market_cache_lock = threading.Lock()
+        try:
+            self._market_cache_ttl = int(os.getenv("MCP_SKILLS_CACHE_TTL", "300") or "300")
+        except ValueError:
+            self._market_cache_ttl = 300
+        # 上次 list_market_skills 是否命中本地缓存（True=0s 云端开销；False=刚拉云端）
+        self.last_market_cache_hit: Optional[bool] = None
 
         # ── 常驻 session 状态 ──
         self._lock = threading.Lock()          # 保护连接生命周期（thread / loop / 启停）
@@ -225,6 +239,11 @@ class StdioMCPClient:
             self._loop = None
             self._thread = None
             self._ready.clear()
+        # 缓存与连接无关，但关闭后一并清空，避免下次连接误用旧数据
+        with self._market_cache_lock:
+            self._market_cache = None
+            self._market_cache_ts = 0.0
+            self.last_market_cache_hit = None
 
     # ──────────────────────────────────────────────
     # 跨线程调用投递
@@ -307,14 +326,40 @@ class StdioMCPClient:
     # ──────────────────────────────────────────────
     # 对外接口（与 MCPClient 对齐，供 UnifiedMCPClient / MCPSkillsAdapter 直接复用）
     # ──────────────────────────────────────────────
-    async def call_skill(self, skill_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """调用技能（复用常驻 session，仅首次/重连建连有开销）。"""
+    async def call_skill(
+        self, skill_name: str, params: Dict[str, Any], force: bool = False
+    ) -> Dict[str, Any]:
+        """
+        调用技能（复用常驻 session，仅首次/重连建连有开销）。
+
+        force=True 时忽略市场技能缓存（用于显式刷新）。
+        """
         if not self.enabled:
             return {"success": False, "error": "MCP (stdio) is not enabled"}
+
+        # 市场技能列表缓存：list_skills 工具去云端拉 88 个技能，单次约 2.4s，
+        # 命中 TTL 缓存直接返回，省掉云端拉取。
+        if skill_name == "list_skills" and not force and self._market_cache_valid():
+            self.last_market_cache_hit = True
+            cached = self._get_market_cache() or {}
+            return {
+                "success": True,
+                "result": cached.get("result", ""),
+                "data": cached.get("data", ""),
+                "skill": "list_skills",
+                "cached": True,
+            }
+
         try:
-            return await self._acall(skill_name, params)
+            result = await self._acall(skill_name, params)
         except Exception as e:
             return {"success": False, "error": f"MCP (stdio) call failed: {e}"}
+
+        # 成功拉取市场技能后写入缓存（供后续 TTL 内复用）
+        if skill_name == "list_skills" and result.get("success"):
+            self.last_market_cache_hit = False
+            self._set_market_cache(result)
+        return result
 
     async def _acall(self, skill_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
         if not self._ensure_connected():
@@ -383,3 +428,86 @@ class StdioMCPClient:
             return True, f"Skills Forge (stdio) 已连接，{len(tools)} 个技能可用"
         except Exception as e:
             return False, self.last_error or str(e)
+
+    # ──────────────────────────────────────────────
+    # 市场技能列表（list_skills 工具返回，TTL 缓存）
+    # ──────────────────────────────────────────────
+    def _market_cache_valid(self) -> bool:
+        if self._market_cache is None:
+            return False
+        return (time.monotonic() - self._market_cache_ts) < self._market_cache_ttl
+
+    def _set_market_cache(self, value: Dict[str, Any]) -> None:
+        with self._market_cache_lock:
+            self._market_cache = {
+                "result": value.get("result", ""),
+                "data": value.get("data", ""),
+            }
+            self._market_cache_ts = time.monotonic()
+
+    def _get_market_cache(self) -> Optional[Dict[str, Any]]:
+        with self._market_cache_lock:
+            return self._market_cache
+
+    async def list_market_skills(self, force: bool = False) -> List[Dict[str, Any]]:
+        """
+        拉取 Skills Forge 市场技能清单（约 88 个），带 TTL 缓存。
+
+        返回结构化技能列表 [{name, description}, ...]；首次/强制刷新时才会
+        真正去云端拉取，之后命中缓存在毫秒级返回。
+        """
+        if not self.enabled:
+            return []
+        res = await self.call_skill("list_skills", {}, force=force)
+        if not res.get("success"):
+            return []
+        return self._parse_market_skills(res.get("data") or res.get("result") or "")
+
+    @staticmethod
+    def _parse_market_skills(text: str) -> List[Dict[str, Any]]:
+        """将 list_skills 返回的文本容错解析为结构化技能列表。"""
+        if not text:
+            return []
+        text = text.strip()
+        # 优先尝试 JSON 数组 / 对象
+        try:
+            data = json.loads(text)
+        except Exception:
+            data = None
+        if isinstance(data, list):
+            return StdioMCPClient._map_market_items(data)
+        if isinstance(data, dict):
+            for key in ("skills", "results", "items", "data", "list"):
+                val = data.get(key)
+                if isinstance(val, list):
+                    return StdioMCPClient._map_market_items(val)
+        # 退化：按行解析 "name: description" 或 "- name"
+        out: List[Dict[str, Any]] = []
+        for line in text.splitlines():
+            line = line.strip().lstrip("-*•").strip()
+            if not line:
+                continue
+            if ":" in line:
+                name, desc = line.split(":", 1)
+                out.append({"name": name.strip(), "description": desc.strip()})
+            else:
+                out.append({"name": line, "description": ""})
+        return out
+
+    @staticmethod
+    def _map_market_items(items: List[Any]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for item in items:
+            if isinstance(item, dict):
+                out.append(
+                    {
+                        "name": item.get("name") or item.get("id") or item.get("slug") or "",
+                        "description": item.get("description")
+                        or item.get("desc")
+                        or item.get("summary")
+                        or "",
+                    }
+                )
+            elif isinstance(item, str):
+                out.append({"name": item, "description": ""})
+        return out

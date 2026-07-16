@@ -5,6 +5,7 @@ import json
 import os
 import re
 import stat
+import asyncio
 from pathlib import Path
 from typing import Optional
 
@@ -364,8 +365,9 @@ def settings_page():
     # MCP 连接状态：仅首次进入或显式刷新时检测，避免每次 rerun 打远端。
     mcp_skills = st.session_state.get("mcp_skills_cache", [])
     mcp_error = st.session_state.get("mcp_error_cache", None)
+    mcp_market = st.session_state.get("mcp_market_cache", [])
     if st.session_state.get("mcp_skills_refresh") or "mcp_skills_cache" not in st.session_state:
-        mcp_skills, mcp_error = [], None
+        mcp_skills, mcp_error, mcp_market = [], None, []
         if AVAILABLE and st.session_state.get("agent"):
             try:
                 mcp_client = getattr(st.session_state.agent, "mcp_client", None)
@@ -375,6 +377,16 @@ def settings_page():
                         ok, msg = mcp_client.ping()
                         if ok:
                             mcp_skills = mcp_client.list_skills()
+                            # 拉市场技能清单（list_market_skills 带 TTL 缓存，
+                            # 仅首次/强制刷新才真正打云端拉 88 个技能）
+                            if hasattr(mcp_client, "list_market_skills"):
+                                try:
+                                    mcp_market = asyncio.run(
+                                        mcp_client.list_market_skills()
+                                    )
+                                except Exception as e:
+                                    logger.warning("拉取市场技能失败: %s", e, exc_info=True)
+                                    mcp_market = []
                         else:
                             mcp_error = msg
                     elif mcp_client.enabled:
@@ -390,6 +402,7 @@ def settings_page():
             mcp_error = "Agent 运行时未就绪"
         st.session_state.mcp_skills_cache = mcp_skills
         st.session_state.mcp_error_cache = mcp_error
+        st.session_state.mcp_market_cache = mcp_market
         st.session_state.mcp_skills_refresh = False
 
     provider_options = ["openai", "anthropic", "zhipu", "custom"]
@@ -555,7 +568,22 @@ def settings_page():
         elif mcp_skills:
             transport = os.getenv("MCP_TRANSPORT", "http").lower()
             transport_label = "stdio (npx)" if transport == "stdio" else "HTTP REST"
-            st.success(f"Skills Forge 已连接（{transport_label}），{len(mcp_skills)} 个技能可用")
+            if mcp_market:
+                st.success(
+                    f"Skills Forge 已连接（{transport_label}），"
+                    f"{len(mcp_skills)} 个 MCP 工具 + {len(mcp_market)} 个市场技能可用"
+                )
+                # 市场技能列表是否命中本地 TTL 缓存（无需再次打云端 2.4s）
+                mcp_client = getattr(st.session_state.get("agent"), "mcp_client", None)
+                cache_hit = getattr(mcp_client, "last_market_cache_hit", None)
+                if cache_hit is True:
+                    st.caption("🟢 市场技能列表来自本地 TTL 缓存（0s 云端开销）")
+                elif cache_hit is False:
+                    st.caption("🔵 市场技能列表本次从云端拉取并写入缓存（TTL 300s）")
+            else:
+                st.success(
+                    f"Skills Forge 已连接（{transport_label}），{len(mcp_skills)} 个技能可用"
+                )
             skill_rows = [
                 {
                     "技能": skill.get("name", "未命名"),
