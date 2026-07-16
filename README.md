@@ -128,13 +128,15 @@ artpm_agent/runtime/telemetry_dashboard.py  运营看板（HTML 报告 / Streaml
 查看方式（任选其一）：
 
 ```powershell
-# 1) 静态 HTML 报告
+# 1) 已集成进主应用的「可观测」面板（推荐）：主应用内左侧导航 / 右上角固定导航点击「可观测」
+streamlit run app.py
+# 2) 静态 HTML 报告
 python -m artpm_agent.runtime.telemetry_dashboard --out telemetry_report.html --window 500
-# 2) 独立 Streamlit 看板
+# 3) 独立 Streamlit 看板
 streamlit run telemetry_dashboard_app.py
 ```
 
-看板新增两块面板：**Token 消耗**（总/输入/输出/缓存命中 Token、估算成本、按模型与按 Provider 明细、Token 趋势）与 **连接 / 链接情况**（成功率、连接趋势、错误类型分布、端点健康）。
+「可观测」面板与原「对话 / 设置」共用主应用导航、主题与控件风格（`render_page_header`、`metric-rail`、`section-heading`），数据复用 `telemetry_dashboard.collect_dashboard` 这一单一数据源，与独立看板口径一致。面板含两块：**Token 消耗**（总/输入/输出/缓存命中 Token、估算成本、按模型与按 Provider 明细、Token 趋势）与 **连接 / 链接情况**（成功率、连接趋势、错误类型分布、端点健康，含 `agent.model_gateway` 熔断器冷却态）。
 
 关键开关（环境变量，均为可选，默认开启遥测）：
 
