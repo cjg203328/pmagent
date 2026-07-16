@@ -553,7 +553,9 @@ def settings_page():
                         "或服务方提供的 API 地址。"
                     )
         elif mcp_skills:
-            st.success(f"Skills Forge 已连接，{len(mcp_skills)} 个技能可用")
+            transport = os.getenv("MCP_TRANSPORT", "http").lower()
+            transport_label = "stdio (npx)" if transport == "stdio" else "HTTP REST"
+            st.success(f"Skills Forge 已连接（{transport_label}），{len(mcp_skills)} 个技能可用")
             skill_rows = [
                 {
                     "技能": skill.get("name", "未命名"),
@@ -594,6 +596,10 @@ def settings_page():
             "Skills Forge URL",
             value=os.getenv("SKILLS_FORGE_URL", ""),
             placeholder="https://api.skillsforge.xyz",
+            help=(
+                "HTTP REST 模式使用此地址。当前若为 stdio 模式，"
+                "连接由 npx 包 @skills-forge/mcp-server 内部负责，此字段不参与连接。"
+            ),
         ).strip()
 
     with workflow_tab:

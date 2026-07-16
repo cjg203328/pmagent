@@ -263,19 +263,17 @@ class MCPClient:
         return "\n".join(lines)
 
 
-# 全局 MCP 客户端实例
-_mcp_client: Optional[MCPClient] = None
+# 向后兼容入口：返回统一客户端（含 stdio / http 远程后端），
+# 使所有调用方（mcp_skills / test_mcp / settings）自动获得最新能力，无需逐一改造。
+def get_mcp_client():
+    """获取全局 MCP 客户端实例（统一客户端，聚合本地工具与远程技能后端）。"""
+    from artpm_agent.core.mcp_client_unified import get_unified_mcp_client
 
-
-def get_mcp_client() -> MCPClient:
-    """获取全局 MCP 客户端实例"""
-    global _mcp_client
-    if _mcp_client is None:
-        _mcp_client = MCPClient()
-    return _mcp_client
+    return get_unified_mcp_client()
 
 
 def reset_mcp_client() -> None:
-    """清除全局单例，下次 get_mcp_client() 会重新初始化（读取最新环境变量）。"""
-    global _mcp_client
-    _mcp_client = None
+    """清除全局 MCP 客户端单例，下次 get_mcp_client() 会重新初始化（读取最新环境变量）。"""
+    from artpm_agent.core.mcp_client_unified import reset_unified_mcp_client
+
+    reset_unified_mcp_client()

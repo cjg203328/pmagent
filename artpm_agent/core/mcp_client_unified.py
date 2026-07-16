@@ -56,10 +56,18 @@ class UnifiedMCPClient:
         if os.getenv("MCP_ENABLED", "false").lower() != "true":
             self._remote_failed = True
             return None
+        transport = os.getenv("MCP_TRANSPORT", "http").lower()
         try:
-            from artpm_agent.core.mcp_client import MCPClient
+            if transport == "stdio":
+                # 真正的 MCP 协议后端：npx 拉起 @skills-forge/mcp-server
+                from artpm_agent.core.mcp_client_stdio import StdioMCPClient
 
-            self._remote = MCPClient(self._api_key)
+                self._remote = StdioMCPClient(self._api_key)
+            else:
+                # 旧版自定义 HTTP REST 后端（部分 Skills Forge 部署兼容）
+                from artpm_agent.core.mcp_client import MCPClient
+
+                self._remote = MCPClient(self._api_key)
         except Exception:
             self._remote = None
             self._remote_failed = True
@@ -224,3 +232,9 @@ def get_unified_mcp_client(
     elif _unified_mcp_client is None:
         _unified_mcp_client = UnifiedMCPClient(workspace_path, api_key)
     return _unified_mcp_client
+
+
+def reset_unified_mcp_client() -> None:
+    """清除统一客户端全局单例，下次 get_unified_mcp_client() 会重新初始化（读取最新环境变量）。"""
+    global _unified_mcp_client
+    _unified_mcp_client = None
