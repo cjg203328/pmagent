@@ -14,11 +14,13 @@ STYLE_CSS = """
         --pm-line:         #e8eaf0;
         --pm-line-light:   #f0f1f5;
 
-        /* 主色 */
-        --pm-accent:       #4a6cf7;
-        --pm-accent-hover: #3558e0;
-        --pm-accent-soft:  #eef2ff;
-        --pm-accent-glow:  rgba(74, 108, 247, 0.08);
+        /* 主色 — 柔和版：从 #4a6cf7 降到更淡的薰衣草蓝 */
+        --pm-accent:       #7c8aff;
+        --pm-accent-hover: #6677dd;
+        --pm-accent-soft:  #f4f3ff;
+        --pm-accent-glow:  rgba(124, 138, 255, 0.07);
+        --pm-accent-warm:  #f8f6fc;   /* 助手消息暖调底色 */
+        --pm-accent-pale:  #edeafc;   /* 悬浮/交互态 */
 
         /* 语义色 */
         --pm-success:      #22c55e;
@@ -230,13 +232,13 @@ STYLE_CSS = """
     }
 
     .brand-mark {
-        background: linear-gradient(135deg, var(--pm-accent), #7c5cfc);
+        background: linear-gradient(135deg, var(--pm-accent), #a78bfa);
         display: block;
         height: 15px;
         transform: rotate(45deg);
         width: 15px;
         border-radius: 2px;
-        box-shadow: 0 2px 8px rgba(74,108,247,0.25);
+        box-shadow: 0 2px 8px rgba(124,138,255,0.22);
     }
 
     .brand-name {
@@ -454,7 +456,7 @@ STYLE_CSS = """
     input:focus-visible,
     textarea:focus-visible,
     [role="tab"]:focus-visible {
-        outline: 3px solid rgba(74, 108, 247, 0.20) !important;
+        outline: 3px solid rgba(124, 138, 255, 0.18) !important;
         outline-offset: 2px !important;
     }
 
@@ -741,7 +743,7 @@ STYLE_CSS = """
         overflow-wrap: anywhere;
         padding: 10px 16px;
         width: fit-content;
-        box-shadow: var(--pm-shadow-sm);
+        box-shadow: 0 1px 6px rgba(124,138,255,0.18);
     }
 
     [data-testid="stChatMessage"]:has(.chat-role-user)
@@ -780,9 +782,65 @@ STYLE_CSS = """
         border-radius: var(--pm-radius-sm);
     }
 
-    /* 助手消息 */
+    /* 助手消息 — 柔和暖调容器 */
     [data-testid="stChatMessage"]:has(.chat-role-assistant) {
         margin-bottom: 10px;
+    }
+
+    /* 助手消息内容：极淡的薰衣草暖调底色 + 微妙左强调线 */
+    [data-testid="stChatMessage"]:has(.chat-role-assistant)
+    [data-testid="stChatMessageContent"] {
+        background: var(--pm-accent-warm, #f8f6fc);
+        border-radius: var(--pm-radius-lg);
+        border-left: 3px solid var(--pm-accent-pale, #edeafc);
+        box-shadow: 0 1px 4px rgba(124,138,255,0.04);
+        flex: 0 1 auto;
+        margin: 2px 0;
+        max-width: 85%;
+        min-height: 36px;
+        overflow-wrap: anywhere;
+        padding: 14px 18px;
+        width: fit-content;
+        transition: box-shadow 180ms ease;
+    }
+
+    [data-testid="stChatMessage"]:has(.chat-role-assistant)
+    [data-testid="stChatMessageContent"]:hover {
+        box-shadow: 0 2px 10px rgba(124,138,255,0.08);
+    }
+
+    /* 助手消息内文字：更舒适的行高与间距 */
+    [data-testid="stChatMessage"]:has(.chat-role-assistant)
+    [data-testid="stChatMessageContent"] p,
+    [data-testid="stChatMessage"]:has(.chat-role-assistant)
+    [data-testid="stChatMessageContent"] li {
+        font-size: 14.5px !important;
+        line-height: 1.75 !important;
+        color: var(--pm-ink-secondary) !important;
+        margin-bottom: 4px;
+    }
+
+    [data-testid="stChatMessage"]:has(.chat-role-assistant)
+    [data-testid="stChatMessageContent"] p:last-child,
+    [data-testid="stChatMessage"]:has(.chat-role-assistant)
+    [data-testid="stChatMessageContent"] li:last-child {
+        margin-bottom: 0;
+    }
+
+    [data-testid="stChatMessage"]:has(.chat-role-assistant)
+    [data-testid="stChatMessageContent"] h3,
+    [data-testid="stChatMessage"]:has(.chat-role-assistant)
+    [data-testid="stChatMessageContent"] strong {
+        color: var(--pm-ink) !important;
+        font-weight: 650;
+    }
+
+    [data-testid="stChatMessage"]:has(.chat-role-assistant)
+    [data-testid="stChatMessageContent"] ul,
+    [data-testid="stChatMessage"]:has(.chat-role-assistant)
+    [data-testid="stChatMessageContent"] ol {
+        margin-block: 8px 4px;
+        padding-inline-start: 20px;
     }
 
     /* 头像 */
@@ -978,6 +1036,45 @@ STYLE_CSS = """
 
     /* ── 消息内容微交互 ── */
     [data-testid="stChatMessageContent"] { transition: box-shadow 200ms ease; }
+
+    /* ══════════════════════════════════════
+       聊天消息内按钮柔和化（复制文本 / 反馈 等）
+       覆盖默认 primary 硬蓝，改用柔和次级风格
+    ══════════════════════════════════════ */
+    [data-testid="stChatMessage"] button,
+    [data-testid="stChatMessageContent"] button {
+        background: var(--pm-accent-soft) !important;
+        border: 1px solid var(--pm-accent-pale) !important;
+        border-radius: var(--pm-radius-sm) !important;
+        box-shadow: none !important;
+        color: var(--pm-accent) !important;
+        font-size: 12.5px !important;
+        font-weight: 600 !important;
+        min-height: 32px !important;
+        padding: 4px 12px !important;
+        transition: all 180ms ease !important;
+    }
+
+    [data-testid="stChatMessage"] button:hover,
+    [data-testid="stChatMessageContent"] button:hover {
+        background: var(--pm-accent-pale) !important;
+        border-color: var(--pm-accent) !important;
+        transform: translateY(-1px);
+        box-shadow: 0 2px 8px rgba(124,138,255,0.10) !important;
+    }
+
+    /* 用户消息气泡内按钮保持白字（因为底色是 accent）*/
+    [data-testid="stChatMessage"]:has(.chat-role-user)
+    [data-testid="stChatMessageContent"] button {
+        background: rgba(255,255,255,0.20) !important;
+        border-color: rgba(255,255,255,0.30) !important;
+        color: #fff !important;
+    }
+    [data-testid="stChatMessage"]:has(.chat-role-user)
+    [data-testid="stChatMessageContent"] button:hover {
+        background: rgba(255,255,255,0.32) !important;
+        border-color: rgba(255,255,255,0.45) !important;
+    }
 
     /* ── 图片在消息中自适应 ── */
     [data-testid="stChatMessageContent"] img {
