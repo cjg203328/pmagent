@@ -33,6 +33,7 @@ import os
 import shutil
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
@@ -51,6 +52,11 @@ _STDIO_ARGS = ["-y", "@skills-forge/mcp-server@latest"]
 _CONNECT_TIMEOUT = 180
 # 单次工具调用的超时
 _CALL_TIMEOUT = 60
+
+# 磁盘缓存目录（进程重启后首次也能免云端拉取，TTL 内）。
+# 存于项目根的 .cache/mcp，已被 .gitignore 排除，不会进版本库。
+_DISK_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".cache" / "mcp"
+_MARKET_DISK_CACHE_FILE = _DISK_CACHE_DIR / "skills_forge_market.json"
 
 
 def _resolve_npx() -> str:
@@ -112,6 +118,8 @@ class StdioMCPClient:
         else:
             # 进程退出时兜底关闭，避免遗留 npx 孤儿进程
             atexit.register(self.close)
+            # 启动即从磁盘恢复市场技能缓存（TTL 内则首次调用 0s 云端开销）
+            self._load_disk_cache()
 
     # ──────────────────────────────────────────────
     # 连接参数构建
@@ -444,10 +452,65 @@ class StdioMCPClient:
                 "data": value.get("data", ""),
             }
             self._market_cache_ts = time.monotonic()
+        # 锁外落盘（避免重入 _market_cache_lock；文件写很快，且原子 rename 保证一致性）
+        self._save_disk_cache(self._market_cache)
 
     def _get_market_cache(self) -> Optional[Dict[str, Any]]:
         with self._market_cache_lock:
             return self._market_cache
+
+    # ── 磁盘持久化（跨进程重启保留缓存）──
+    def _load_disk_cache(self) -> None:
+        """启动时从磁盘恢复市场技能缓存；过期或损坏则丢弃（下次调用走云端）。"""
+        try:
+            if not _MARKET_DISK_CACHE_FILE.exists():
+                return
+            with open(_MARKET_DISK_CACHE_FILE, encoding="utf-8") as f:
+                doc = json.load(f)
+            saved_at = doc.get("saved_at", 0)
+            if not isinstance(saved_at, (int, float)):
+                return
+            age = time.time() - saved_at
+            if age >= self._market_cache_ttl:
+                logger.info(
+                    "[StdioMCP] disk cache expired (age %.0fs >= ttl %ss), will refetch",
+                    age,
+                    self._market_cache_ttl,
+                )
+                return
+            data = doc.get("data")
+            if not isinstance(data, dict):
+                return
+            with self._market_cache_lock:
+                self._market_cache = {
+                    "result": data.get("result", ""),
+                    "data": data.get("data", ""),
+                }
+                self._market_cache_ts = time.monotonic()
+            logger.info(
+                "[StdioMCP] loaded market cache from disk (%.0fs TTL left)",
+                self._market_cache_ttl - age,
+            )
+        except Exception:
+            logger.warning("[StdioMCP] failed to load disk cache", exc_info=True)
+
+    def _save_disk_cache(self, payload: Dict[str, Any]) -> None:
+        """原子写磁盘缓存：先写 .tmp 再 rename，避免半截文件。"""
+        try:
+            _DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            doc = {
+                "saved_at": time.time(),
+                "data": {
+                    "result": payload.get("result", ""),
+                    "data": payload.get("data", ""),
+                },
+            }
+            tmp = _MARKET_DISK_CACHE_FILE.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(doc, f, ensure_ascii=False)
+            tmp.replace(_MARKET_DISK_CACHE_FILE)
+        except Exception:
+            logger.warning("[StdioMCP] failed to save disk cache", exc_info=True)
 
     async def list_market_skills(self, force: bool = False) -> List[Dict[str, Any]]:
         """

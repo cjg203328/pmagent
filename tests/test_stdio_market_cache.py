@@ -100,3 +100,68 @@ def test_parse_market_skills_empty():
     assert c._parse_market_skills("not json at all") == [
         {"name": "not json at all", "description": ""}
     ]
+
+
+def test_disk_cache_survives_new_instance(monkeypatch, tmp_path):
+    """写入磁盘缓存后，新建实例（模拟进程重启）应能从磁盘恢复并命中，无需云端。"""
+    monkeypatch.setenv("MCP_SKILLS_CACHE_TTL", "300")
+    # 用临时目录替代默认 .cache，避免污染项目
+    import artpm_agent.core.mcp_client_stdio as mod
+
+    monkeypatch.setattr(mod, "is_valid_api_key", lambda k: True)
+    monkeypatch.setattr(mod, "_DISK_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(
+        mod, "_MARKET_DISK_CACHE_FILE", tmp_path / "skills_forge_market.json"
+    )
+
+    # 进程 #1：构造客户端，mock 连接后写入缓存（落盘）
+    c1 = StdioMCPClient(api_key="sk_test", enabled=True)
+    c1.enabled = True
+    monkeypatch.setattr(c1, "_ensure_connected", lambda force=False: True)
+    payload = {
+        "success": True,
+        "result": '[{"name":"a","description":"A"}]',
+        "data": '[{"name":"a","description":"A"}]',
+    }
+    c1._set_market_cache(payload)
+    assert tmp_path.joinpath("skills_forge_market.json").exists()
+
+    # 进程 #2：全新实例，应能从磁盘加载并命中（不调 _acall）
+    c2 = StdioMCPClient(api_key="sk_test", enabled=True)
+    c2.enabled = True
+    monkeypatch.setattr(c2, "_ensure_connected", lambda force=False: True)
+    calls = {"n": 0}
+
+    async def fake_acall(name, params):
+        calls["n"] += 1
+        return payload
+
+    monkeypatch.setattr(c2, "_acall", fake_acall)
+    # 内存缓存已在 __init__ 从磁盘恢复 → _market_cache_valid() 为真
+    r = asyncio.run(c2.call_skill("list_skills", {}))
+    assert calls["n"] == 0, "重启后应命中磁盘缓存，不应打云端"
+    assert r.get("cached") is True
+    assert c2.last_market_cache_hit is True
+
+
+def test_disk_cache_expired_not_loaded(monkeypatch, tmp_path):
+    """磁盘缓存过期（TTL=0）时启动不加载，首次调用仍走云端。"""
+    monkeypatch.setenv("MCP_SKILLS_CACHE_TTL", "0")
+    import artpm_agent.core.mcp_client_stdio as mod
+
+    monkeypatch.setattr(mod, "is_valid_api_key", lambda k: True)
+    monkeypatch.setattr(mod, "_DISK_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(
+        mod, "_MARKET_DISK_CACHE_FILE", tmp_path / "skills_forge_market.json"
+    )
+
+    c1 = StdioMCPClient(api_key="sk_test", enabled=True)
+    c1.enabled = True
+    monkeypatch.setattr(c1, "_ensure_connected", lambda force=False: True)
+    c1._set_market_cache(
+        {"success": True, "result": "[]", "data": "[]"}
+    )
+
+    c2 = StdioMCPClient(api_key="sk_test", enabled=True)
+    c2.enabled = True
+    assert c2._market_cache is None, "TTL=0 时不应从过期磁盘加载"
