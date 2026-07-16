@@ -714,81 +714,25 @@ def render_sidebar():
 
         render_conversation_sidebar()
 
-        # ── 底部导航模式切换（对话 / 设置 / 可观测）──
-        with st.container(key="sidebar_modes"):
-            chat_col, settings_col, obs_col = st.columns(3)
-            with chat_col:
-                if st.button(
-                    "对话",
-                    key="nav_chat",
-                    icon=":material/chat:",
-                    type="primary" if st.session_state.view == "对话" else "secondary",
-                    use_container_width=True,
-                ):
-                    if st.session_state.view != "对话":
-                        st.session_state.view = "对话"
-                        st.rerun()
-            with settings_col:
-                if st.button(
-                    "设置",
-                    key="nav_settings",
-                    icon=":material/settings:",
-                    type="primary" if st.session_state.view == "设置" else "secondary",
-                    use_container_width=True,
-                ):
-                    if st.session_state.view != "设置":
-                        st.session_state.view = "设置"
-                        st.rerun()
-            with obs_col:
-                if st.button(
-                    "可观测",
-                    key="nav_observability",
-                    icon=":material/monitoring:",
-                    type="primary" if st.session_state.view == "可观测" else "secondary",
-                    use_container_width=True,
-                ):
-                    if st.session_state.view != "可观测":
-                        st.session_state.view = "可观测"
-                        st.rerun()
+        # ── 导航模式切换（对话 / 设置 / 可观测）──
+        _NAV_OPTIONS = ["对话", "设置", "可观测"]
+        _current_view = (
+            st.session_state.view
+            if st.session_state.view in _NAV_OPTIONS
+            else _NAV_OPTIONS[0]
+        )
+        selected = st.pills(
+            "导航",
+            _NAV_OPTIONS,
+            selection_mode="single",
+            default=_current_view,
+            key="sidebar_nav_pills",
+        )
+        if selected != st.session_state.view:
+            st.session_state.view = selected
+            st.rerun()
 
 
-def render_global_navigation():
-    """Render compact navigation that remains reachable when the sidebar is hidden."""
-    with st.container(key="global_modes"):
-        chat_col, settings_col, obs_col = st.columns(3)
-        with chat_col:
-            if st.button(
-                "对话",
-                key="global_nav_chat",
-                icon=":material/chat:",
-                type="primary" if st.session_state.view == "对话" else "secondary",
-                use_container_width=True,
-            ):
-                if st.session_state.view != "对话":
-                    st.session_state.view = "对话"
-                    st.rerun()
-        with settings_col:
-            if st.button(
-                "设置",
-                key="global_nav_settings",
-                icon=":material/settings:",
-                type="primary" if st.session_state.view == "设置" else "secondary",
-                use_container_width=True,
-            ):
-                if st.session_state.view != "设置":
-                    st.session_state.view = "设置"
-                    st.rerun()
-        with obs_col:
-            if st.button(
-                "可观测",
-                key="global_nav_observability",
-                icon=":material/monitoring:",
-                type="primary" if st.session_state.view == "可观测" else "secondary",
-                use_container_width=True,
-            ):
-                if st.session_state.view != "可观测":
-                    st.session_state.view = "可观测"
-                    st.rerun()
 def normalize_agent_response(response):
     """Return displayable assistant text or fail loudly instead of rendering blank."""
     if not isinstance(response, str) or not response.strip():

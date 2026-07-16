@@ -43,7 +43,6 @@ def main():
     """主入口"""
     init_session()
     render_sidebar()
-    render_global_navigation()
 
     # 路由
     view = st.session_state.view

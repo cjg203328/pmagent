@@ -133,43 +133,45 @@ def test_sidebar_restore_control_is_not_hidden_with_header():
     assert "background: transparent" in STYLE_CSS
 
 
-def test_sidebar_exposes_only_chat_and_settings_navigation():
+def test_sidebar_pills_expose_exactly_the_three_views():
     app = AppTest.from_file(APP_FILE).run(timeout=30)
 
-    navigation_keys = {
+    nav = app.pills(key="sidebar_nav_pills")
+    assert set(nav.options) == {"对话", "设置", "可观测"}
+
+    # legacy multi-section button nav must be gone
+    legacy_keys = {
         button.key for button in app.button if button.key.startswith("nav_")
     }
-    assert navigation_keys == {"nav_chat", "nav_settings"}
-    assert {
-        "nav_overview",
-        "nav_projects",
-        "nav_upload",
-    }.isdisjoint(navigation_keys)
-
-    app.button(key="nav_settings").click().run(timeout=30)
-    assert not app.exception
-    assert app.session_state["view"] == "设置"
-
-    app.button(key="nav_chat").click().run(timeout=30)
-    assert not app.exception
-    assert app.session_state["view"] == "对话"
-    assert app.chat_input(key="chat_input") is not None
+    assert legacy_keys == set()
 
 
-def test_global_navigation_stays_available_outside_sidebar():
+def test_sidebar_pills_switch_between_all_views():
     app = AppTest.from_file(APP_FILE).run(timeout=30)
 
-    assert app.button(key="global_nav_settings") is not None
-    assert app.button(key="global_nav_chat") is not None
-
-    app.button(key="global_nav_settings").click().run(timeout=30)
+    app.pills(key="sidebar_nav_pills").set_value("设置").run(timeout=30)
     assert not app.exception
     assert app.session_state["view"] == "设置"
 
-    app.button(key="global_nav_chat").click().run(timeout=30)
+    app.pills(key="sidebar_nav_pills").set_value("可观测").run(timeout=30)
+    assert not app.exception
+    assert app.session_state["view"] == "可观测"
+
+    app.pills(key="sidebar_nav_pills").set_value("对话").run(timeout=30)
     assert not app.exception
     assert app.session_state["view"] == "对话"
     assert app.chat_input(key="chat_input") is not None
+
+
+def test_no_floating_global_nav_overlays_content():
+    """Redesign removed the fixed top-right mini nav so it no longer blocks
+    main content. Confirm those floating buttons no longer exist."""
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+
+    global_nav_keys = {
+        button.key for button in app.button if button.key.startswith("global_nav_")
+    }
+    assert global_nav_keys == set()
 
 
 @pytest.mark.parametrize("legacy_view", ["概览", "项目", "上传", "未知页面"])
@@ -191,14 +193,14 @@ def test_settings_round_trip_preserves_active_conversation_and_messages():
     conversation_id = app.session_state["active_conversation_id"]
     messages = message_contents(app)
 
-    app.button(key="nav_settings").click().run(timeout=30)
+    app.pills(key="sidebar_nav_pills").set_value("设置").run(timeout=30)
 
     assert not app.exception
     assert app.session_state["view"] == "设置"
     assert app.session_state["active_conversation_id"] == conversation_id
     assert message_contents(app) == messages
 
-    app.button(key="nav_chat").click().run(timeout=30)
+    app.pills(key="sidebar_nav_pills").set_value("对话").run(timeout=30)
 
     assert not app.exception
     assert app.session_state["view"] == "对话"
@@ -208,7 +210,7 @@ def test_settings_round_trip_preserves_active_conversation_and_messages():
 
 def test_settings_does_not_expose_volatile_quote_policy_controls():
     app = AppTest.from_file(APP_FILE).run(timeout=30)
-    app.button(key="nav_settings").click().run(timeout=30)
+    app.pills(key="sidebar_nav_pills").set_value("设置").run(timeout=30)
 
     number_labels = {widget.label for widget in app.number_input}
     select_labels = {widget.label for widget in app.selectbox}
@@ -222,7 +224,7 @@ def test_settings_does_not_expose_volatile_quote_policy_controls():
 
 def test_settings_can_disable_and_restore_a_workflow():
     app = AppTest.from_file(APP_FILE).run(timeout=30)
-    app.button(key="nav_settings").click().run(timeout=30)
+    app.pills(key="sidebar_nav_pills").set_value("设置").run(timeout=30)
 
     enabled_key = "workflow_enabled_quote_assessment_1"
     app.toggle(key=enabled_key).set_value(False).run(timeout=30)

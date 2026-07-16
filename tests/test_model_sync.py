@@ -294,7 +294,7 @@ def test_config_reads_interactive_llm_budget_from_environment(monkeypatch):
 
 def test_settings_page_exposes_model_dropdown_and_manual_id():
     app = AppTest.from_file(str(APP_ROOT / "app.py")).run(timeout=30)
-    app.button(key="nav_settings").click().run(timeout=30)
+    app.pills(key="sidebar_nav_pills").set_value("设置").run(timeout=30)
 
     assert not app.exception
     model_choice = app.selectbox(key="model_choice_custom")

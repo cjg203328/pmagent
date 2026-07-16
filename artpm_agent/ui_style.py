@@ -319,58 +319,20 @@ STYLE_CSS = """
         border-radius: var(--pm-radius) !important;
     }
 
-    /* ── 底部导航模式切换 ── */
-    .st-key-sidebar_modes {
+    /* ── 侧边栏导航 pills ── */
+    .st-key-sidebar_nav_pills {
         border-top: 1px solid var(--pm-line-light);
-        margin-top: 18px;
-        padding-top: 14px;
+        margin-top: 16px;
+        padding-top: 12px;
     }
-    .st-key-sidebar_modes [data-testid="stHorizontalBlock"] { gap: 10px; }
-    .st-key-sidebar_modes .stButton button {
+    .st-key-sidebar_nav_pills [data-testid="stPillsContainer"] {
+        gap: 4px !important;
+    }
+    .st-key-sidebar_nav_pills [data-testid="stPill"] {
+        flex: 1 1 0 !important;
+        min-width: 0 !important;
         justify-content: center !important;
-        min-height: 40px !important;
-        border-radius: var(--pm-radius) !important;
-    }
-
-    /* ── 主界面固定导航：侧栏隐藏时仍可切换 ── */
-    .st-key-global_modes {
-        position: fixed;
-        right: 18px;
-        top: 52px;
-        z-index: 2147483000;
-        width: 208px;
-        padding: 5px;
-        background: rgba(255,255,255,0.98);
-        border: 1px solid var(--pm-line-light);
-        border-radius: var(--pm-radius);
-        box-shadow: var(--pm-shadow-md);
-        backdrop-filter: blur(14px);
-        isolation: isolate;
-        pointer-events: auto;
-    }
-
-    .st-key-global_modes [data-testid="stHorizontalBlock"] { gap: 4px; }
-
-    .st-key-global_modes .stButton button {
-        border-radius: var(--pm-radius-sm) !important;
-        min-height: 34px !important;
-        padding: 0 6px !important;
-        justify-content: center !important;
-        box-shadow: none !important;
-        white-space: nowrap !important;
-    }
-
-    .st-key-global_modes .stButton button p {
         font-size: 13px !important;
-        font-weight: 600 !important;
-    }
-
-    @media (max-width: 760px) {
-        .st-key-global_modes {
-            right: 12px;
-            top: 48px;
-            width: 168px;
-        }
     }
 
     /* ── 侧边栏底部统计 ── */
