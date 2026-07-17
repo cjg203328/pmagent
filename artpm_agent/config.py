@@ -366,6 +366,19 @@ def resolve_data_root() -> Path:
     return (project_root / "data").resolve()
 
 
+def resolve_state_path(filename: str, env_var: Optional[str] = None) -> Path:
+    """Resolve one persistent state file under the active data root.
+
+    A dedicated environment variable may override the location for advanced
+    deployments and tests. Otherwise every state database follows DATA_ROOT.
+    """
+    if env_var:
+        configured = os.getenv(env_var)
+        if configured:
+            return Path(configured).expanduser().resolve()
+    return (resolve_data_root() / filename).resolve()
+
+
 def save_data_root(root: Optional[str]) -> None:
     """Persist (or clear) the user-chosen data root override."""
     path = DATA_ROOT_OVERRIDE_PATH

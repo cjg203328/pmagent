@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from .strategy_store import StrategyStore, get_default_strategy_store
 
-_DEFAULT_META_DB = "data/meta_memory.db"
+_DEFAULT_META_DB = "data/meta_memory.db"  # legacy label; default path resolves via resolve_state_path()
 
 _URL_RE = re.compile(
     r"https?://|www\.|\b[\w-]+\.(com|cn|org|io|ai|net|dev)\b",
@@ -223,9 +223,12 @@ class MetaMemoryStore:
     """记录被反复遇到的知识缺口，形成可观测的「已知未知」列表。"""
 
     def __init__(self, db_path: str | Path | None = None):
-        self.db_path = Path(
-            db_path or _DEFAULT_META_DB
-        ).expanduser().resolve()
+        if db_path is not None:
+            self.db_path = Path(db_path).expanduser().resolve()
+        else:
+            from artpm_agent.config import resolve_state_path
+
+            self.db_path = resolve_state_path("meta_memory.db", "ARTPM_META_MEMORY_DB")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 

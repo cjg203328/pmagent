@@ -10,9 +10,9 @@ Redis 默认拉起作为缓存后端接入口——**一条 `docker compose up` 
 
 | 文件 | 作用 |
 |---|---|
-| `Dockerfile` | python:3.11-slim，依赖单一来源（pyproject.toml），headless 模式，轻量 `/healthz` 健康检查 |
-| `docker-compose.yml` | 单栈编排：`artpm-agent` + `caddy` + `redis` 共享 `artpm-net` 网络；挂卷持久化数据/证书/缓存；带资源上限 |
-| `Caddyfile` | 反向代理 + 自动 HTTPS + 全站 basicauth；站点域名由 `SITE_ADDRESS` 注入，认证哈希由 `BASIC_AUTH_HASH` 覆盖 |
+| `Dockerfile` | 多阶段构建：builder 编译 wheel → runtime 以非 root 用户 `appuser`(uid/gid 10001) 运行，运行镜像不含 build-essential；依赖单一来源（pyproject.toml），headless 模式，轻量 `/healthz` 健康检查 |
+| `docker-compose.yml` | 单栈编排：`artpm-agent` + `caddy` + `redis` 共享 `artpm-net` 网络；挂卷持久化数据/证书/缓存；`BASIC_AUTH_USER` / `BASIC_AUTH_HASH` 设为必填，缺失即 fail-fast；带资源上限 |
+| `Caddyfile` | 反向代理 + 自动 HTTPS + 全站 basicauth；站点域名由 `SITE_ADDRESS` 注入，认证凭据由 `BASIC_AUTH_USER` / `BASIC_AUTH_HASH` 提供（仓库不内置任何默认账号/密码） |
 | `.dockerignore` | 排除 data/logs/构建产物/测试，保障镜像精简且不泄露密钥 |
 
 ## 快速开始
@@ -26,10 +26,17 @@ cp .env.example .env
 #    公网部署请改成已解析到本机公网 IP 的域名
 export SITE_ADDRESS=pmagent.example.com
 
-# 3) 一条命令：构建 app + 起 Caddy + Redis + 自动申请/续期证书
+# 3) 设置 Caddy 基础认证凭据（必填，缺失则 docker compose up 直接报错）
+#    生成 bcrypt 哈希（按提示输入你的密码）：
+docker run --rm caddy:2-alpine caddy hash-password
+#    把用户名与哈希写进 .env：
+#      BASIC_AUTH_USER=admin
+#      BASIC_AUTH_HASH=$2a$...刚生成的哈希...
+
+# 4) 一条命令：构建 app + 起 Caddy + Redis + 自动申请/续期证书
 docker compose up -d --build
 
-# 4) 访问（basicauth 默认开启，见下方「身份验证」）
+# 5) 访问（全站 basicauth 已开启，用上面设置的账号/密码登录）
 #    https://<你的域名>        （SITE_ADDRESS 设为真实域名时）
 #    https://localhost          （默认，Caddy 本地 CA 证书，浏览器需信任）
 docker compose logs -f            # 看全部服务日志
@@ -39,21 +46,22 @@ docker compose logs -f            # 看全部服务日志
 Caddy 证书与配置落在具名卷 `caddy-data` / `caddy-config`，续期状态同样持久化；
 Redis 数据落在 `redis-data` 卷（AOF 持久化）。
 
-## 身份验证（basicauth，默认开启）
+## 身份验证（basicauth，强制开启，无默认凭据）
 
-Caddy 默认对全站启用基础认证，避免服务裸奔到公网：
+Caddy 对全站启用基础认证，避免服务裸奔到公网。**仓库与镜像内不内置任何默认账号/密码**：
 
-- **默认账号 / 密码**：`admin` / `ArtPM@2026#redis-default`
-  （哈希内嵌在 `Caddyfile` 的 `{$BASIC_AUTH_HASH:...}` 中）
-- ⚠️ **部署到公网前务必改密码**：
+- 凭据必须来自部署环境变量，并在 `docker-compose.yml` 中以 `${VAR:?...}` 声明为必填；
+  未设置时 `docker compose up` 会在配置阶段直接报错，绝不会以弱默认启动。
+- 设置步骤：
   ```bash
-  # 在宿主机执行，按提示输入你的密码，得到 $2a$... 哈希
+  # 1) 宿主机生成密码哈希（按提示输入你要用的密码）
   docker run --rm caddy:2-alpine caddy hash-password
-  # 在 docker-compose.yml 的 caddy.environment 取消 BASIC_AUTH_HASH 注释并填入该哈希：
-  #   - BASIC_AUTH_HASH=$2a$...
-  # 然后 docker compose up -d caddy 重新加载配置
+  # 2) 把用户名与哈希写入 .env
+  #      BASIC_AUTH_USER=admin
+  #      BASIC_AUTH_HASH=$2a$...上一步得到的哈希...
+  # 3) docker compose up -d 启动；访问时用该账号/密码登录
   ```
-- 本地测试用默认凭据即可；也可同样方式换成你自己的。
+- 改密码只需重新生成哈希并更新 `.env` 的 `BASIC_AUTH_HASH`，再 `docker compose up -d caddy` 热重载。
 
 ## Redis（默认开启，已接入为缓存层）
 
@@ -81,6 +89,11 @@ Caddy 默认对全站启用基础认证，避免服务裸奔到公网：
   （未挂卷），重建容器即丢失。Docker 部署请统一通过 `DATA_ROOT` 环境变量（compose 已设 `/app/data`）
   或宿主 `./data` 挂卷来管理数据位置。
 - `.env` 含密钥，已通过 `:ro` 只读挂载且被 `.dockerignore` 排除，不会烤进镜像。
+- **非 root 运行权限**：运行镜像以固定 `appuser`(uid/gid 10001) 启动。宿主挂卷 `./data`、`../logs` 需对该 UID 可写，否则 Streamlit 启动会报权限错误。首次部署可：
+  ```bash
+  sudo chown -R 10001:10001 ./data ./logs
+  ```
+  或让目录对「其他用户」可写（`chmod -R a+rwX ./data ./logs`，仅可信环境）。
 - 健康检查：agent 探 `/healthz`（不初始化完整 Agent，开销极低）；redis 探 `redis-cli ping`。
 - `artpm-agent` 默认**不**对外暴露 8501 端口（仅 Caddy 对内可达），对外唯一入口即 Caddy(443)。
   如确需局域网明文直连调试，可在 compose 中取消 `artpm-agent.ports` 注释。

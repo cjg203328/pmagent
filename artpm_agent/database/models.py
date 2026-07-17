@@ -338,7 +338,9 @@ class DatabaseManager:
 
     def __init__(self, db_url: str = None):
         if db_url is None:
-            db_path = Path(__file__).resolve().parents[2] / "data" / "artpm.db"
+            from artpm_agent.config import resolve_state_path
+
+            db_path = resolve_state_path("artpm.db", "DB_PATH")
             db_url = f"sqlite:///{db_path.as_posix()}"
         self.engine = create_engine(db_url, echo=False)
         self.SessionLocal = sessionmaker(bind=self.engine, expire_on_commit=False)

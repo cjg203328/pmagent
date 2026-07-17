@@ -169,11 +169,9 @@ _DEFAULT_STORE: Optional["StrategyStore"] = None
 
 
 def default_strategies_db_path() -> str:
-    env = os.environ.get("ARTPM_STRATEGY_DB")
-    if env:
-        return env
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    return str(repo_root / "data" / "strategies.db")
+    from artpm_agent.config import resolve_state_path
+
+    return str(resolve_state_path("strategies.db", "ARTPM_STRATEGY_DB"))
 
 
 def get_default_strategy_store() -> Optional["StrategyStore"]:

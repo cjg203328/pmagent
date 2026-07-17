@@ -636,6 +636,7 @@ class ModelGateway:
         # Response cache: skip the API call for identical requests.
         cache = self._response_cache
         cache_hit = False
+        cached = None
         if cache is not None:
             cached = cache.get(cache_model or "", system_prompt, prompt, history, image_paths)
         if cached is not None:
@@ -802,6 +803,7 @@ class ModelGateway:
 
         cache = self._response_cache
         cache_hit = False
+        cached = None
         if cache is not None:
             cached = cache.get(cache_model or "", system_prompt, user_input, history, image_paths)
         if cached is not None:

@@ -35,8 +35,9 @@ services:
       - DATA_ROOT=/app/data
       - STREAMLIT_SERVER_HEADLESS=true
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
-      # Redis 连接地址（应用目前默认仍用 SQLite + 内存，未消费此变量；
-      # 预留接入口，待接入 Redis 缓存 / 队列时让其读取 REDIS_URL 即可生效）
+      # Redis 连接地址：应用已把 TokenMonitor / EpisodeStore 的热查询接入
+      # Redis 作为可丢弃加速层（SQLite 仍为权威源）；REDIS_URL 缺失或不可达时
+      # 自动降级为纯 SQLite，不阻断应用。
       - REDIS_URL=redis://redis:6379/0
     restart: unless-stopped
     networks:
@@ -68,10 +69,13 @@ services:
     environment:
       # Caddyfile 通过 {$SITE_ADDRESS:localhost} 读取此变量
       - SITE_ADDRESS=${SITE_ADDRESS:-localhost}
-      # 自定义 basicauth 密码：取消下一行注释，把 <哈希> 换成
-      #   docker run --rm caddy:2-alpine caddy hash-password
-      # 生成的 $2a$... 值，即可覆盖 Caddyfile 中内嵌的默认哈希。
-      # - BASIC_AUTH_HASH=<哈希>
+      # 基础认证凭据（强制必填，缺失则配置阶段直接报错，绝不以弱默认启动）：
+      #   BASIC_AUTH_USER  —— 用户名，如 admin
+      #   BASIC_AUTH_HASH  —— bcrypt 哈希，由宿主机生成：
+      #       docker run --rm caddy:2-alpine caddy hash-password
+      #   在 .env 中填好后再 `docker compose up`（${VAR:?msg} 会在未设置时报错）。
+      - BASIC_AUTH_USER=${BASIC_AUTH_USER:?Set BASIC_AUTH_USER in .env (e.g. admin) before deploying}
+      - BASIC_AUTH_HASH=${BASIC_AUTH_HASH:?Set BASIC_AUTH_HASH in .env to the bcrypt hash from 'caddy hash-password' before deploying}
     depends_on:
       artpm-agent:
         condition: service_healthy
@@ -80,8 +84,10 @@ services:
       - artpm-net
 
   # ── Redis 缓存（默认开启）──
-  # 应用目前默认用 SQLite + 内存，不强制依赖 Redis；此处默认拉起一个 Redis 实例，
-  # 通过 artpm-net 供 agent 以 redis://redis:6379 访问（见 agent 的 REDIS_URL）。
+  # 应用把 TokenMonitor / EpisodeStore 热查询接入 Redis 作为加速层，
+  # SQLite 始终为权威源；REDIS_URL 缺失或不可达时自动降级为纯 SQLite。
+  # 此处默认拉起一个 Redis 实例，通过 artpm-net 供 agent 以
+  # redis://redis:6379 访问（见 agent 的 REDIS_URL）。
   # 暂不暴露宿主端口（仅网络内可达）。如需从宿主调试可加 ports: - "6379:6379"
   redis:
     image: redis:7-alpine

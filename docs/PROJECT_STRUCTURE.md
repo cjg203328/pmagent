@@ -162,7 +162,7 @@ pmagent/
 
 | 文件 | 说明 | 主要功能 |
 |------|------|---------|
-| `chat.py` | 聊天页面 | 对话交互、消息渲染、附件上传 |
+| `chat.py` | 聊天页面 | 对话交互、消息渲染、附件上传、通过统一 harness 走单一回合主链 |
 | `settings.py` | 设置页面 | 配置管理、API密钥设置 |
 
 ---
@@ -239,22 +239,25 @@ pmagent/
 ### 用户输入 → 响应流程
 
 ```
-1. 用户输入
+1. 用户输入（views/chat.py 接收，含附件落盘与一次性路径解析）
    ↓
-2. views/chat.py 接收
+2. ui_helpers.py 处理会话状态 / 历史裁剪
    ↓
-3. ui_helpers.py 处理会话状态
+3. internal/chat_harness_integration.execute_turn_with_harness()
    ↓
-4. agent.py 核心Agent处理
+4. harness/run_turn() 单一回合主链（Step0 记忆注入后顺序调度）：
+     profile → knowledge ingestion → knowledge rule
+     → artifact → workflow → skill → model fallback
    ↓
-5. skills/skill_router.py 路由到技能
+5. 各 handler 内部按需调用 skills/*_skill.py 与 database/models.py
    ↓
-6. skills/*_skill.py 执行业务逻辑
-   ↓
-7. database/models.py 数据持久化
-   ↓
-8. views/chat.py 渲染响应
+6. 结果（response / artifacts / approval）回传 chat.py 渲染
 ```
+
+> **单一回合主链（v0.2）**：chat.py 只保留两条路径 —— `local_fast` 极速直连
+> 与统一 harness。原先散落在 chat.py 内的知识规则 / 工件 / 工作流 / 直接模型
+> fallback 分支已移除，全部收敛到 `run_turn()` 的 handler 顺序调度，保证每回合
+> 只走一条可预测的主链。
 
 ### 离线模式流程
 

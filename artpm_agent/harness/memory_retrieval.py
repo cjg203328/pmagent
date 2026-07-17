@@ -50,6 +50,38 @@ class MemoryContextBudget:
     summarize_fn: Optional[Callable] = None  # LLM summarizer hook (optional)
 
 
+def _make_llm_callable(agent: Any):
+    """Extract a best-effort LLM callable from an agent instance.
+
+    Returns ``Callable[[str], str]`` or ``None``. Failures return "" so callers
+    can degrade to rule-based compression/extraction.
+    """
+    if agent is None:
+        return None
+    llm_client = getattr(agent, "llm_client", None)
+    if llm_client is not None and hasattr(llm_client, "chat"):
+        def _fn(prompt: str) -> str:
+            try:
+                result = llm_client.chat(prompt)
+                if isinstance(result, dict):
+                    return result.get("content", result.get("text", str(result)))
+                return str(result)
+            except Exception:  # noqa: BLE001
+                return ""
+        return _fn
+    if hasattr(agent, "chat") and callable(agent.chat):
+        def _fn_fallback(prompt: str) -> str:
+            try:
+                result = agent.chat(prompt)
+                if isinstance(result, dict):
+                    return result.get("content", result.get("text", str(result)))
+                return str(result)
+            except Exception:  # noqa: BLE001
+                return ""
+        return _fn_fallback
+    return None
+
+
 def _build_query(user_input: str, history: Optional[List[dict]]) -> str:
     """Compose a retrieval query from the current input and recent history."""
     parts = [user_input.strip()] if user_input else []
@@ -324,6 +356,11 @@ def inject_memory_context(
     if not isinstance(getattr(ctx, "extra", None), dict):
         ctx.extra = {}
 
+    # Idempotency: run_turn() calls this exactly once per turn. A second call
+    # (e.g. legacy pre-injection) must not double-append context.
+    if ctx.extra.get("memory_injected"):
+        return
+
     budget = MemoryContextBudget()
 
     if memory_manager is None:
@@ -334,9 +371,39 @@ def inject_memory_context(
         strategy_store = get_default_strategy_store()
 
     blocks: List[str] = []
+    seen_blocks: set[str] = set()
+
+    def _add(block: str) -> None:
+        block = (block or "").strip()
+        if not block:
+            return
+        key = _snippet_key(block)
+        if key in seen_blocks:
+            return
+        seen_blocks.add(key)
+        blocks.append(block)
+
     existing_knowledge = str(getattr(ctx, "knowledge_context", "") or "").strip()
     if existing_knowledge:
-        blocks.append(existing_knowledge)
+        _add(existing_knowledge)  # user-confirmed workspace facts (highest prio)
+
+    # Conversation compression summary (best-effort): keep in-turn continuity
+    # for long dialogues without re-running cross-session RAG.
+    try:
+        from artpm_agent.memory.memory_injector import MemoryInjector
+
+        history = list(getattr(ctx, "conversation_history", None) or [])
+        if history:
+            llm_fn = _make_llm_callable(ctx.agent)
+            comp = MemoryInjector(knowledge_store).compression_block(
+                history,
+                getattr(ctx, "conversation_id", "") or "",
+                llm_fn,
+            )
+            if comp:
+                _add("【对话摘要】\n" + comp)
+    except Exception:  # noqa: BLE001
+        pass
 
     memory_block = ""
     try:
@@ -351,7 +418,7 @@ def inject_memory_context(
             confidence_floor=budget.confidence_floor,
         )
         if memory_block:
-            blocks.append(memory_block)
+            _add(memory_block)
     except Exception:  # noqa: BLE001
         pass
 
@@ -362,7 +429,7 @@ def inject_memory_context(
                 max_entries=budget.max_feedback_entries,
             )
             if fb_block:
-                blocks.append(fb_block)
+                _add(fb_block)
         except Exception:  # noqa: BLE001
             pass
 
@@ -373,7 +440,7 @@ def inject_memory_context(
                 max_entries=budget.max_strategy_entries,
             )
             if st_block:
-                blocks.append(st_block)
+                _add(st_block)
         except Exception:  # noqa: BLE001
             pass
 
@@ -396,7 +463,7 @@ def inject_memory_context(
         )
         meta_block = format_meta_memory_context(meta)
         if meta_block:
-            blocks.append(meta_block)
+            _add(meta_block)
             ctx.extra["meta_memory"] = meta.as_dict()
     except Exception:  # noqa: BLE001
         pass
@@ -426,19 +493,31 @@ def inject_memory_context(
 
 
 # Priority for context budgeting: higher = kept first when over budget.
+# Ordering (P1): the user's confirmed workspace facts beat corrections, which
+# beat learned strategies, which beat fuzzy long-term recall, which beat
+# meta-memory gap suggestions. The conversation compression summary is kept
+# near the top because it carries in-turn continuity.
 _BLOCK_PRIORITY = {
-    "【相关记忆】": 4,
-    "【用户偏好与纠正】": 3,
-    "【优化策略": 2,
+    # existing ctx.knowledge_context (user-confirmed workspace facts) is handled
+    # specially with EXISTING_PRIORITY below.
+    "【对话摘要】": 5,
+    "【用户偏好与纠正】": 4,
+    "【优化策略": 3,
+    "【相关记忆】": 2,
     "【元记忆": 1,
 }
+# The pre-existing knowledge_context (workspace facts supplied by the caller)
+# always wins ties; treat it as the highest priority block.
+EXISTING_PRIORITY = 6
 
 
 def _block_priority(block: str) -> int:
     for marker, prio in _BLOCK_PRIORITY.items():
         if block.startswith(marker):
             return prio
-    return 0
+    # Unmarked blocks are the caller-supplied workspace facts, which must win
+    # any budget tie over the heuristically-retrieved blocks above.
+    return EXISTING_PRIORITY
 
 
 def _apply_context_budget(blocks: List[str], max_chars: int) -> List[str]:
@@ -455,11 +534,11 @@ def _apply_context_budget(blocks: List[str], max_chars: int) -> List[str]:
             break
         total -= len(block)
         kept.remove(block)
-    # If still over (a single top-priority block), truncate it in place.
+    # If still over (a single remaining block), truncate it in place to fit
+    # the budget — dropping it entirely would lose information we can keep as
+    # a fragment. The budget is always honoured either way.
     if total > max_chars and kept:
         top = kept[0]
-        if _block_priority(top) < _BLOCK_PRIORITY["【用户偏好与纠正】"]:
-            return []
         if len(top) > max_chars:
             kept[0] = top[: max_chars - 1].rstrip() + "…"
     return kept
@@ -471,6 +550,21 @@ def _snip(text: str, n: int = 300) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+# Structured negative-feedback categories (P1). Free-text "差/不好" is too
+# coarse to drive learning; a category lets reflection mine recurring failure
+# modes without guessing the user's intent.
+FEEDBACK_CATEGORIES: tuple[str, ...] = (
+    "too_verbose",     # 太啰嗦
+    "too_brief",       # 太简短
+    "not_direct",      # 没直接回答
+    "ignored_context", # 忽略上下文/已知信息
+    "factual_error",   # 事实错误
+    "wrong_format",    # 格式不对
+    "wrong_tool",      # 用错工具/能力
+    "other",           # 其他
+)
+
+
 def record_turn_feedback(
     turn_id: str,
     positive: bool,
@@ -478,16 +572,20 @@ def record_turn_feedback(
     user_prompt: str = "",
     assistant_content: str = "",
     correction: Optional[str] = None,
+    category: str = "",
     scope: str = "chat",
 ) -> dict[str, Any]:
     """Persist a 👍 / 👎 signal raised from the chat UI.
 
     The signal is written to two sinks so it closes the full loop:
 
-    * ``FeedbackStore``  -> injected into *future* turns (memory activation),
-      so the agent visibly "remembers" the user's preference next time.
-    * ``Episode.feedback`` -> mined by ``ReflectionJob`` (evolution loop),
-      so repeated 👎 on a handler can spawn an ``avoid`` strategy.
+    * ``FeedbackStore``  -> mined by the evolution loop (reflection). A *bare*
+      👎 is recorded but NOT injected into future prompts (it carries no
+      concrete instruction). A 👍 is recorded for reflection too, but is no
+      longer auto-injected as a global "use this style" preference — that was
+      noisy and conflicted with the Profile's own response_style.
+    * ``Episode.feedback`` -> mined by ``ReflectionJob`` so repeated 👎 on a
+      handler can spawn an ``avoid`` strategy.
 
     Returns a small status dict; callers may safely ignore it. This function
     never raises — a backend failure simply means the signal is not persisted.
@@ -495,6 +593,10 @@ def record_turn_feedback(
     result: dict[str, Any] = {"feedback_id": None, "episode_updated": 0}
     if not turn_id:
         return result
+
+    category = category or ""
+    if category and category not in FEEDBACK_CATEGORIES:
+        category = "other"
 
     try:
         from artpm_agent.memory.feedback_store import (
@@ -508,15 +610,16 @@ def record_turn_feedback(
             return result
 
         if positive:
-            content = (
-                f"用户认可本回合（{turn_id}）的回答方向（👍），"
-                f"后续同类请求可沿用此风格。"
-            )
+            # Record the thumbs-up for reflection, but mark it no_inject so it
+            # does not pollute every future turn's context with a vague "keep
+            # this style" instruction (the Profile owns response style now).
+            content = f"用户认可本回合（{turn_id}）的回答方向（👍）。"
             meta = {
                 "turn_id": turn_id,
                 "user_prompt": _snip(user_prompt, 300),
                 "assistant_content": _snip(assistant_content, 300),
                 "signal": "positive",
+                "no_inject": True,
             }
             result["feedback_id"] = store.add(
                 KIND_PREFERENCE, content, scope=scope, metadata=meta
@@ -524,14 +627,22 @@ def record_turn_feedback(
             episode_fb = f"👍 用户认可（回合 {turn_id}）"
         else:
             has_reason = bool(correction and correction.strip())
-            content = correction.strip() if has_reason else (
-                f"用户对本回合（{turn_id}）的回答不满意（👎）。"
-            )
+            cat_label = _feedback_category_label(category) if category else ""
+            if has_reason:
+                content = correction.strip()
+                if cat_label:
+                    content = f"[{cat_label}] {content}"
+            else:
+                content = (
+                    f"用户对本回合（{turn_id}）的回答不满意（👎）"
+                    + (f"：{cat_label}" if cat_label else "。")
+                )
             meta = {
                 "turn_id": turn_id,
                 "user_prompt": _snip(user_prompt, 300),
                 "assistant_content": _snip(assistant_content, 300),
                 "signal": "negative",
+                "category": category or "other",
                 # Bare negatives are noise if injected; only concrete reasons
                 # (user-authored text) become an injected "avoid" preference.
                 "no_inject": not has_reason,
@@ -540,9 +651,9 @@ def record_turn_feedback(
                 KIND_AVOID, content, scope=scope, metadata=meta
             )
             episode_fb = (
-                f"👎 用户反馈（回合 {turn_id}）：{correction.strip()}"
-                if has_reason
-                else f"👎 用户不满意（回合 {turn_id}）"
+                f"👎 用户反馈（回合 {turn_id}）"
+                + (f"[{cat_label}]" if cat_label else "")
+                + (f"：{correction.strip()}" if has_reason else "")
             )
 
         # Tag the episode so ReflectionJob can mine it in the next auto-run.
@@ -564,3 +675,16 @@ def record_turn_feedback(
     except Exception:  # noqa: BLE001 - never break the UI on a feedback click
         pass
     return result
+
+
+def _feedback_category_label(category: str) -> str:
+    return {
+        "too_verbose": "太啰嗦",
+        "too_brief": "太简短",
+        "not_direct": "没直接回答",
+        "ignored_context": "忽略上下文",
+        "factual_error": "事实错误",
+        "wrong_format": "格式不对",
+        "wrong_tool": "用错工具",
+        "other": "其他",
+    }.get(category, "其他")

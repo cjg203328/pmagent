@@ -10,6 +10,28 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 DEFAULT_WORKSPACE_ID = "local-default"
 DEFAULT_PROFILE_ID = "local-default"
 
+# Executable response-style rules. The label alone is ambiguous; the model needs
+# a concrete instruction so "balanced" / "detailed" don't silently collapse into
+# the hardcoded "concise" line elsewhere in the system prompt.
+RESPONSE_STYLE_RULES: dict[str, str] = {
+    "concise": (
+        "回答先给结论，通常用 3–6 个要点；省略铺垫，不展开不必需的背景、示例或客套。"
+    ),
+    "balanced": (
+        "回答先给结论，再给关键依据与下一步动作；需要解释时简明展开，不堆砌细节。"
+    ),
+    "detailed": (
+        "回答给出完整假设、推理过程、风险与可执行步骤；适合需要深度分析或复盘的场景。"
+    ),
+}
+
+
+def response_style_rule(style: str | None) -> str:
+    """Return the executable instruction for a response style (default balanced)."""
+    if style not in RESPONSE_STYLE_RULES:
+        style = "balanced"
+    return RESPONSE_STYLE_RULES[style]
+
 Identifier = Annotated[
     str,
     StringConstraints(
@@ -115,18 +137,20 @@ class AgentProfile(StrictProfileModel):
         """Render trusted business identity without granting new capabilities."""
         identity = self.identity
         policy = self.quote_policy
-        style = {
+        style_label = {
             "concise": "简洁",
             "balanced": "平衡",
             "detailed": "详细",
         }[identity.response_style]
+        style_rule = response_style_rule(identity.response_style)
         return (
             "Workspace Agent Profile（可信业务配置，不改变工具权限或系统安全规则）：\n"
             f"- 名称：{identity.display_name}\n"
             f"- 角色：{identity.role}\n"
             f"- 领域：{identity.domain}\n"
             f"- 默认语言：{identity.language}\n"
-            f"- 回答风格：{style}\n"
+            f"- 回答风格：{style_label}\n"
+            f"  - 执行要求：{style_rule}\n"
             f"- 业务指引：{identity.guidance or '无'}\n"
             f"- 管理费率：{policy.overhead_rate:.2%}\n"
             f"- 税率：{policy.tax_rate:.2%}\n"

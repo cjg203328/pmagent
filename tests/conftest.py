@@ -4,16 +4,104 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def disable_external_llm_for_tests(monkeypatch, tmp_path):
-    """Keep the test suite deterministic and prevent accidental API spend."""
+def isolate_state_and_disable_llm(monkeypatch, tmp_path):
+    """Per-test isolation for the full v0.2 state surface.
+
+    Every persistent state database is redirected under ``tmp_path`` so tests
+    never touch the real project ``./data`` directory or each other:
+
+    * ``DATA_ROOT`` governs the default resolve_state_path() layout.
+    * The dedicated ``ARTPM_*_DB`` env vars override individual state files
+      (feedback / strategy / meta-memory / reflection / episode) for advanced
+      deployments and tests.
+    * The classic DB_PATH / MEMORY_DB_PATH / CONVERSATION_DB_PATH /
+      VECTOR_DB_PATH keys are rebound too.
+
+    In addition, every module-level singleton (Config, FeedbackStore,
+    StrategyStore, MetaMemory, MetaMemoryStore, ReflectionScheduler,
+    EpisodeStore, outcome recorder) is reset so a fresh tmp_path-backed
+    instance is built on next access.
+    """
+    # ── LLM / API keys: keep tests deterministic, no accidental spend ──
     monkeypatch.setenv("LLM_PROVIDER", "custom")
     monkeypatch.setenv("OPENAI_API_KEY", "")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("ZHIPU_API_KEY", "")
-    monkeypatch.setenv(
-        "CONVERSATION_DB_PATH",
-        str(tmp_path / "conversations.db"),
-    )
+
+    # ── Single data root: everything else defaults underneath it ──
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+
+    # ── Classic database paths ──
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "app.db"))
+    monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "memory.db"))
+    monkeypatch.setenv("CONVERSATION_DB_PATH", str(tmp_path / "conversations.db"))
+    monkeypatch.setenv("VECTOR_DB_PATH", str(tmp_path / "vectors.db"))
+
+    # ── Dedicated per-state-file overrides (resolve_state_path env_var) ──
+    monkeypatch.setenv("ARTPM_FEEDBACK_DB", str(tmp_path / "feedback.db"))
+    monkeypatch.setenv("ARTPM_STRATEGY_DB", str(tmp_path / "strategies.db"))
+    monkeypatch.setenv("ARTPM_META_MEMORY_DB", str(tmp_path / "meta_memory.db"))
+    monkeypatch.setenv("ARTPM_CONSOLIDATION_DB", str(tmp_path / "consolidation.db"))
+    monkeypatch.setenv("ARTPM_REFLECTION_DB", str(tmp_path / "reflection.db"))
+    monkeypatch.setenv("ARTPM_EPISODE_DB", str(tmp_path / "episode.db"))
+
+    # Reset every module-level singleton so the next access rebuilds against
+    # the freshly redirected tmp_path paths (not a stale project path).
+    _reset_singletons()
+
+
+def _reset_singletons() -> None:
+    """Drop cached singletons without importing heavy optional dependencies."""
+    try:
+        from artpm_agent import config as _config
+
+        _config.reset_config()
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from artpm_agent.memory import feedback_store as _fb
+
+        _fb._DEFAULT_STORE = None
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from artpm_agent.evolution import strategy_store as _st
+
+        _st._DEFAULT_STORE = None
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from artpm_agent.evolution import meta_memory as _mm
+
+        _mm._DEFAULT_META_MEMORY = None
+        _mm._DEFAULT_META_STORE = None
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from artpm_agent.evolution import scheduler as _sched
+
+        _sched._DEFAULT_SCHEDULER = None
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from artpm_agent.harness import outcome_recorder as _out
+
+        _out._DEFAULT_STORE = None
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from artpm_agent.memory import episode_store as _ep
+
+        if hasattr(_ep, "_DEFAULT_STORE"):
+            _ep._DEFAULT_STORE = None
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def pytest_collection_modifyitems(config, items):

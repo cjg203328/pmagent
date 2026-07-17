@@ -25,6 +25,20 @@ _SENSITIVE_FILE_SUFFIXES = frozenset(
 )
 _SENSITIVE_DIRECTORIES = frozenset({".git", ".ssh", ".aws", ".azure", ".gnupg"})
 
+# Executable basename allowlist for the execute_command tool. Empty means
+# "allow every command once command execution is enabled"; non-empty means only
+# the listed executables may run. This is defense-in-depth on top of the
+# MCP_ALLOW_COMMANDS master switch.
+def _parse_command_allowlist(value: str | None) -> frozenset[str]:
+    if not value:
+        return frozenset()
+    items: List[str] = []
+    for item in value.split(","):
+        item = item.strip()
+        if item:
+            items.append(item)
+    return frozenset(items)
+
 
 _JSON_DATA_SOURCE_SCHEMA = {
     "oneOf": [
@@ -120,6 +134,9 @@ class EnhancedMCPClient:
         if allow_commands is None:
             allow_commands = os.getenv("MCP_ALLOW_COMMANDS", "false").lower() == "true"
         self.allow_commands = allow_commands
+        self.command_allowlist = _parse_command_allowlist(
+            os.getenv("MCP_COMMAND_ALLOWLIST", "")
+        )
         self.enabled = True
 
         # 注册可用工具
@@ -556,6 +573,19 @@ class EnhancedMCPClient:
             args = command if isinstance(command, list) else shlex.split(command, posix=os.name != "nt")
             if not args:
                 return {"success": False, "error": "Command is empty"}
+
+            # Executable basename allowlist (defense-in-depth). When set, only
+            # the listed executables may run, regardless of MCP_ALLOW_COMMANDS.
+            executable = os.path.basename(args[0])
+            if self.command_allowlist and executable not in self.command_allowlist:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Command '{executable}' is not permitted by "
+                        "MCP_COMMAND_ALLOWLIST. Allowed: "
+                        + ", ".join(sorted(self.command_allowlist))
+                    ),
+                }
 
             # 执行命令
             result = subprocess.run(

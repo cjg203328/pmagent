@@ -110,11 +110,9 @@ _DEFAULT_SCHEDULER: Optional["ReflectionScheduler"] = None
 
 
 def default_reflection_db_path() -> str:
-    env = os.environ.get("ARTPM_REFLECTION_DB")
-    if env:
-        return env
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    return str(repo_root / "data" / "reflection.db")
+    from artpm_agent.config import resolve_state_path
+
+    return str(resolve_state_path("reflection.db", "ARTPM_REFLECTION_DB"))
 
 
 def get_default_scheduler() -> Optional["ReflectionScheduler"]:

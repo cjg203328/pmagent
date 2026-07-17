@@ -323,49 +323,36 @@ def _inject_memory_context(
     ctx: "TurnContext",
     knowledge_store: Optional[Any],
 ) -> None:
-    """Step 0: 准备记忆上下文并注入 ctx.knowledge_context。
+    """Step 0: 单一记忆注入入口（幂等）。
 
-    组合来源（按优先级）：
-      1. 已有 knowledge_context（不覆盖，只追加）
-      2. 跨会话记忆检索结果
-      3. 对话压缩摘要（如触发）
+    统一调用 ``memory_retrieval.inject_memory_context``，组合：
+      1. 调用方已确认的 Workspace 知识（ctx.knowledge_context）
+      2. 对话压缩摘要（长对话保连续性，best-effort）
+      3. 跨会话长期记忆 + 工作区资料检索
+      4. 用户偏好 / 纠正（FeedbackStore）
+      5. 进化策略（StrategyStore）
+      6. 元记忆缺口建议
 
-    所有操作 best-effort，异常仅记录日志。
+    通过 ``ctx.extra["memory_injected"]`` 保证每回合只注入一次；任何异常仅
+    记录日志，不阻塞主流程。
     """
     if knowledge_store is None:
         return
 
     try:
-        from artpm_agent.memory.memory_injector import MemoryInjector
-
-        injector = MemoryInjector(knowledge_store)
-
-        # 构建 LLM callable（从 agent 提取）
-        llm_fn = _make_llm_callable(ctx.agent)
-
-        memory_text = injector.prepare_context(
-            messages=ctx.conversation_history,
-            user_input=ctx.user_input,
-            conversation_id=ctx.conversation_id,
-            llm_callable=llm_fn,
+        from artpm_agent.harness.memory_retrieval import (
+            inject_memory_context,
         )
 
-        if memory_text and memory_text.strip():
-            if ctx.knowledge_context:
-                ctx.knowledge_context = (
-                    f"{ctx.knowledge_context}\n\n{memory_text}"
-                )
-            else:
-                ctx.knowledge_context = memory_text
-            logger.debug(
-                "记忆注入完成: %d 字符", len(memory_text)
-            )
-
-    except ImportError:
-        # 记忆模块不可用时静默跳过
-        pass
-    except Exception as exc:
-        logger.warning("记忆系统 Step 0 跳过 (非致命): %s", exc)
+        extra = ctx.extra if isinstance(ctx.extra, dict) else {}
+        inject_memory_context(
+            ctx,
+            knowledge_store=knowledge_store,
+            max_context_chars=int(extra.get("memory_inject_max_chars") or 0),
+            max_context_tokens=int(extra.get("memory_inject_max_tokens") or 0),
+        )
+    except Exception as exc:  # noqa: BLE001 - injection must never break a turn
+        logger.warning("记忆系统 Step 0 跳过 (非致命): %s", exc, exc_info=True)
 
 
 def _make_llm_callable(agent: Any):

@@ -41,7 +41,10 @@ from artpm_agent.ui_helpers import (
 # Phase 3 Stage 4: Import harness integration helper
 from artpm_agent.internal.chat_harness_integration import execute_turn_with_harness
 # Phase 1 (记忆激活 · 加深): 聊天页反馈按钮 -> FeedbackStore + Episode
-from artpm_agent.harness.memory_retrieval import record_turn_feedback
+from artpm_agent.harness.memory_retrieval import (
+    FEEDBACK_CATEGORIES,
+    record_turn_feedback,
+)
 
 _LEGACY_MODEL_RUNTIME_RE = re.compile(
     r"当前配置的生成模型 ID 是 \*\*`(?P<model>[^`]+)`\*\*.*?"
@@ -260,6 +263,12 @@ def chat_page():
                                 max_chars=max_chars,
                                 before_message_id=pending_request.get("user_message_id"),
                             )
+                        # ── 附件解析一次性契约 ──
+                        # 这里是对话路径上唯一解析附件落盘路径的位置：把持久化的
+                        # attachment 元数据解析为已校验存在的本地文件路径（file_paths）。
+                        # 解析结果通过 agent_context["file_paths"] 透传给 harness；
+                        # harness.run_turn 仅在 file_paths 为空时才从 attachments 兜底
+                        # 重推导，因此正常对话路径下解析只发生一次，不会重复 IO。
                         attachment_store = get_chat_attachment_store()
                         file_paths = (
                             attachment_store.resolve_paths(attachments)
@@ -281,10 +290,8 @@ def chat_page():
                                 "" if local_fast else build_knowledge_context(prompt)
                             ),
                         }
-                        workflow_result = None
                         workflow_metadata = {}
                         awaiting_approval = False
-                        handled_response = False
                         response_rendered = False
                         turn_error = False
                         progress_context = (
@@ -299,15 +306,15 @@ def chat_page():
                         )
                         with progress_context:
                             harness_result = None
-                            # Phase 3 Stage 4: Use unified harness instead of inline handlers
+                            # v0.2 单一回合主链：统一 harness（run_turn）为唯一非极速路径；
+                            # 原先散落在 chat.py 内的知识规则/工件/工作流/直接模型 fallback
+                            # 分支已全部移除，每回合只走一条可预测主链。
                             if local_fast:
                                 # Fast mode: bypass harness for performance
                                 response = normalize_agent_response(
                                     agent.chat(prompt, context=agent_context)
                                 )
-                                handled_response = True
-
-                            if not handled_response:
+                            else:
                                 def respond_from_public_agent_api(_turn_ctx):
                                     if not attachments and callable(
                                         getattr(agent, "stream_chat", None)
@@ -358,145 +365,7 @@ def chat_page():
                                         False,
                                     )
                                 )
-                                handled_response = True
 
-                            # Knowledge rule extraction (not yet in harness)
-                            if (
-                                not handled_response
-                                and request_conversation_id
-                            ):
-                                rule_statement = extract_knowledge_rule(prompt)
-                                knowledge_store = get_knowledge_store()
-                                if rule_statement and knowledge_store is not None:
-                                    try:
-                                        knowledge_store.propose_rule(
-                                            rule_statement,
-                                            proposed_by="agent",
-                                            source_conversation_id=(
-                                                request_conversation_id
-                                            ),
-                                            source_message_id=pending_request["turn_id"],
-                                            rule_id=(
-                                                f"rule-{pending_request['turn_id']}"
-                                            ),
-                                            metadata={
-                                                "origin": "conversation",
-                                                "requires_confirmation": True,
-                                            },
-                                        )
-                                        response = (
-                                            "我可以把下面这条规则加入工作区知识：\n\n"
-                                            f"> {rule_statement}\n\n"
-                                            "当前尚未生效，请确认是否采纳。"
-                                        )
-                                        awaiting_approval = True
-                                        handled_response = True
-                                    except Exception:
-                                        logger.exception("创建知识规则提案失败")
-                                        response = (
-                                            "知识提案未能保存，请检查服务日志后重试。"
-                                        )
-                                        handled_response = True
-                                        turn_error = True
-
-                            if not handled_response:
-                                artifact_coordinator = get_artifact_coordinator()
-                                if artifact_coordinator is not None:
-                                    artifact_outcome = artifact_coordinator.process(
-                                        prompt,
-                                        attachments=attachments,
-                                        file_paths=file_paths,
-                                    )
-                                    if artifact_outcome.matched:
-                                        response = artifact_outcome.message
-                                        handled_response = True
-                                        if artifact_outcome.artifact is not None:
-                                            artifact = artifact_outcome.artifact
-                                            workflow_metadata = {
-                                                "artifacts": [
-                                                    {
-                                                        key: artifact[key]
-                                                        for key in (
-                                                            "id",
-                                                            "name",
-                                                            "stored_path",
-                                                            "format",
-                                                            "mime_type",
-                                                            "size",
-                                                            "sha256",
-                                                            "version",
-                                                            "rows",
-                                                            "columns",
-                                                            "paragraphs",
-                                                            "sheet_name",
-                                                            "template_id",
-                                                            "template_name",
-                                                            "preview_markdown",
-                                                            "export_formats",
-                                                            "source_artifact",
-                                                        )
-                                                        if key in artifact
-                                                    }
-                                                ]
-                                            }
-
-                            if not handled_response:
-                                coordinator = get_workflow_coordinator()
-                                outcome = None
-                                if coordinator is not None and request_conversation_id:
-                                    try:
-                                        outcome = coordinator.process(
-                                            prompt,
-                                            conversation_id=request_conversation_id,
-                                            turn_id=pending_request["turn_id"],
-                                            agent_context=agent_context,
-                                            attachments=attachments,
-                                        )
-                                    except Exception:
-                                        logger.exception(
-                                            "工作流匹配或只读执行失败，回退普通对话"
-                                        )
-                                if outcome is not None and outcome.matched:
-                                    workflow_result = outcome.execution
-                                    awaiting_approval = (
-                                        workflow_result.run.status
-                                        == "awaiting_approval"
-                                    )
-                                    if workflow_result.run.status == "failed":
-                                        logger.warning(
-                                            "工作流 %s 未完成，回退普通对话: %s",
-                                            workflow_result.run.workflow_id,
-                                            workflow_result.run.error,
-                                        )
-                                        workflow_result = None
-                                    else:
-                                        response = normalize_agent_response(
-                                            format_workflow_result(
-                                                agent,
-                                                workflow_result,
-                                            )
-                                        )
-                                        workflow_metadata = {
-                                            "workflow_run_id": workflow_result.run.id,
-                                            "workflow_id": workflow_result.run.workflow_id,
-                                        }
-                            if workflow_result is None and not handled_response:
-                                if not attachments and callable(
-                                    getattr(agent, "stream_chat", None)
-                                ):
-                                    response = stream_agent_response(
-                                        agent,
-                                        prompt,
-                                        agent_context,
-                                    )
-                                    response_rendered = True
-                                else:
-                                    response = normalize_agent_response(
-                                        agent.chat(
-                                            prompt,
-                                            context=agent_context,
-                                        )
-                                    )
                         if not response_rendered:
                             st.markdown(response)
                         _render_message_artifacts(
@@ -728,7 +597,24 @@ def _render_turn_feedback(msg: dict, index: int, active_id) -> None:
 
     if (st.session_state.get("feedback_pending") or {}).get(message_id):
         with st.container(border=True):
-            st.markdown("**这次哪里不好？** 你的说明会直接变成我的长期偏好。")
+            st.markdown("**这次哪里不好？** 选一个分类，补充描述会变成我的长期偏好。")
+            category = st.selectbox(
+                "反馈分类",
+                options=list(FEEDBACK_CATEGORIES),
+                index=len(FEEDBACK_CATEGORIES) - 1,  # default "other"
+                format_func=lambda c: {
+                    "too_verbose": "太啰嗦",
+                    "too_brief": "太简短",
+                    "not_direct": "没直接回答",
+                    "ignored_context": "忽略上下文",
+                    "factual_error": "事实错误",
+                    "wrong_format": "格式不对",
+                    "wrong_tool": "用错工具",
+                    "other": "其他",
+                }.get(c, c),
+                key=f"fb_cat_{message_id}",
+                label_visibility="collapsed",
+            )
             reason = st.text_area(
                 "可选：具体描述问题",
                 key=f"fb_reason_{message_id}",
@@ -748,6 +634,7 @@ def _render_turn_feedback(msg: dict, index: int, active_id) -> None:
                         user_prompt=user_prompt,
                         assistant_content=str(msg.get("content", "")),
                         correction=reason,
+                        category=category,
                     )
                     st.session_state.setdefault("feedback_given", {})[message_id] = "down"
                     st.session_state.get("feedback_pending", {}).pop(message_id, None)

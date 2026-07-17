@@ -163,6 +163,38 @@ class MemoryInjector:
 
     # ---- 显式操作接口 ---------------------------------------------------
 
+    def compression_block(
+        self,
+        messages: Sequence[Dict[str, Any]],
+        conversation_id: str,
+        llm_callable: Any = None,
+    ) -> str:
+        """Return a compressed-summary block for long conversations, or ''.
+
+        Best-effort only: any failure (no LLM, compress skipped, etc.) yields an
+        empty string so callers never pay for compression when it can't run. This
+        method performs *only* compression — cross-session RAG retrieval lives in
+        the harness memory-retrieval hook to avoid duplicate retrieval.
+        """
+        if not messages or len(messages) <= 10:
+            return ""
+        try:
+            result = self._check_and_compress(
+                messages, conversation_id, llm_callable
+            )
+            if result and result.was_compressed:
+                summary = self.compressor.build_compressed_context(
+                    messages[-self.compressor.keep_recent:],
+                    result,
+                )
+                if summary and len(summary) < self.max_context_chars:
+                    return summary
+        except Exception as exc:  # noqa: BLE001 - compression is non-fatal
+            logger.warning("对话压缩跳过: %s", exc)
+        return ""
+
+
+
     def force_compress(
         self,
         messages: Sequence[Dict[str, Any]],

@@ -85,3 +85,16 @@ def test_telemetry_recorded_on_failure():
     assert tel.records
     assert tel.records[-1]["success"] is False
     assert tel.records[-1]["error"]
+
+
+def test_gateway_without_response_cache_does_not_crash(monkeypatch):
+    """Regression: cache=None must not leave `cached` undefined (P0 fix)."""
+    # Force the degraded path where no response cache object exists at all.
+    monkeypatch.setattr(ModelGateway, "_build_response_cache", lambda self: None)
+    gw = _gw("gpt-4o", ["gpt-4o-mini"])
+    assert gw._response_cache is None
+    out = gw.chat_with_failover("same question", "sys", [])
+    assert "gpt-4o" in out
+    # Streaming path must also be safe without a cache.
+    chunks = list(gw.stream_with_failover("hi", "sys", []))
+    assert "".join(chunks)

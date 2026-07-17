@@ -93,19 +93,14 @@ def execute_turn_with_harness(
         },
     )
 
-    # Phase 1 (记忆激活): 在 run_turn 之前，把长期记忆 + 活跃偏好 + 进化策略
-    # 注入 ctx.knowledge_context（自动取 agent.memory 与默认 store；best-effort）。
-    if auto_activate_memory:
-        try:
-            from artpm_agent.harness.memory_retrieval import inject_memory_context
-            inject_memory_context(
-                turn_ctx,
-                knowledge_store=knowledge_store,
-                max_context_chars=int(memory_inject_token_budget or 0),
-                max_context_tokens=int(memory_inject_max_tokens or 0),
-            )
-        except Exception:
-            pass
+    # 记忆注入已统一收敛到 run_turn() 的 Step 0（单一入口、幂等）：
+    # 每回合只注入一次，避免 chat 预注入与 run_turn 内注入重复检索。
+    # 这里仅把可选预算参数透传给统一入口（run_turn 读取 ctx.extra）。
+    if isinstance(turn_ctx.extra, dict):
+        if memory_inject_token_budget:
+            turn_ctx.extra["memory_inject_max_chars"] = int(memory_inject_token_budget)
+        if memory_inject_max_tokens:
+            turn_ctx.extra["memory_inject_max_tokens"] = int(memory_inject_max_tokens)
 
     # Execute unified turn
     turn_result = run_turn(
@@ -138,15 +133,15 @@ def execute_turn_with_harness(
                     content=user_feedback,
                     scope=turn_result.handled_by or "global",
                 )
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - 反馈写入失败不应中断主流程
+            logger.warning("即时反馈写入失败（非致命）: %s", exc, exc_info=True)
 
     # Phase 0 (记忆+进化): 记录回合结果，供后续学习闭环使用（纯增量、非阻塞）
     try:
         from artpm_agent.harness.outcome_recorder import record_outcome
         record_outcome(turn_ctx, turn_result, feedback=user_feedback)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - 结果记录失败不应中断主流程
+        logger.warning("回合结果记录失败（非致命）: %s", exc, exc_info=True)
 
     # Phase 3 (进化闭环): 按调度器自动复盘，仅自动应用低风险提案（best-effort）。
     if auto_reflect:
@@ -168,8 +163,8 @@ def execute_turn_with_harness(
                     _report = _sched.run_if_due(_ep, _fb, _st)
                     if _report is not None:
                         logger.info("Auto-reflection run:\n%s", _report)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - 自动复盘失败不应中断主流程
+            logger.warning("自动复盘失败（非致命）: %s", exc, exc_info=True)
 
     # Phase 2 (知识炼化): 按调度器周期性对知识库做去重/矛盾/衰减（best-effort）。
     if auto_reflect and knowledge_store is not None:
@@ -191,8 +186,8 @@ def execute_turn_with_harness(
             )
             if _creport is not None:
                 logger.info("Auto-consolidation run:\n%s", _creport.as_dict())
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - 知识炼化失败不应中断主流程
+            logger.warning("知识炼化失败（非致命）: %s", exc, exc_info=True)
 
     # Extract response and approval state
     response_text = turn_result.response

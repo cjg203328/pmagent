@@ -72,8 +72,10 @@ def test_positive_records_preference_and_tags_episode():
     entries = get_default_feedback_store().active()
     assert len(entries) == 1
     assert entries[0].kind == KIND_PREFERENCE
-    # Positive signals are always injected.
-    assert not entries[0].metadata.get("no_inject")
+    # A 👍 is recorded for reflection, but marked no_inject so it does NOT
+    # pollute every future turn with a vague "keep this style" instruction
+    # (response style is owned by the Workspace Profile, single source of truth).
+    assert entries[0].metadata.get("no_inject") is True
     # The episode is tagged so reflection can mine it.
     assert "👍" in ep.recent(limit=10)[0].feedback
 

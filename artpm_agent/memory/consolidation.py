@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 from .workspace_knowledge_store import WorkspaceKnowledgeStore
 
-_DEFAULT_CONSOLIDATION_DB = "data/consolidation.db"
+_DEFAULT_CONSOLIDATION_DB = "data/consolidation.db"  # legacy label; default path resolves via resolve_state_path()
 
 # 极性标记：用于矛盾检测的粗粒度信号
 _POSITIVE_MARKERS = (
@@ -301,9 +301,14 @@ class ConsolidationScheduler:
     """按时间间隔/新增长知识触发一次炼化；状态落在独立 db，避免污染知识库。"""
 
     def __init__(self, db_path: str | Path | None = None):
-        self.db_path = Path(
-            db_path or _DEFAULT_CONSOLIDATION_DB
-        ).expanduser().resolve()
+        if db_path is not None:
+            self.db_path = Path(db_path).expanduser().resolve()
+        else:
+            from artpm_agent.config import resolve_state_path
+
+            self.db_path = resolve_state_path(
+                "consolidation.db", "ARTPM_CONSOLIDATION_DB"
+            )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 

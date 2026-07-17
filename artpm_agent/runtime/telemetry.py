@@ -31,11 +31,9 @@ logger = get_logger(__name__)
 
 
 def default_telemetry_db_path() -> str:
-    env = os.getenv("ARTPM_TELEMETRY_DB")
-    if env:
-        return env
-    root = Path(__file__).resolve().parent.parent.parent
-    return str(root / "data" / "telemetry.db")
+    from artpm_agent.config import resolve_state_path
+
+    return str(resolve_state_path("telemetry.db", "ARTPM_TELEMETRY_DB"))
 
 
 @dataclass

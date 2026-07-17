@@ -190,11 +190,9 @@ _DEFAULT_STORE: Optional["FeedbackStore"] = None
 
 
 def default_feedback_db_path() -> str:
-    env = os.environ.get("ARTPM_FEEDBACK_DB")
-    if env:
-        return env
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    return str(repo_root / "data" / "feedback.db")
+    from artpm_agent.config import resolve_state_path
+
+    return str(resolve_state_path("feedback.db", "ARTPM_FEEDBACK_DB"))
 
 
 def get_default_feedback_store() -> Optional["FeedbackStore"]:
