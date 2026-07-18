@@ -129,7 +129,8 @@ def chat_page():
                     agent = st.session_state.get("agent")
                     apply_model_override_to_agent(agent, switched_model)
                     st.toast(f"✅ 已切换到 {switched_model}（临时，不保存到设置）")
-                    st.rerun()  # 重新渲染以反映新模型
+                    # 注意：不需要 st.rerun()，toast 会自动触发页面更新
+                    # st.rerun() 会导致页面跳转到其他页面
 
             with action_col:
                 if st.button(
