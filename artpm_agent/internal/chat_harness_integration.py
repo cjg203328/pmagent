@@ -214,6 +214,10 @@ def execute_turn_with_harness(
             logger.warning("知识炼化失败（非致命）: %s", exc, exc_info=True)
             _record_evolution_event("auto_consolidate", "warning", str(exc))
 
+    # 闭环心跳（成功运行标记）：让可观测面板「最后运行」反映真实运行时间，
+    # 而非仅记录失败。仅成功走完各阶段（均为独立 try/except）才会到达此处。
+    _record_evolution_event("loop_run", "info", "回合闭环完成", turn_id=turn_id)
+
     # Extract response and approval state
     response_text = turn_result.response
     awaiting_approval = turn_result.awaiting_approval
