@@ -89,8 +89,132 @@ def _section(title: str, meta: str = "") -> None:
 def _empty_hint() -> None:
     st.info(
         "暂无遥测数据。开启遥测（默认已开启）并运行若干回合后，此处将展示 "
-        "Token 消耗与连接链路的可观测指标。数据实时读取自 `telemetry.db`。"
+        "Token 消耗、连接链路与进化闭环的可观测指标。数据实时读取自 `telemetry.db`。"
     )
+
+
+# 进化闭环阶段中文标签（与 chat_harness_integration 的 stage 取值对应）
+_EVOLUTION_STAGE_LABELS = {
+    "user_feedback": "用户反馈",
+    "outcome_record": "回合结果记录",
+    "auto_reflect": "自动复盘",
+    "auto_consolidate": "自动知识炼化",
+}
+
+
+def _health_strip(
+    token_ok: bool, conn_ok: bool, ev_ok: bool, ev_errors: int
+) -> None:
+    """顶部系统健康条：三支柱一目了然，故障无需滚动即可见。"""
+    pills = [
+        ("Token", token_ok, ""),
+        ("连接", conn_ok, ""),
+        ("进化闭环", ev_ok, "" if ev_ok else f" {ev_errors} 异常"),
+    ]
+    parts = []
+    for name, ok, extra in pills:
+        color = "#1D9E75" if ok else "#BA7517"
+        status = "正常" if ok else "异常"
+        parts.append(
+            '<span style="display:inline-flex;align-items:center;gap:6px;'
+            'font-size:12px;color:#1f2329;">'
+            f'<span style="width:8px;height:8px;border-radius:50%;'
+            f'background:{color};display:inline-block;"></span>'
+            f"{name} {status}{extra}</span>"
+        )
+    html = (
+        '<div style="display:flex;gap:14px;align-items:center;'
+        "background:#f5f6f8;border:1px solid #e6e8eb;border-radius:12px;"
+        'padding:8px 14px;margin-bottom:18px;">'
+        '<span style="font-size:13px;font-weight:500;color:#1f2329;margin-right:2px;">'
+        "系统健康</span>"
+        + "".join(parts)
+        + "</div>"
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def _evolution_rows(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        level = ev.get("level") or "info"
+        rows.append(
+            {
+                "时间": ev.get("timestamp") or "—",
+                "阶段": _EVOLUTION_STAGE_LABELS.get(
+                    ev.get("stage", ""), ev.get("stage", "—")
+                ),
+                "等级": level,
+                "摘要": (ev.get("message") or "")[:160],
+            }
+        )
+    return rows
+
+
+def _evolution_section(telemetry: Any, window: int) -> None:
+    """进化闭环健康：回合结果 / 自动复盘 / 自动知识炼化的可观测性。"""
+    try:
+        summary = telemetry.evolution_summary(window)
+        events = telemetry.recent_events(limit=window)
+    except Exception as error:  # noqa: BLE001
+        logger.warning("进化闭环数据加载失败: %s", error)
+        st.error(f"加载进化闭环数据失败：{error}")
+        return
+
+    errors = int(summary.get("errors", 0))
+    total = int(summary.get("events", 0))
+
+    _section("进化闭环", "回合结果 / 自动复盘 / 自动知识炼化 的运行健康")
+
+    if total == 0:
+        st.success("进化闭环运行正常 🎉 窗口内暂无事件记录。")
+        return
+
+    _metric_rail(
+        [
+            {
+                "label": "最近异常",
+                "value": _fmt_int(errors),
+                "tone": "amber" if errors else "teal",
+                "note": "warning / error 事件数",
+            },
+            {
+                "label": "闭环事件",
+                "value": _fmt_int(total),
+                "tone": "blue",
+                "note": f"窗口内共 {_fmt_int(total)} 条",
+            },
+            {
+                "label": "最后运行",
+                "value": (summary.get("last_run") or "—"),
+                "tone": "blue",
+            },
+            {
+                "label": "健康状态",
+                "value": ("正常" if not errors else f"{errors} 异常"),
+                "tone": "teal" if not errors else "amber",
+            },
+        ]
+    )
+
+    rows = _evolution_rows(events)
+    if rows:
+        st.dataframe(
+            rows,
+            use_container_width=True,
+            hide_index=True,
+            height=min(360, 38 + max(len(rows), 1) * 36),
+            column_config={
+                "时间": st.column_config.TextColumn(width="small"),
+                "阶段": st.column_config.TextColumn(width="small"),
+                "等级": st.column_config.TextColumn(width="small"),
+                "摘要": st.column_config.TextColumn(width="large"),
+            },
+        )
+    else:
+        st.caption("暂无事件明细。")
 
 
 # ───────────────────────────────────────────────────────────────
@@ -194,9 +318,20 @@ def observability_page() -> None:
     has_token = int(token_summary.get("samples", 0)) > 0
     has_conn = int(conn_summary.get("samples", 0)) > 0
 
-    if not has_token and not has_conn:
+    # 进化闭环健康（独立于 Token/连接 的第三支柱）
+    try:
+        ev_summary: Dict[str, Any] = telemetry.evolution_summary(window)
+    except Exception:  # noqa: BLE001
+        ev_summary = {"events": 0, "errors": 0}
+    ev_total = int(ev_summary.get("events", 0))
+    ev_errors = int(ev_summary.get("errors", 0))
+
+    if not has_token and not has_conn and ev_total == 0:
         _empty_hint()
         return
+
+    # 顶部系统健康条：三支柱一目了然，故障无需滚动即可见
+    _health_strip(has_token, has_conn, ev_errors == 0, ev_errors)
 
     # 端点健康：尽量带上 gateway 熔断器冷却状态
     health = dash.get("endpoint_health", []) or []
@@ -365,6 +500,10 @@ def observability_page() -> None:
     else:
         _section("连接 / 链接情况", "暂无记录")
         st.caption("尚未采集到任何连接事件。")
+
+    # ════════════ 进化闭环 ════════════
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    _evolution_section(telemetry, window)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>ArtPM Agent · 遥测运营看板</title>
+<style>
+  :root { --bg:#f7f8fa; --card:#ffffff; --ink:#1f2329; --muted:#8a9099;
+          --line:#e6e8eb; --accent:#2f7ed8; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+         padding:28px; line-height:1.5; }
+  .wrap { max-width:960px; margin:0 auto; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:20px; }
+  h2 { font-size:16px; margin:28px 0 10px; border-left:3px solid var(--accent);
+        padding-left:8px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+           gap:12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:14px 16px; }
+  .card .k { color:var(--muted); font-size:12px; }
+  .card .v { font-size:22px; font-weight:600; margin-top:4px; }
+  table { width:100%; border-collapse:collapse; background:var(--card);
+          border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  th,td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line);
+           font-size:13px; }
+  th { background:#fafbfc; color:var(--muted); font-weight:600; }
+  tr:last-child td { border-bottom:none; }
+  .bar { height:8px; background:#eef0f3; border-radius:6px; overflow:hidden;
+          display:inline-block; width:120px; vertical-align:middle; }
+  .bar-fill { height:100%; }
+  .bar-val { margin-left:8px; font-size:12px; color:var(--muted); }
+  .muted { color:var(--muted); }
+  svg { background:var(--card); border:1px solid var(--line); border-radius:12px; }
+  h3 { font-size:14px; margin:22px 0 8px; color:var(--muted); font-weight:600; }
+  .eb { margin-top:6px; }
+  .eb-row { display:flex; align-items:center; gap:8px; padding:4px 0; font-size:13px; }
+  .eb-label { min-width:170px; color:var(--ink); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ArtPM Agent · 遥测运营看板</h1>
+  <div class="sub">生成于 2026-07-16 15:31:17 UTC · 窗口 500 样本</div>
+  
+        <div class="cards">
+          <div class="card"><div class="k">样本数</div><div class="v">14</div></div>
+          <div class="card"><div class="k">平均延迟</div><div class="v">278 ms</div></div>
+          <div class="card"><div class="k">P95 延迟</div><div class="v">2200 ms</div></div>
+          <div class="card"><div class="k">回退率</div><div class="v">0.0%</div></div>
+          <div class="card"><div class="k">缓存命中率</div><div class="v">14.3%</div></div>
+          <div class="card"><div class="k">失败率</div><div class="v">7.1%</div></div>
+        </div>
+
+        <h2>延迟趋势</h2>
+        <svg viewBox="0 0 600 120" width="100%" preserveAspectRatio="none" role="img" aria-label="延迟趋势"><line x1="8" y1="112" x2="592" y2="112" stroke="#ddd"/><polyline fill="none" stroke="#2f7ed8" stroke-width="2" points="8.0,106.8 52.9,106.5 97.8,106.1 142.8,105.8 187.7,105.5 232.6,105.1 277.5,104.8 322.5,104.5 367.4,8.0 412.3,106.8 457.2,106.5 502.2,106.1 547.1,105.8 592.0,105.5"/><circle cx="8.0" cy="106.8" r="2.5" fill="#2f7ed8"/><circle cx="52.9" cy="106.5" r="2.5" fill="#2f7ed8"/><circle cx="97.8" cy="106.1" r="2.5" fill="#2f7ed8"/><circle cx="142.8" cy="105.8" r="2.5" fill="#2f7ed8"/><circle cx="187.7" cy="105.5" r="2.5" fill="#2f7ed8"/><circle cx="232.6" cy="105.1" r="2.5" fill="#2f7ed8"/><circle cx="277.5" cy="104.8" r="2.5" fill="#2f7ed8"/><circle cx="322.5" cy="104.5" r="2.5" fill="#2f7ed8"/><circle cx="367.4" cy="8.0" r="2.5" fill="#d9534f"/><circle cx="412.3" cy="106.8" r="2.5" fill="#2f7ed8"/><circle cx="457.2" cy="106.5" r="2.5" fill="#2f7ed8"/><circle cx="502.2" cy="106.1" r="2.5" fill="#2f7ed8"/><circle cx="547.1" cy="105.8" r="2.5" fill="#2f7ed8"/><circle cx="592.0" cy="105.5" r="2.5" fill="#2f7ed8"/><text x="8" y="8" fill="#888" font-size="10">峰值 2200ms</text></svg>
+
+        <h2>按任务类型</h2>
+        <table><thead><tr><th>名称</th><th>样本</th><th>平均延迟</th><th>P95</th><th>回退率</th><th>缓存命中</th><th>失败率</th></tr></thead><tbody><tr><td>chat</td><td>14</td><td>278 ms</td><td>2200 ms</td><td><div class="bar"><div class="bar-fill" style="width:0.0%;background:#f0ad4e"></div></div><span class="bar-val">0.0%</span></td><td><div class="bar"><div class="bar-fill" style="width:14.3%;background:#5cb85c"></div></div><span class="bar-val">14.3%</span></td><td><div class="bar"><div class="bar-fill" style="width:7.1%;background:#d9534f"></div></div><span class="bar-val">7.1%</span></td></tr></tbody></table>
+
+        <h2>按模型</h2>
+        <table><thead><tr><th>名称</th><th>样本</th><th>平均延迟</th><th>P95</th><th>回退率</th><th>缓存命中</th><th>失败率</th></tr></thead><tbody><tr><td>gpt-4o</td><td>9</td><td>364 ms</td><td>2200 ms</td><td><div class="bar"><div class="bar-fill" style="width:0.0%;background:#f0ad4e"></div></div><span class="bar-val">0.0%</span></td><td><div class="bar"><div class="bar-fill" style="width:11.1%;background:#5cb85c"></div></div><span class="bar-val">11.1%</span></td><td><div class="bar"><div class="bar-fill" style="width:11.1%;background:#d9534f"></div></div><span class="bar-val">11.1%</span></td></tr><tr><td>deepseek-chat</td><td>5</td><td>124 ms</td><td>138 ms</td><td><div class="bar"><div class="bar-fill" style="width:0.0%;background:#f0ad4e"></div></div><span class="bar-val">0.0%</span></td><td><div class="bar"><div class="bar-fill" style="width:20.0%;background:#5cb85c"></div></div><span class="bar-val">20.0%</span></td><td><div class="bar"><div class="bar-fill" style="width:0.0%;background:#d9534f"></div></div><span class="bar-val">0.0%</span></td></tr></tbody></table>
+        
+
+        <h2>Token 消耗</h2>
+        <div class="cards">
+          <div class="card"><div class="k">总 Tokens</div><div class="v">15940</div></div>
+          <div class="card"><div class="k">输入 Tokens</div><div class="v">13220</div></div>
+          <div class="card"><div class="k">输出 Tokens</div><div class="v">2720</div></div>
+          <div class="card"><div class="k">缓存命中 Tokens</div><div class="v">360</div></div>
+          <div class="card"><div class="k">估算成本</div><div class="v">$0.0025</div></div>
+        </div>
+
+        <h3>Token 趋势</h3>
+        <svg viewBox="0 0 600 120" width="100%" preserveAspectRatio="none" role="img" aria-label="Token 趋势"><line x1="8" y1="112" x2="592" y2="112" stroke="#ddd"/><polyline fill="none" stroke="#7e57c2" stroke-width="2" points="8.0,33.5 52.9,29.8 97.8,26.2 142.8,22.5 187.7,18.9 232.6,15.3 277.5,11.6 322.5,8.0 367.4,112.0 412.3,33.5 457.2,29.8 502.2,26.2 547.1,22.5 592.0,18.9"/><circle cx="8.0" cy="33.5" r="2.5" fill="#7e57c2"/><circle cx="52.9" cy="29.8" r="2.5" fill="#7e57c2"/><circle cx="97.8" cy="26.2" r="2.5" fill="#7e57c2"/><circle cx="142.8" cy="22.5" r="2.5" fill="#7e57c2"/><circle cx="187.7" cy="18.9" r="2.5" fill="#7e57c2"/><circle cx="232.6" cy="15.3" r="2.5" fill="#7e57c2"/><circle cx="277.5" cy="11.6" r="2.5" fill="#7e57c2"/><circle cx="322.5" cy="8.0" r="2.5" fill="#7e57c2"/><circle cx="367.4" cy="112.0" r="2.5" fill="#7e57c2"/><circle cx="412.3" cy="33.5" r="2.5" fill="#7e57c2"/><circle cx="457.2" cy="29.8" r="2.5" fill="#7e57c2"/><circle cx="502.2" cy="26.2" r="2.5" fill="#7e57c2"/><circle cx="547.1" cy="22.5" r="2.5" fill="#7e57c2"/><circle cx="592.0" cy="18.9" r="2.5" fill="#7e57c2"/><text x="8" y="8" fill="#888" font-size="10">峰值 1430 tokens</text></svg>
+
+        <h3>按模型 Token / 成本</h3>
+        <table><thead><tr><th>模型</th><th>样本</th><th>总 Tokens</th><th>输入</th><th>输出</th><th>成本</th></tr></thead><tbody><tr><td>gpt-4o</td><td>9</td><td>10040</td><td>8320</td><td>1720</td><td>$0.0021</td></tr><tr><td>deepseek-chat</td><td>5</td><td>5900</td><td>4900</td><td>1000</td><td>$0.0004</td></tr></tbody></table>
+
+        <h3>按 Provider</h3>
+        <table><thead><tr><th>Provider</th><th>回合数</th><th>连接尝试</th><th>总 Tokens</th><th>成本</th><th>连接成功率</th></tr></thead><tbody><tr><td>openai</td><td>9</td><td>9</td><td>10040</td><td>$0.0021</td><td>88.9%</td></tr><tr><td>deepseek</td><td>5</td><td>5</td><td>5900</td><td>$0.0004</td><td>100.0%</td></tr></tbody></table>
+        
+
+        <h2>连接 / 链接情况</h2>
+        <div class="cards">
+          <div class="card"><div class="k">连接尝试</div><div class="v">14</div></div>
+          <div class="card"><div class="k">成功率</div><div class="v">92.9%</div></div>
+          <div class="card"><div class="k">平均延迟</div><div class="v">278 ms</div></div>
+          <div class="card"><div class="k">失败次数</div><div class="v">1</div></div>
+        </div>
+
+        <h3>连接趋势</h3>
+        <svg viewBox="0 0 600 120" width="100%" preserveAspectRatio="none" role="img" aria-label="连接趋势"><line x1="8" y1="112" x2="592" y2="112" stroke="#ddd"/><rect x="5.0" y="8" width="6" height="104" fill="#5cb85c" opacity="0.85"/><rect x="49.9" y="8" width="6" height="104" fill="#5cb85c" opacity="0.85"/><rect x="94.8" y="8" width="6" height="104" fill="#5cb85c" opacity="0.85"/><rect x="139.8" y="8" width="6" height="104" fill="#5cb85c" opacity="0.85"/><rect x="184.7" y="8" width="6" height="104" fill="#5cb85c" opacity="0.85"/><rect x="229.6" y="8" width="6" height="104" fill="#5cb85c" opacity="0.85"/><rect x="274.5" y="8" width="6" height="104" fill="#5cb85c" opacity="0.85"/><rect x="319.5" y="8" width="6" height="104" fill="#5cb85c" opacity="0.85"/><rect x="364.4" y="8" width="6" height="104" fill="#d9534f" opacity="0.85"/><rect x="409.3" y="8" width="6" height="104" fill="#5cb85c" opacity="0.85"/><rect x="454.2" y="8" width="6" height="104" fill="#5cb85c" opacity="0.85"/><rect x="499.2" y="8" width="6" height="104" fill="#5cb85c" opacity="0.85"/><rect x="544.1" y="8" width="6" height="104" fill="#5cb85c" opacity="0.85"/><rect x="589.0" y="8" width="6" height="104" fill="#5cb85c" opacity="0.85"/><text x="8" y="8" fill="#888" font-size="10">成功 13/14</text></svg>
+
+        <h3>错误类型分布</h3>
+        <div class="eb"><div class="eb-row"><span class="eb-label">限流 (rate_limit)</span><div class="bar"><div class="bar-fill" style="width:100.0%;background:#d9534f"></div></div><span class="bar-val">100.0%</span></div></div>
+
+        <h3>端点健康</h3>
+        <table><thead><tr><th>Provider</th><th>模型</th><th>端点</th><th>尝试</th><th>成功率</th><th>最近错误</th><th>熔断</th></tr></thead><tbody><tr><td>deepseek</td><td>deepseek-chat</td><td>https://api.deepseek.com/v1</td><td>5</td><td><div class="bar"><div class="bar-fill" style="width:100.0%;background:#5cb85c"></div></div><span class="bar-val">100.0%</span></td><td>—</td><td>—</td></tr><tr><td>openai</td><td>gpt-4o</td><td>https://api.openai.com/v1</td><td>9</td><td><div class="bar"><div class="bar-fill" style="width:88.9%;background:#f0ad4e"></div></div><span class="bar-val">88.9%</span></td><td>rate_limit</td><td>—</td></tr></tbody></table>
+        
+</div>
+</body>
+</html>

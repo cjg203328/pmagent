@@ -12,6 +12,27 @@ from artpm_agent.harness import TurnContext, run_turn
 logger = logging.getLogger(__name__)
 
 
+def _record_evolution_event(
+    stage: str, level: str, message: str, turn_id: Optional[str] = None
+) -> None:
+    """Best-effort telemetry capture for the evolution loop; never raises.
+
+    Surfaces outcome-record / auto-reflect / auto-consolidate / feedback failures
+    to the observability panel instead of letting them vanish into server logs.
+    """
+    try:
+        from artpm_agent.runtime.telemetry import (
+            AgentTelemetry,
+            default_telemetry_db_path,
+        )
+
+        AgentTelemetry(db_path=default_telemetry_db_path()).record_event(
+            stage=stage, level=level, message=message, turn_id=turn_id
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never crash a turn
+        pass
+
+
 def execute_turn_with_harness(
     agent: Any,
     prompt: str,
@@ -135,6 +156,7 @@ def execute_turn_with_harness(
                 )
         except Exception as exc:  # noqa: BLE001 - 反馈写入失败不应中断主流程
             logger.warning("即时反馈写入失败（非致命）: %s", exc, exc_info=True)
+            _record_evolution_event("user_feedback", "warning", str(exc))
 
     # Phase 0 (记忆+进化): 记录回合结果，供后续学习闭环使用（纯增量、非阻塞）
     try:
@@ -142,6 +164,7 @@ def execute_turn_with_harness(
         record_outcome(turn_ctx, turn_result, feedback=user_feedback)
     except Exception as exc:  # noqa: BLE001 - 结果记录失败不应中断主流程
         logger.warning("回合结果记录失败（非致命）: %s", exc, exc_info=True)
+        _record_evolution_event("outcome_record", "warning", str(exc))
 
     # Phase 3 (进化闭环): 按调度器自动复盘，仅自动应用低风险提案（best-effort）。
     if auto_reflect:
@@ -165,6 +188,7 @@ def execute_turn_with_harness(
                         logger.info("Auto-reflection run:\n%s", _report)
         except Exception as exc:  # noqa: BLE001 - 自动复盘失败不应中断主流程
             logger.warning("自动复盘失败（非致命）: %s", exc, exc_info=True)
+            _record_evolution_event("auto_reflect", "warning", str(exc))
 
     # Phase 2 (知识炼化): 按调度器周期性对知识库做去重/矛盾/衰减（best-effort）。
     if auto_reflect and knowledge_store is not None:
@@ -188,6 +212,7 @@ def execute_turn_with_harness(
                 logger.info("Auto-consolidation run:\n%s", _creport.as_dict())
         except Exception as exc:  # noqa: BLE001 - 知识炼化失败不应中断主流程
             logger.warning("知识炼化失败（非致命）: %s", exc, exc_info=True)
+            _record_evolution_event("auto_consolidate", "warning", str(exc))
 
     # Extract response and approval state
     response_text = turn_result.response
