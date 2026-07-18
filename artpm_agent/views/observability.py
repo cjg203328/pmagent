@@ -89,8 +89,149 @@ def _section(title: str, meta: str = "") -> None:
 def _empty_hint() -> None:
     st.info(
         "暂无遥测数据。开启遥测（默认已开启）并运行若干回合后，此处将展示 "
-        "Token 消耗与连接链路的可观测指标。数据实时读取自 `telemetry.db`。"
+        "Token 消耗、连接链路与进化闭环的可观测指标。数据实时读取自 `telemetry.db`。"
     )
+
+
+# 进化闭环阶段中文标签（与 chat_harness_integration 的 stage 取值对应）
+_EVOLUTION_STAGE_LABELS = {
+    "user_feedback": "用户反馈",
+    "outcome_record": "回合结果记录",
+    "auto_reflect": "自动复盘",
+    "auto_consolidate": "自动知识炼化",
+    "loop_run": "闭环运行",
+}
+
+# 健康条样式：复用设计系统 CSS 变量令牌，随主题一致（不再硬编码色值）
+_HEALTH_STRIP_STYLE = """
+<style>
+.obs-health-strip{display:flex;gap:14px;align-items:center;flex-wrap:wrap;
+  background:var(--pm-canvas);border:1px solid var(--pm-line-light);
+  border-radius:12px;padding:8px 14px;margin-bottom:18px;}
+.obs-health-strip .obs-title{font-size:13px;font-weight:600;color:var(--pm-ink);
+  margin-right:2px;}
+.obs-health-pill{display:inline-flex;align-items:center;gap:6px;
+  font-size:12px;color:var(--pm-ink-secondary);}
+.obs-health-pill .dot{width:8px;height:8px;border-radius:50%;display:inline-block;}
+.obs-health-pill.ok .dot{background:var(--pm-success);}
+.obs-health-pill.bad .dot{background:var(--pm-warning);}
+</style>
+"""
+
+
+@st.cache_data(ttl=30)
+def _load_dashboard(db_path: str, window: int) -> Dict[str, Any]:
+    """缓存的看板聚合：避免每次交互（如拖动窗口滑块）重查 DB。
+
+    ``collect_dashboard`` 已包含 token / 连接 / 进化闭环三类聚合，页面直接复用，
+    不再重复查询 evolution_summary / recent_events。
+    """
+    tel = AgentTelemetry(db_path=db_path, enabled=True)
+    return collect_dashboard(tel, window=window)
+
+
+def _health_strip(
+    token_ok: bool, conn_ok: bool, ev_ok: bool, ev_errors: int
+) -> None:
+    """顶部系统健康条：三支柱一目了然，故障无需滚动即可见。"""
+    st.markdown(_HEALTH_STRIP_STYLE, unsafe_allow_html=True)
+    pills = [
+        ("Token", token_ok, "ok"),
+        ("连接", conn_ok, "ok"),
+        ("进化闭环", ev_ok, "ok" if ev_ok else "bad"),
+    ]
+    parts = []
+    for name, ok, state in pills:
+        extra = "" if ok else f" {ev_errors} 异常"
+        parts.append(
+            f'<span class="obs-health-pill {state}">'
+            f'<span class="dot"></span>{name} {"正常" if ok else "异常"}{extra}</span>'
+        )
+    html = (
+        '<div class="obs-health-strip">'
+        '<span class="obs-title">系统健康</span>'
+        + "".join(parts)
+        + "</div>"
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def _evolution_rows(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        level = ev.get("level") or "info"
+        rows.append(
+            {
+                "时间": ev.get("timestamp") or "—",
+                "阶段": _EVOLUTION_STAGE_LABELS.get(
+                    ev.get("stage", ""), ev.get("stage", "—")
+                ),
+                "等级": level,
+                "摘要": (ev.get("message") or "")[:160],
+            }
+        )
+    return rows
+
+
+def _evolution_section(summary: Dict[str, Any], events: List[Dict[str, Any]]) -> None:
+    """进化闭环健康：回合结果 / 自动复盘 / 自动知识炼化的可观测性。
+
+    数据由页面统一从缓存看板取（summary + events），本函数不再直接查库。
+    """
+    errors = int(summary.get("errors", 0))
+    total = int(summary.get("events", 0))
+
+    _section("进化闭环", "回合结果 / 自动复盘 / 自动知识炼化 的运行健康")
+
+    if total == 0:
+        st.success("进化闭环运行正常 🎉 窗口内暂无事件记录。")
+        return
+
+    _metric_rail(
+        [
+            {
+                "label": "最近异常",
+                "value": _fmt_int(errors),
+                "tone": "amber" if errors else "teal",
+                "note": "warning / error 事件数",
+            },
+            {
+                "label": "闭环事件",
+                "value": _fmt_int(total),
+                "tone": "blue",
+                "note": f"窗口内共 {_fmt_int(total)} 条",
+            },
+            {
+                "label": "最后运行",
+                "value": (summary.get("last_run") or "—"),
+                "tone": "blue",
+            },
+            {
+                "label": "健康状态",
+                "value": ("正常" if not errors else f"{errors} 异常"),
+                "tone": "teal" if not errors else "amber",
+            },
+        ]
+    )
+
+    rows = _evolution_rows(events)
+    if rows:
+        st.dataframe(
+            rows,
+            use_container_width=True,
+            hide_index=True,
+            height=min(360, 38 + max(len(rows), 1) * 36),
+            column_config={
+                "时间": st.column_config.TextColumn(width="small"),
+                "阶段": st.column_config.TextColumn(width="small"),
+                "等级": st.column_config.TextColumn(width="small"),
+                "摘要": st.column_config.TextColumn(width="large"),
+            },
+        )
+    else:
+        st.caption("暂无事件明细。")
 
 
 # ───────────────────────────────────────────────────────────────
@@ -172,18 +313,25 @@ def observability_page() -> None:
         meta="实时读取自 telemetry.db · 与运营看板口径一致",
     )
 
-    window = st.slider(
-        "样本窗口（最近 N 条记录）",
-        min_value=50,
-        max_value=2000,
-        value=500,
-        step=50,
-        key="observability_window",
-    )
+    col_window, col_refresh = st.columns([4, 1])
+    with col_window:
+        window = st.slider(
+            "样本窗口（最近 N 条记录）",
+            min_value=50,
+            max_value=2000,
+            value=500,
+            step=50,
+            key="observability_window",
+        )
+    with col_refresh:
+        st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
+        if st.button("刷新数据", key="observability_refresh", use_container_width=True):
+            _load_dashboard.clear()
+            st.rerun()
 
+    db_path = default_telemetry_db_path()
     try:
-        telemetry = AgentTelemetry(db_path=default_telemetry_db_path(), enabled=True)
-        dash = collect_dashboard(telemetry, window=window)
+        dash = _load_dashboard(db_path, window)
     except Exception as error:  # noqa: BLE001
         logger.warning("可观测系统数据加载失败: %s", error)
         st.error(f"加载遥测数据失败：{error}")
@@ -194,17 +342,29 @@ def observability_page() -> None:
     has_token = int(token_summary.get("samples", 0)) > 0
     has_conn = int(conn_summary.get("samples", 0)) > 0
 
-    if not has_token and not has_conn:
+    # 进化闭环健康（独立于 Token/连接 的第三支柱）—— 直接复用缓存看板数据
+    ev_summary: Dict[str, Any] = dash.get(
+        "evolution_summary", {"events": 0, "errors": 0}
+    )
+    ev_events: List[Dict[str, Any]] = dash.get("evolution_events", []) or []
+    ev_total = int(ev_summary.get("events", 0))
+    ev_errors = int(ev_summary.get("errors", 0))
+
+    if not has_token and not has_conn and ev_total == 0:
         _empty_hint()
         return
 
-    # 端点健康：尽量带上 gateway 熔断器冷却状态
+    # 顶部系统健康条：三支柱一目了然，故障无需滚动即可见
+    _health_strip(has_token, has_conn, ev_errors == 0, ev_errors)
+
+    # 端点健康：尽量带上 gateway 熔断器冷却状态（gateway 为实时对象，不进缓存）
     health = dash.get("endpoint_health", []) or []
     agent = st.session_state.get("agent")
     gateway = getattr(agent, "model_gateway", None) if agent is not None else None
     if gateway is not None and hasattr(gateway, "is_model_available"):
         try:
-            health = telemetry.endpoint_health(window, gateway=gateway)
+            live_tel = AgentTelemetry(db_path=db_path, enabled=True)
+            health = live_tel.endpoint_health(window, gateway=gateway)
         except Exception:  # noqa: BLE001
             logger.debug("端点健康叠加熔断器状态失败，沿用连接事件统计")
 
@@ -365,6 +525,10 @@ def observability_page() -> None:
     else:
         _section("连接 / 链接情况", "暂无记录")
         st.caption("尚未采集到任何连接事件。")
+
+    # ════════════ 进化闭环 ════════════
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    _evolution_section(ev_summary, ev_events)
 
 
 if __name__ == "__main__":

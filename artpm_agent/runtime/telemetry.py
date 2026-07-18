@@ -114,6 +114,7 @@ class AgentTelemetry:
             conn.commit()
             self._add_turn_columns(conn)
             self._ensure_connection_table(conn)
+            self._ensure_evolution_table(conn)
 
     def _add_turn_columns(self, conn: sqlite3.Connection) -> None:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(turn_telemetry)")}
@@ -139,6 +140,26 @@ class AgentTelemetry:
                 http_status INTEGER,
                 latency_ms REAL,
                 task_type TEXT
+            )
+            """
+        )
+        conn.commit()
+
+    def _ensure_evolution_table(self, conn: sqlite3.Connection) -> None:
+        """Evolution-loop events (outcome record / auto-reflect / auto-consolidate / feedback).
+
+        Kept separate from turn_telemetry so the small per-turn row stays lean and
+        evolution-loop diagnostics never collide with latency/cost signals.
+        """
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS evolution_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                stage TEXT,
+                level TEXT,
+                message TEXT,
+                turn_id TEXT
             )
             """
         )
@@ -235,6 +256,99 @@ class AgentTelemetry:
                 conn.commit()
         except Exception as error:  # noqa: BLE001
             logger.debug("Telemetry connection record failed: %s", error)
+
+    # ── Evolution-loop event capture (observability for the learning loop) ──
+
+    def record_event(
+        self,
+        *,
+        stage: str,
+        level: str = "info",
+        message: str = "",
+        turn_id: Optional[str] = None,
+        timestamp: Optional[str] = None,
+    ) -> None:
+        """Record an evolution-loop event (outcome record / auto-reflect / auto-consolidate / feedback).
+
+        Best-effort and never raises into the caller's hot path.
+        """
+        if not self.enabled:
+            return
+        try:
+            ts = timestamp or datetime.now(timezone.utc).isoformat(timespec="seconds")
+            with self._lock, self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO evolution_events
+                    (timestamp, stage, level, message, turn_id)
+                    VALUES (?,?,?,?,?)
+                    """,
+                    (ts, stage, level, message or "", turn_id or None),
+                )
+                conn.commit()
+        except Exception as error:  # noqa: BLE001
+            logger.debug("Telemetry event record failed: %s", error)
+
+    def recent_events(
+        self,
+        limit: int = 100,
+        *,
+        level: Optional[str] = None,
+        stage: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return evolution-loop events, most-recent-first (DESC id)."""
+        if not self.enabled:
+            return []
+        try:
+            with self._conn() as conn:
+                clauses = []
+                params: List[Any] = []
+                if level is not None:
+                    clauses.append("level = ?")
+                    params.append(level)
+                if stage is not None:
+                    clauses.append("stage = ?")
+                    params.append(stage)
+                where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+                params.append(int(limit))
+                cur = conn.execute(
+                    f"SELECT * FROM evolution_events{where} ORDER BY id DESC LIMIT ?",
+                    params,
+                )
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def evolution_summary(self, window: int = 200) -> Dict[str, Any]:
+        """Aggregate recent evolution-loop events for the observability panel."""
+        rows = self.recent_events(limit=window)
+        if not rows:
+            return {"events": 0, "errors": 0, "by_stage": {}, "last_run": None, "last_error": None}
+        errors = 0
+        by_stage: Dict[str, int] = {}
+        last_run = rows[0].get("timestamp")  # DESC → first is newest
+        last_error = None
+        for r in rows:
+            st = r.get("stage") or "(unknown)"
+            by_stage[st] = by_stage.get(st, 0) + 1
+            lv = r.get("level") or "info"
+            if lv in ("warning", "error"):
+                errors += 1
+                if last_error is None:
+                    last_error = {
+                        "timestamp": r.get("timestamp"),
+                        "stage": st,
+                        "level": lv,
+                        "message": r.get("message") or "",
+                    }
+        return {
+            "events": len(rows),
+            "errors": errors,
+            "by_stage": by_stage,
+            "last_run": last_run,
+            "last_error": last_error,
+        }
 
     def recent(self, limit: int = 200) -> List[Dict[str, Any]]:
         if not self.enabled:

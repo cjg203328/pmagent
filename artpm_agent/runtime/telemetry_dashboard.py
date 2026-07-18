@@ -62,6 +62,17 @@ def collect_dashboard(telemetry: Any, window: int = 500) -> Dict[str, Any]:
         if hasattr(telemetry, "connection_trend")
         else []
     )
+    # ── Observability: evolution-loop events (additive) ──
+    evolution_summary = (
+        telemetry.evolution_summary(window)
+        if hasattr(telemetry, "evolution_summary")
+        else {"events": 0, "errors": 0, "by_stage": {}}
+    )
+    evolution_events = (
+        telemetry.recent_events(window)
+        if hasattr(telemetry, "recent_events")
+        else []
+    )
     return {
         "overall": overall,
         "by_task_type": by_task,
@@ -72,6 +83,8 @@ def collect_dashboard(telemetry: Any, window: int = 500) -> Dict[str, Any]:
         "by_provider": by_provider,
         "endpoint_health": endpoint_health,
         "connection_trend": connection_trend,
+        "evolution_summary": evolution_summary,
+        "evolution_events": evolution_events,
         "window": window,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
     }
@@ -128,6 +141,8 @@ def render_html(dashboard: Dict[str, Any]) -> str:
     by_provider = dashboard.get("by_provider", {}) or {}
     endpoint_health = dashboard.get("endpoint_health", []) or []
     connection_trend = dashboard.get("connection_trend", []) or []
+    evolution_summary = dashboard.get("evolution_summary", {}) or {}
+    evolution_events = dashboard.get("evolution_events", []) or []
 
     sections: List[str] = []
 
@@ -205,6 +220,37 @@ def render_html(dashboard: Dict[str, Any]) -> str:
 
         <h3>端点健康</h3>
         {_endpoint_health_table(endpoint_health)}
+        """
+        )
+
+    # ── 进化闭环面板 ──
+    ev_events = int(evolution_summary.get("events", 0))
+    if ev_events:
+        ev_errors = int(evolution_summary.get("errors", 0))
+        by_stage = evolution_summary.get("by_stage", {}) or {}
+        stage_label = {
+            "user_feedback": "用户反馈",
+            "outcome_record": "回合结果记录",
+            "auto_reflect": "自动复盘",
+            "auto_consolidate": "自动知识炼化",
+        }
+        stage_rows = "".join(
+            f"<tr><td>{_esc(stage_label.get(k, k))}</td><td>{v}</td></tr>"
+            for k, v in sorted(by_stage.items(), key=lambda kv: -kv[1])
+        )
+        sections.append(
+            f"""
+        <h2>进化闭环</h2>
+        <div class="cards">
+          {_card("闭环事件", ev_events)}
+          {_card("最近异常", ev_errors)}
+          {_card("最后运行", evolution_summary.get("last_run") or "—")}
+        </div>
+        <h3>按阶段分布</h3>
+        <table><thead><tr><th>阶段</th><th>事件数</th></tr></thead>
+        <tbody>{stage_rows}</tbody></table>
+        <h3>最近事件</h3>
+        {_evolution_table(evolution_events)}
         """
         )
 
@@ -447,6 +493,38 @@ def _endpoint_health_table(health: List[Dict[str, Any]]) -> str:
         "<table><thead><tr>"
         "<th>Provider</th><th>模型</th><th>端点</th><th>尝试</th>"
         "<th>成功率</th><th>最近错误</th><th>熔断</th>"
+        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+    )
+
+
+_EVOLUTION_STAGE_LABELS = {
+    "user_feedback": "用户反馈",
+    "outcome_record": "回合结果记录",
+    "auto_reflect": "自动复盘",
+    "auto_consolidate": "自动知识炼化",
+}
+
+
+def _evolution_table(events: List[Dict[str, Any]]) -> str:
+    if not events:
+        return '<p class="muted">暂无事件</p>'
+    rows = []
+    for ev in events[:50]:
+        if not isinstance(ev, dict):
+            continue
+        stage = _EVOLUTION_STAGE_LABELS.get(ev.get("stage", ""), ev.get("stage", "—"))
+        level = _esc(ev.get("level") or "info")
+        msg = _esc((ev.get("message") or "")[:160])
+        ts = _esc(ev.get("timestamp") or "—")
+        rows.append(
+            "<tr>"
+            f"<td>{ts}</td><td>{_esc(stage)}</td>"
+            f"<td>{level}</td><td>{msg}</td>"
+            "</tr>"
+        )
+    return (
+        "<table><thead><tr>"
+        "<th>时间</th><th>阶段</th><th>等级</th><th>摘要</th>"
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
     )
 
