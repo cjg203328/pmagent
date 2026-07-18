@@ -10,7 +10,9 @@ StdioMCPClient 市场技能列表缓存层单元测试
 
 全部用 monkeypatch 绕过真实 npx 连接，快速稳定。
 """
+
 import asyncio
+from types import SimpleNamespace
 
 from artpm_agent.core.mcp_client_stdio import StdioMCPClient
 
@@ -58,11 +60,46 @@ def test_force_bypasses_cache(monkeypatch):
 
 def test_non_list_skill_not_cached(monkeypatch):
     c = _make_client(monkeypatch)
-    asyncio.run(c.call_skill("other_tool", {}))
-    asyncio.run(c.call_skill("other_tool", {}))
+    asyncio.run(c.call_skill("resolve_skill", {"query": "test"}))
+    asyncio.run(c.call_skill("resolve_skill", {"query": "test"}))
     # 非 list_skills 不缓存，每次都打底层
     assert c._calls["n"] == 2
     assert c.last_market_cache_hit is None
+
+
+def test_side_effect_tool_is_blocked_before_backend_call(monkeypatch):
+    c = _make_client(monkeypatch)
+    result = asyncio.run(c.call_skill("phase_advance", {}))
+
+    assert result == {
+        "success": False,
+        "code": "MCP_TOOL_NOT_ALLOWED",
+        "error": "Skills Forge tool is not allowed: phase_advance",
+        "retryable": False,
+    }
+    assert c._calls["n"] == 0
+
+
+def test_remote_tool_list_exposes_only_read_only_allowlist():
+    class FakeSession:
+        async def list_tools(self):
+            return SimpleNamespace(
+                tools=[
+                    SimpleNamespace(
+                        name="resolve_skill", description="resolve", inputSchema={}
+                    ),
+                    SimpleNamespace(
+                        name="phase_advance", description="write", inputSchema={}
+                    ),
+                ]
+            )
+
+    c = StdioMCPClient(api_key="sk_test", enabled=True)
+    c._session = FakeSession()
+
+    assert [tool["name"] for tool in asyncio.run(c._a_list_tools())] == [
+        "resolve_skill"
+    ]
 
 
 def test_list_market_skills_parses(monkeypatch):

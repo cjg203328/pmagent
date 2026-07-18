@@ -56,7 +56,7 @@ VECTOR_DB_PATH=./data/vector_store
 占位或空 API Key 会进入离线模式，不会发起无效网络请求。
 模型驱动工具调用默认开启；模型参数会先经过 JSON Schema 校验，写入型工具仍需宿主显式审批。需要紧急回滚时，可设置 `AGENT_MODEL_TOOL_CALLS_ENABLED=false`。
 
-远程 Skills Forge 是可选能力，只有同时配置 `MCP_ENABLED=true`、`SKILLS_FORGE_URL` 和有效 Key 时才启用。本地文件工具不依赖远程服务。命令执行默认关闭，需显式设置 `MCP_ALLOW_COMMANDS=true`。
+远程 Skills Forge 是可选能力。推荐设置 `MCP_ENABLED=true`、`MCP_TRANSPORT=stdio` 和有效的 `SKILLS_FORGE_KEY`，由本机 `npx` 启动官方 MCP server；只有旧版 `http` transport 才需要 `SKILLS_FORGE_URL`。远程侧默认只开放 `resolve_skill`、`get_skill_raw`、`list_skills` 和 `list_bundles` 四个只读发现工具。本地文件工具不依赖远程服务，命令执行默认关闭，需显式设置 `MCP_ALLOW_COMMANDS=true`。
 
 ## 离线模式
 

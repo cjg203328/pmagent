@@ -42,7 +42,7 @@ class MockAgent:
         return False
 
     def _vision_attachment_paths(self, parsed_files, visual_semantics):
-        from contextmanager import contextmanager
+        from contextlib import contextmanager
         @contextmanager
         def cm():
             yield []
@@ -136,8 +136,13 @@ class TestTurnFlow:
         result = run_turn(ctx)
 
         assert result.success is True
-        # Should route to skill
-        assert result.handled_by in ["skill_handler", "model_handler"]
+        # Should route to skill. The harness returns the specific skill id
+        # (e.g. "skill:cost_control") for richer telemetry, so accept both the
+        # legacy generic marker and the per-skill id.
+        assert result.handled_by is not None and (
+            result.handled_by in ("skill_handler", "model_handler")
+            or result.handled_by.startswith("skill")
+        )
 
     def test_profile_proposal_detection(self, mock_agent, mock_profile_store):
         """Test profile change proposal detection."""

@@ -53,6 +53,18 @@ _CONNECT_TIMEOUT = 180
 # 单次工具调用的超时
 _CALL_TIMEOUT = 60
 
+# Skills Forge also exposes specification/workflow mutation tools. ArtPM only
+# needs task-to-skill discovery, so the remote boundary fails closed to this
+# read-only set even if the upstream server adds more tools later.
+SKILLS_FORGE_ALLOWED_TOOLS = frozenset(
+    {
+        "resolve_skill",
+        "get_skill_raw",
+        "list_skills",
+        "list_bundles",
+    }
+)
+
 # 磁盘缓存目录（进程重启后首次也能免云端拉取，TTL 内）。
 # 存于项目根的 .cache/mcp，已被 .gitignore 排除，不会进版本库。
 _DISK_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".cache" / "mcp"
@@ -283,6 +295,8 @@ class StdioMCPClient:
         tools = getattr(result, "tools", result) or []
         skills: List[Dict[str, Any]] = []
         for t in tools:
+            if t.name not in SKILLS_FORGE_ALLOWED_TOOLS:
+                continue
             skills.append(
                 {
                     "name": t.name,
@@ -344,6 +358,13 @@ class StdioMCPClient:
         """
         if not self.enabled:
             return {"success": False, "error": "MCP (stdio) is not enabled"}
+        if skill_name not in SKILLS_FORGE_ALLOWED_TOOLS:
+            return {
+                "success": False,
+                "code": "MCP_TOOL_NOT_ALLOWED",
+                "error": f"Skills Forge tool is not allowed: {skill_name}",
+                "retryable": False,
+            }
 
         # 市场技能列表缓存：list_skills 工具去云端拉 88 个技能，单次约 2.4s，
         # 命中 TTL 缓存直接返回，省掉云端拉取。

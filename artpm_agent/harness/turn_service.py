@@ -132,7 +132,7 @@ def run_turn(
         return TurnResult(
             response="⚠️ Agent not initialized",
             success=False,
-            error="Missing agent reference in TurnContext",
+            error="Agent not initialized: missing agent reference in TurnContext",
             handled_by="harness_error",
         )
 

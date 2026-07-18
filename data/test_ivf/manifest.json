@@ -1,0 +1,6 @@
+{
+  "dimension": 128,
+  "index_type": "ivf",
+  "count": 1000,
+  "embedding_fingerprint": "unspecified:1536"
+}

@@ -101,6 +101,13 @@ class AdaptiveVectorStore:
             current_count = self.count if self.index else 1000
             nlist = max(int(math.sqrt(current_count)), 8)
 
+        # faiss needs ~39 * nlist training vectors for a stable quantizer,
+        # otherwise training crashes. Cap nlist so we never ask it to train
+        # with too few vectors.
+        if self.count > 0:
+            nlist = min(nlist, max(self.count // 39, 1))
+        nlist = max(nlist, 1)
+
         quantizer = faiss.IndexFlatL2(self.dimension)
         index = faiss.IndexIVFFlat(
             quantizer,
@@ -171,7 +178,13 @@ class AdaptiveVectorStore:
             try:
                 import faiss
 
-                self.index = faiss.read_index(str(index_file))
+                # Read the serialized bytes with Python (handles non-ASCII
+                # paths that faiss's native read_index cannot open on Windows).
+                with open(index_file, "rb") as f:
+                    _raw = f.read()
+                self.index = faiss.deserialize_index(
+                    np.frombuffer(_raw, dtype=np.uint8)
+                )
 
                 with open(manifest_file, "r", encoding="utf-8") as f:
                     manifest = json.load(f)
@@ -208,10 +221,17 @@ class AdaptiveVectorStore:
         count = len(self.metadata)
         desired_type = self._select_index_type(count)
 
+        # IVF requires training with >= nlist vectors before it can accept any
+        # data. A brand-new store has zero vectors, so creating an IVF index
+        # now would be untrained and unusable. In that case we start with a
+        # flat working index and transparently upgrade to a trained IVF index
+        # once enough vectors accumulate (handled by _maybe_reindex at the
+        # flat→ivf threshold).
+        if desired_type == "ivf":
+            desired_type = "flat"
+
         if desired_type == "flat":
             self.index = self._create_flat_index()
-        elif desired_type == "ivf":
-            self.index = self._create_ivf_index()
         elif desired_type == "hnsw":
             self.index = self._create_hnsw_index()
         else:
@@ -237,8 +257,13 @@ class AdaptiveVectorStore:
             # Save current vectors
             if current_count > 0:
                 import faiss
-                vectors = faiss.vector_to_array(self.index.reconstruct_n(0, current_count))
-                vectors = vectors.reshape(current_count, self.dimension)
+                raw = self.index.reconstruct_n(0, current_count)
+                if isinstance(raw, np.ndarray):
+                    vectors = raw.reshape(current_count, self.dimension)
+                else:  # older faiss returns a swig Vector
+                    vectors = faiss.vector_to_array(raw).reshape(
+                        current_count, self.dimension
+                    )
             else:
                 vectors = None
 
@@ -303,25 +328,16 @@ class AdaptiveVectorStore:
         if vector.ndim == 1:
             vector = vector.reshape(1, -1)
 
-        # Train IVF index if not trained
-        if self.index_type == "ivf" and not self.index.is_trained:
-            logger.info("Training IVF index with first batch...")
-            # Need at least nlist vectors to train, accumulate if needed
-            if self.count < self.index.nlist:
-                logger.warning(
-                    f"Not enough vectors to train IVF ({self.count} < {self.index.nlist}), "
-                    "using flat index temporarily"
-                )
-            else:
-                self.index.train(vector)
-
         # Add to index
         self.index.add(vector)
 
         # Store metadata
         self.metadata[doc_id] = metadata or {}
 
-        # Check if reindexing needed (every 1000 additions)
+        # Check if reindexing needed (every 1000 additions). A forced IVF
+        # store was created as a flat working index (IVF cannot train without
+        # vectors); _maybe_reindex upgrades it to a trained IVF index once the
+        # vector count crosses the threshold.
         if self.count % 1000 == 0:
             self._maybe_reindex()
 
@@ -380,12 +396,18 @@ class AdaptiveVectorStore:
 
         import faiss
 
+        self.store_path.mkdir(parents=True, exist_ok=True)
         index_file = self.store_path / "index.faiss"
         metadata_file = self.store_path / "metadata.json"
         manifest_file = self.store_path / "manifest.json"
 
-        # Save index
-        faiss.write_index(self.index, str(index_file))
+        # Serialize via faiss then write with Python's open(). faiss's native
+        # write_index() uses C-level file I/O that cannot open paths containing
+        # non-ASCII characters (e.g. the Chinese path this project lives under
+        # on Windows), so we persist the bytes through Python instead.
+        serialized = faiss.serialize_index(self.index)
+        with open(index_file, "wb") as f:
+            f.write(serialized.tobytes() if hasattr(serialized, "tobytes") else bytes(serialized))
 
         # Save metadata
         with open(metadata_file, "w", encoding="utf-8") as f:

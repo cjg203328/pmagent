@@ -27,6 +27,8 @@ from typing import Any, Dict, List, Optional
 
 from pathlib import Path
 
+from artpm_agent.core.mcp_client_stdio import SKILLS_FORGE_ALLOWED_TOOLS
+
 
 class UnifiedMCPClient:
     """统一 MCP 客户端：聚合本地工具与远程技能后端。"""
@@ -135,7 +137,11 @@ class UnifiedMCPClient:
             pass
         remote = self._get_remote()
         if remote is not None and remote.is_enabled():
-            result.extend(remote.list_skills())
+            result.extend(
+                skill
+                for skill in remote.list_skills()
+                if skill.get("name") in SKILLS_FORGE_ALLOWED_TOOLS
+            )
         return result
 
     def list_tools(self) -> List[Dict[str, Any]]:
@@ -175,6 +181,13 @@ class UnifiedMCPClient:
         # 远程技能
         remote = self._get_remote()
         if remote is not None and remote.is_enabled():
+            if skill_name not in SKILLS_FORGE_ALLOWED_TOOLS:
+                return {
+                    "success": False,
+                    "code": "MCP_TOOL_NOT_ALLOWED",
+                    "error": f"Skills Forge tool is not allowed: {skill_name}",
+                    "retryable": False,
+                }
             return await remote.call_skill(skill_name, params, force=force)
 
         return {
@@ -224,9 +237,19 @@ class UnifiedMCPClient:
             pass
         remote = self._get_remote()
         if remote is not None and remote.is_enabled():
-            summary = remote.get_skills_summary()
-            if summary:
-                lines.append(summary)
+            skills = [
+                skill
+                for skill in remote.list_skills()
+                if skill.get("name") in SKILLS_FORGE_ALLOWED_TOOLS
+            ]
+            if skills:
+                lines.append(
+                    "可用的远程 MCP 技能:\n"
+                    + "\n".join(
+                        f"  • {skill['name']}: {skill.get('description', '')}"
+                        for skill in skills
+                    )
+                )
         return "\n".join(lines)
 
 
