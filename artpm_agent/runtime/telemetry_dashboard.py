@@ -502,6 +502,7 @@ _EVOLUTION_STAGE_LABELS = {
     "outcome_record": "回合结果记录",
     "auto_reflect": "自动复盘",
     "auto_consolidate": "自动知识炼化",
+    "loop_run": "闭环运行",
 }
 
 
