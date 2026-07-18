@@ -18,6 +18,14 @@ if str(_project_root) not in sys.path:
 from artpm_agent.ui_helpers import *  # noqa: F401,F403
 from artpm_agent.config import PROJECT_ENV_PATH, resolve_data_root, save_data_root, reset_config
 
+# UI Optimizations: Fast toast notifications
+try:
+    from artpm_agent.ui.ui_optimizations import show_toast, show_toast_info
+    UI_OPTIMIZATIONS_AVAILABLE = True
+except ImportError:
+    UI_OPTIMIZATIONS_AVAILABLE = False
+    # Fallback to standard Streamlit notifications
+
 # 显式导入 Agent / Config，避免降级态（核心模块导入失败时）下
 # 依赖通配导入拿不到名字而触发 NameError。
 try:
@@ -274,6 +282,12 @@ def _apply_data_root(new_root, *, migrate, reset):
         pass
 
     st.success("数据存储目录已切换并重新加载。")
+    # Optimized: Use toast for faster feedback
+    if UI_OPTIMIZATIONS_AVAILABLE:
+        try:
+            st.toast("✅ 数据存储目录已切换并重新加载", icon="✅")
+        except Exception:
+            pass  # Fallback already shown above
     st.rerun()
 
 
@@ -517,7 +531,14 @@ def settings_page():
         if sync_feedback:
             feedback_type, feedback_message = sync_feedback
             if feedback_type == "success":
-                st.success(feedback_message)
+                # Optimized: Use toast instead of st.success
+                if UI_OPTIMIZATIONS_AVAILABLE:
+                    try:
+                        st.toast(f"✅ {feedback_message}", icon="✅")
+                    except Exception:
+                        st.success(feedback_message)
+                else:
+                    st.success(feedback_message)
             else:
                 st.error(feedback_message)
 
@@ -569,10 +590,18 @@ def settings_page():
             transport = os.getenv("MCP_TRANSPORT", "http").lower()
             transport_label = "stdio (npx)" if transport == "stdio" else "HTTP REST"
             if mcp_market:
-                st.success(
+                success_msg = (
                     f"Skills Forge 已连接（{transport_label}），"
                     f"{len(mcp_skills)} 个 MCP 工具 + {len(mcp_market)} 个市场技能可用"
                 )
+                # Optimized: Use toast for faster feedback
+                if UI_OPTIMIZATIONS_AVAILABLE:
+                    try:
+                        st.toast(f"🔗 {success_msg}", icon="🔗")
+                    except Exception:
+                        st.success(success_msg)
+                else:
+                    st.success(success_msg)
                 # 市场技能列表是否命中本地 TTL 缓存（无需再次打云端 2.4s）
                 mcp_client = getattr(st.session_state.get("agent"), "mcp_client", None)
                 cache_hit = getattr(mcp_client, "last_market_cache_hit", None)
@@ -581,9 +610,15 @@ def settings_page():
                 elif cache_hit is False:
                     st.caption("🔵 市场技能列表本次从云端拉取并写入缓存（TTL 300s）")
             else:
-                st.success(
-                    f"Skills Forge 已连接（{transport_label}），{len(mcp_skills)} 个技能可用"
-                )
+                success_msg = f"Skills Forge 已连接（{transport_label}），{len(mcp_skills)} 个技能可用"
+                # Optimized: Use toast for faster feedback
+                if UI_OPTIMIZATIONS_AVAILABLE:
+                    try:
+                        st.toast(f"🔗 {success_msg}", icon="🔗")
+                    except Exception:
+                        st.success(success_msg)
+                else:
+                    st.success(success_msg)
             skill_rows = [
                 {
                     "技能": skill.get("name", "未命名"),
@@ -700,7 +735,14 @@ def settings_page():
                                 priority=priority,
                             )
                         )
-                    st.success("工作流设置已保存。")
+                    # Optimized: Use toast for faster feedback
+                    if UI_OPTIMIZATIONS_AVAILABLE:
+                        try:
+                            st.toast("✅ 工作流设置已保存", icon="💾")
+                        except Exception:
+                            st.success("工作流设置已保存。")
+                    else:
+                        st.success("工作流设置已保存。")
                 except Exception as error:
                     logger.exception("保存工作流设置失败")
                     st.error(f"工作流设置保存失败：{error}")
