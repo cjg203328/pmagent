@@ -97,3 +97,25 @@ def test_render_html_no_evolution_panel_when_empty(telemetry):
     dash = collect_dashboard(telemetry, window=50)
     html = render_html(dash)
     assert "进化闭环" not in html
+
+
+def test_only_info_heartbeat_sets_last_run_not_last_error(telemetry):
+    # 成功心跳（loop_run / info）应让「最后运行」有值，且不应被误判为异常
+    telemetry.record_event(stage="loop_run", level="info", message="回合闭环完成")
+    summary = telemetry.evolution_summary(window=50)
+    assert summary["events"] == 1
+    assert summary["errors"] == 0
+    assert summary["last_run"] is not None
+    assert summary["last_error"] is None
+
+
+def test_loop_run_label_present_in_both_maps():
+    from artpm_agent.runtime.telemetry_dashboard import (
+        _EVOLUTION_STAGE_LABELS as dash_labels,
+    )
+    from artpm_agent.views.observability import (
+        _EVOLUTION_STAGE_LABELS as page_labels,
+    )
+
+    assert dash_labels.get("loop_run") == "闭环运行"
+    assert page_labels.get("loop_run") == "闭环运行"
