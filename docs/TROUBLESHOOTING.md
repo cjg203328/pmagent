@@ -1,6 +1,49 @@
 # 常见问题快速解决指南
 
-## 问题：模型服务繁忙 / 无法访问
+## 🚨 问题 1：模型切换到错误的 Provider
+
+### 症状
+- **设置页显示**：`openai/gpt-4o-mini`
+- **对话页显示**：`deepseek-v4-flash` 或其他不同 provider 的模型
+- **报错信息**：「服务繁忙」或「未收到有效回答」
+
+### 原因
+`LLM_AVAILABLE_MODELS` 包含了跨 provider 的模型，导致 failover 时切换到没有有效 API key 的 provider。
+
+### 快速诊断
+```bash
+# 运行配置检查工具
+python -m artpm_agent.tools.check_config
+
+# 如果报告「跨 provider 的模型」警告，继续下面的修复步骤
+```
+
+### 修复步骤
+
+**步骤 1：清理 `.env` 中的候选模型列表**
+
+```env
+# 只保留与主模型相同 provider 的候选
+LLM_AVAILABLE_MODELS="[\"gpt-4o\",\"gpt-4o-mini\",\"gpt-3.5-turbo\"]"
+```
+
+**步骤 2：移除无效的占位符 API keys**
+```env
+# 注释掉或删除这些行
+# ANTHROPIC_API_KEY=sk-ant-your-anthropic-key-here
+# DEEPSEEK_API_KEY=sk-your-deepseek-key-here
+```
+
+**步骤 3：重启应用**
+```bash
+streamlit run app.py
+```
+
+**详细说明**：参见 [FIXED_MODEL_FALLBACK_ISSUE.md](./FIXED_MODEL_FALLBACK_ISSUE.md)
+
+---
+
+## 问题 2：模型服务繁忙 / 无法访问
 
 ### 症状
 ```

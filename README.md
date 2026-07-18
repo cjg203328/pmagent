@@ -4,20 +4,39 @@
 
 ## 快速启动
 
-Windows：
+**推荐方式**（带配置检查）：
 
+Windows：
+```bat
+start_with_checks.bat
+```
+
+Linux/Mac：
+```bash
+python start_with_checks.py
+```
+
+**传统方式**：
+
+Windows：
 ```bat
 start.bat
 ```
 
 手动启动：
-
 ```powershell
 python -m pip install -r requirements.txt
 python -m streamlit run artpm_agent/app.py --server.address 127.0.0.1
 ```
 
 访问 `http://localhost:8501`。
+
+**配置检查工具**：
+
+在启动前或遇到问题时，可以单独运行配置检查：
+```bash
+python -m artpm_agent.tools.check_config
+```
 
 ## 核心能力
 
