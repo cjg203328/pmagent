@@ -45,6 +45,13 @@ from artpm_agent.harness.memory_retrieval import (
     FEEDBACK_CATEGORIES,
     record_turn_feedback,
 )
+# 对话页模型选择器
+from artpm_agent.views.chat_model_selector import (
+    render_model_selector,
+    get_current_model,
+    apply_model_override_to_agent,
+    get_agent_current_model,
+)
 
 _LEGACY_MODEL_RUNTIME_RE = re.compile(
     r"当前配置的生成模型 ID 是 \*\*`(?P<model>[^`]+)`\*\*.*?"
@@ -103,12 +110,27 @@ def chat_page():
         _render_welcome_suggestions()
     else:
         with st.container(key="chat_header"):
-            header_col, action_col = st.columns([1, 0.08], vertical_alignment="bottom")
-            with header_col:
+            # 标题行：对话标题 + 模型选择器 + 清空按钮
+            title_col, model_col, action_col = st.columns(
+                [0.5, 0.35, 0.08], vertical_alignment="bottom"
+            )
+
+            with title_col:
                 conversation_title = (
                     active_conversation["title"] if active_conversation else "ArtPM 助手"
                 )
                 st.title(conversation_title)
+
+            with model_col:
+                # 渲染模型选择器
+                switched_model = render_model_selector()
+                if switched_model:
+                    # 用户切换了模型，应用到 Agent
+                    agent = st.session_state.get("agent")
+                    apply_model_override_to_agent(agent, switched_model)
+                    st.toast(f"✅ 已切换到 {switched_model}（临时，不保存到设置）")
+                    st.rerun()  # 重新渲染以反映新模型
+
             with action_col:
                 if st.button(
                     "清空",
@@ -275,6 +297,10 @@ def chat_page():
                             if attachment_store is not None and attachments
                             else []
                         )
+
+                        # 获取用户临时选择的模型（如果有）
+                        user_selected_model = get_current_model()
+
                         agent_context = {
                             "conversation_id": request_conversation_id,
                             "turn_id": pending_request["turn_id"],
@@ -289,6 +315,8 @@ def chat_page():
                             "knowledge_context": (
                                 "" if local_fast else build_knowledge_context(prompt)
                             ),
+                            # 用户临时选择的模型（如果有）
+                            "preferred_model": user_selected_model if user_selected_model else None,
                         }
                         workflow_metadata = {}
                         awaiting_approval = False

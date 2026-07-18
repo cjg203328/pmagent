@@ -811,11 +811,64 @@ def _chat_error_message(error, model_id=None):
     signal_text = " ".join(signals)
     display_model = " ".join(str(model_id or "当前模型").split())[:80]
 
+    # 获取可用的候选模型列表（用于错误提示）
+    def get_available_models_hint() -> str:
+        """生成候选模型提示文本。"""
+        try:
+            import json
+            import os
+            available = json.loads(os.getenv("LLM_AVAILABLE_MODELS", "[]"))
+            if available and isinstance(available, list):
+                models_str = "、".join(available[:3])  # 最多显示3个
+                if len(available) > 3:
+                    models_str += f" 等 {len(available)} 个模型"
+                return f"\n\n💡 你可以尝试切换到其他模型：{models_str}"
+            return ""
+        except Exception:
+            return ""
+
+    available_hint = get_available_models_hint()
+
+    # 认证错误
+    if any(
+        marker in signal_text
+        for marker in (
+            "invalid api key",
+            "authentication",
+            "unauthorized",
+            "401",
+            "403",
+            "forbidden",
+        )
+    ):
+        return (
+            f"❌ 模型 {display_model} 认证失败。\n\n"
+            "**可能原因：**\n"
+            "- API Key 无效或已过期\n"
+            "- API Base URL 配置错误\n"
+            "- 该模型不可用于当前账户\n\n"
+            "**解决方案：**\n"
+            "1. 检查设置页的 API Key 和 API Base URL\n"
+            "2. 确认 API Key 对应的服务支持该模型\n"
+            "3. 尝试切换到其他模型（对话页右上角选择器）"
+            f"{available_hint}"
+        )
+
+    # 超时错误
     if any(marker in signal_text for marker in ("timeout", "timed out", "超时")):
         return (
-            f"模型 {display_model} 响应超时，未收到回答。请重新生成；"
-            "若持续超时，请在设置中确认该模型支持聊天接口。"
+            f"⏱️ 模型 {display_model} 响应超时。\n\n"
+            "**可能原因：**\n"
+            "- 网络不稳定或 API 服务繁忙\n"
+            "- 该模型响应速度较慢\n\n"
+            "**解决方案：**\n"
+            "1. 点击「重新生成」按钮重试\n"
+            "2. 尝试切换到响应更快的模型\n"
+            "3. 检查网络连接和 API Base URL"
+            f"{available_hint}"
         )
+
+    # 服务繁忙/限流
     if any(
         marker in signal_text
         for marker in (
@@ -823,24 +876,79 @@ def _chat_error_message(error, model_id=None):
             "resource exhausted",
             "rate limit",
             "too many requests",
+            "429",
             "worker local total request limit",
             "overloaded",
             "服务繁忙",
+            "capacity",
         )
     ):
         return (
-            f"模型 {display_model} 当前服务繁忙，未收到回答。"
-            "请稍后重新生成；本地功能和已配置的工作流仍可继续使用。"
+            f"🚦 模型 {display_model} 当前服务繁忙。\n\n"
+            "**可能原因：**\n"
+            "- API 速率限制（请求过于频繁）\n"
+            "- 服务负载过高\n"
+            "- 账户配额不足\n\n"
+            "**解决方案：**\n"
+            "1. 稍等片刻后重试\n"
+            "2. 切换到其他可用模型\n"
+            "3. 检查账户配额和使用限制"
+            f"{available_hint}"
         )
+
+    # 连接失败
     if any(
         marker in signal_text
-        for marker in ("connection", "connecterror", "连接失败", "无法连接")
+        for marker in ("connection", "connecterror", "连接失败", "无法连接", "reset")
     ):
         return (
-            f"模型 {display_model} 连接失败，未收到回答。"
-            "请检查 API Base URL 和服务状态后重试。"
+            f"🔌 模型 {display_model} 连接失败。\n\n"
+            "**可能原因：**\n"
+            "- API Base URL 错误或无法访问\n"
+            "- 网络连接问题\n"
+            "- API 服务暂时不可用\n\n"
+            "**解决方案：**\n"
+            "1. 检查设置页的 API Base URL 是否正确\n"
+            "2. 确认网络连接正常\n"
+            "3. 尝试访问 API Base URL（浏览器测试）\n"
+            "4. 切换到其他可用模型"
+            f"{available_hint}"
         )
-    return "未收到有效回答。请重新生成，或检查模型连接。"
+
+    # 模型不存在/不支持
+    if any(
+        marker in signal_text
+        for marker in (
+            "model not found",
+            "unsupported model",
+            "404",
+            "不支持",
+            "not supported",
+        )
+    ):
+        return (
+            f"❓ 模型 {display_model} 不存在或不支持。\n\n"
+            "**可能原因：**\n"
+            "- 模型 ID 拼写错误\n"
+            "- 该 API 服务不提供此模型\n"
+            "- 模型已下线或更名\n\n"
+            "**解决方案：**\n"
+            "1. 点击「同步模型」按钮获取可用模型列表\n"
+            "2. 切换到其他可用模型\n"
+            "3. 检查 API 文档确认模型 ID"
+            f"{available_hint}"
+        )
+
+    # 通用错误
+    return (
+        f"❌ 模型请求失败。\n\n"
+        "**解决方案：**\n"
+        "1. 点击「重新生成」按钮重试\n"
+        "2. 检查设置页的模型配置\n"
+        "3. 尝试切换到其他可用模型\n"
+        "4. 查看应用日志获取详细错误信息"
+        f"{available_hint}"
+    )
 def _render_message_attachments(attachments):
     names = [
         escape(str(attachment.get("name", "附件")))
