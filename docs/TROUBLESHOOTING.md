@@ -107,7 +107,7 @@ LLM_MODEL=deepseek-v4-flash
 ```bash
 # 方法 1: 重启服务（推荐）
 kill $(pgrep -f streamlit)
-./start_optimized.bat
+./start.sh
 
 # 方法 2: 手动重启
 # 找到进程 ID
@@ -254,7 +254,7 @@ VECTOR_INDEX_TYPE=flat
 rm -rf data/vector_store/
 
 # 重启服务，自动重建
-./start_optimized.bat
+./start.sh
 ```
 
 ---
@@ -348,7 +348,7 @@ rm -rf .cache .pytest_cache __pycache__
 cp .env.example .env
 
 # 5. 重新启动
-./start_optimized.bat
+./start.sh
 ```
 
 ---

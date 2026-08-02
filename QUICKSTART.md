@@ -4,13 +4,13 @@
 
 ### Windows
 ```bash
-双击运行: start_optimized.bat
+双击运行: start.bat
 ```
 
 ### Linux/Mac
 ```bash
-chmod +x start_optimized.sh
-./start_optimized.sh
+chmod +x start.sh
+./start.sh
 ```
 
 **首次运行**会自动：
@@ -79,7 +79,7 @@ git archive --format=zip --output=artpm-agent-v0.3.0.zip HEAD
 unzip artpm-agent-v0.3.0.zip
 cd artpm-agent-v0.3.0
 pip install -e .
-start_optimized.bat  # 或 ./start_optimized.sh
+start.bat  # Linux/macOS 使用 ./start.sh
 ```
 
 ---

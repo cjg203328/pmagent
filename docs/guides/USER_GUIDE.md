@@ -67,7 +67,7 @@ restart.bat
 
 ```bash
 # 安装依赖（首次运行）
-pip install -r artpm_agent/requirements.txt
+python -m pip install -e .
 
 # 启动应用
 streamlit run artpm_agent/app.py
@@ -649,7 +649,7 @@ rm -rf __pycache__ artpm_agent/__pycache__
 
 3. **更新依赖**
    ```bash
-   pip install -r artpm_agent/requirements.txt --upgrade
+   python -m pip install -e . --upgrade
    ```
 
 4. **数据库迁移**
@@ -676,7 +676,7 @@ artpm_agent/logs/artpm_YYYYMMDD.log
 1. **ModuleNotFoundError**
    ```bash
    # 重新安装依赖
-   pip install -r artpm_agent/requirements.txt
+   python -m pip install -e .
    ```
 
 2. **Database is locked**

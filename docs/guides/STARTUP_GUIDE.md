@@ -98,7 +98,7 @@ streamlit run artpm_agent/app.py --server.port 8502
 ### 依赖问题
 ```bash
 # 重新安装依赖
-pip install -r artpm_agent/requirements.txt --force-reinstall
+python -m pip install -e . --force-reinstall
 ```
 
 ### 数据库问题
