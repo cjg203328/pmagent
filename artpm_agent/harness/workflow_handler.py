@@ -61,7 +61,9 @@ def try_workflow_routing(
 
         formatter = format_workflow_result
 
-    response = formatter(ctx.agent, execution)
+    # Formatters receive the public runtime. It exposes format_skill_result()
+    # without leaking the legacy agent's private implementation surface.
+    response = formatter(ctx.runtime, execution)
     if not isinstance(response, str) or not response.strip():
         raise ValueError("工作流未返回有效回答")
 

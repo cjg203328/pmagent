@@ -25,6 +25,7 @@ from .artifact_handler import try_artifact_generation
 from .workflow_handler import try_workflow_routing
 from .skill_handler import try_skill_routing
 from .model_handler import fallback_to_model
+from .runtime import HarnessRuntime, adapt_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +47,18 @@ class TurnContext:
     knowledge_context: str = ""
     conversation_history: List[Dict[str, Any]] = field(default_factory=list)
 
-    # Reference to the agent instance for skill execution and model calls.
-    # Phase 4 will remove this and make the harness independent of ArtPMAgent.
+    # Deprecated compatibility boundary. New hosts should pass ``runtime``.
     agent: Any = None
 
     # Additional context (file_paths, project_id, etc.)
     extra: Dict[str, Any] = field(default_factory=dict)
+
+    # Provider-neutral execution interface. This can be implemented by an
+    # API worker, plugin host, or any other process without a concrete agent.
+    runtime: Optional[HarnessRuntime] = None
+
+    def __post_init__(self) -> None:
+        self.runtime = adapt_runtime(self.runtime, self.agent)
 
 
 @dataclass
@@ -128,12 +135,21 @@ def run_turn(
         - Stage 4 (next): Switch pages/chat.py to use run_turn()
     """
 
-    if ctx.agent is None:
+    runtime = ctx.runtime
+    if runtime is None:
         return TurnResult(
             response="⚠️ Agent not initialized",
             success=False,
-            error="Agent not initialized: missing agent reference in TurnContext",
+            error="Agent not initialized: missing harness runtime in TurnContext",
             handled_by="harness_error",
+        )
+    capabilities = getattr(runtime, "capabilities", None)
+    if capabilities is None:
+        return TurnResult(
+            response="Harness runtime configuration is invalid.",
+            success=False,
+            error="Harness runtime does not declare capabilities",
+            handled_by="harness_runtime_error",
         )
 
     # ── Step 0: 记忆系统 — 对话压缩 + 跨会话记忆注入 ──
@@ -196,11 +212,10 @@ def run_turn(
     if workflow_result is not None:
         return workflow_result
 
-    # Host-level handlers must run for thin agents too (for example artifact
-    # generation with a test-double LLM). Only the skill/model layer requires
-    # ArtPMAgent's private compatibility API.
-    if not _agent_supports_harness(ctx.agent):
-        return _run_thin_agent(ctx, response_handler=response_handler)
+    # Host-level handlers run for thin runtimes too. A minimal host can expose
+    # direct chat without claiming the complete skill/model contract.
+    if not bool(getattr(capabilities, "turn_processing", False)):
+        return _run_thin_runtime(ctx, response_handler=response_handler)
 
     # Handler 6: Skill routing
     parsed_files = ctx.extra.get("parsed_files", [])
@@ -222,34 +237,12 @@ def run_turn(
     return fallback_to_model(ctx, parsed_files, attachment_context)
 
 
-def _agent_supports_harness(agent: Any) -> bool:
-    """Duck-type whether the agent exposes the full harness-private API.
-
-    The handler chain (skill/model/etc.) relies on ArtPMAgent internals such
-    as ``_detect_intent``, ``router``, ``_build_system_prompt`` and
-    ``_chat_with_model_failover``. Minimal agents (test doubles, thin facades)
-    only implement ``chat()`` and must bypass the chain.
-    """
-    required = (
-        "_detect_intent",
-        "router",
-        "_build_system_prompt",
-        "_chat_with_model_failover",
-        "_skill_input_with_history",
-        "_extract_inputs",
-        "_format_skill_result",
-        "_needs_visual_semantics",
-        "_vision_attachment_paths",
-    )
-    return all(hasattr(agent, attr) for attr in required)
-
-
-def _run_thin_agent(
+def _run_thin_runtime(
     ctx: "TurnContext",
     *,
     response_handler: Optional[Callable[[TurnContext], Any]] = None,
 ) -> "TurnResult":
-    """Fallback path for minimal agents that only expose ``chat()``.
+    """Fallback path for minimal runtimes that only expose ``chat()``.
 
     Replicates the pre-harness behaviour of calling the agent directly and
     wrapping the result in a TurnResult. Empty/None responses are surfaced as
@@ -262,9 +255,17 @@ def _run_thin_agent(
             handled_by="thin_agent_chat",
         )
 
-    agent = ctx.agent
+    runtime = ctx.runtime
+    if runtime is None or not runtime.capabilities.direct_response:
+        return TurnResult(
+            response="No response runtime is available for this turn.",
+            success=False,
+            error="Harness runtime does not support direct responses",
+            handled_by="harness_runtime_error",
+            metadata={"turn_id": ctx.turn_id},
+        )
     try:
-        response = agent.chat(ctx.user_input, context=ctx.extra)
+        response = runtime.chat(ctx.user_input, context=ctx.extra)
     except Exception as error:  # noqa: BLE001 - surface agent failures uniformly
         logger.warning("Thin-agent chat() raised: %s", error)
         return TurnResult(
@@ -336,9 +337,6 @@ def _inject_memory_context(
     通过 ``ctx.extra["memory_injected"]`` 保证每回合只注入一次；任何异常仅
     记录日志，不阻塞主流程。
     """
-    if knowledge_store is None:
-        return
-
     try:
         from artpm_agent.harness.memory_retrieval import (
             inject_memory_context,
@@ -353,40 +351,3 @@ def _inject_memory_context(
         )
     except Exception as exc:  # noqa: BLE001 - injection must never break a turn
         logger.warning("记忆系统 Step 0 跳过 (非致命): %s", exc, exc_info=True)
-
-
-def _make_llm_callable(agent: Any):
-    """从 Agent 实例提取一个可用的 LLM 调用函数。
-
-    返回 Callable[[str], str] 或 None。
-    """
-    if agent is None:
-        return None
-
-    # 尝试获取 llm_client
-    llm_client = getattr(agent, "llm_client", None)
-    if llm_client is not None and hasattr(llm_client, "chat"):
-        def _fn(prompt: str) -> str:
-            try:
-                result = llm_client.chat(prompt)
-                # 兼容不同返回格式
-                if isinstance(result, dict):
-                    return result.get("content", result.get("text", str(result)))
-                return str(result)
-            except Exception:
-                return ""
-        return _fn
-
-    # fallback: agent.chat 本身
-    if hasattr(agent, "chat") and callable(agent.chat):
-        def _fn_fallback(prompt: str) -> str:
-            try:
-                result = agent.chat(prompt)
-                if isinstance(result, dict):
-                    return result.get("content", result.get("text", str(result)))
-                return str(result)
-            except Exception:
-                return ""
-        return _fn_fallback
-
-    return None

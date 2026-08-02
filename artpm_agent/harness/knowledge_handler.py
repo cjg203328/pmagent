@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, List, Optional
 
+from artpm_agent.utils.mineru_adapter import MINERU_IMAGE_SUFFIXES
+
 if TYPE_CHECKING:
     from .turn_service import TurnContext, TurnResult
 
@@ -92,8 +94,10 @@ def try_knowledge_ingestion(
 
     # Parse attachments into resource payloads
     try:
+        if ctx.runtime is None or not ctx.runtime.capabilities.document_parsing:
+            raise RuntimeError("document parsing runtime is unavailable")
         resources = _build_knowledge_ingestion_resources(
-            ctx.agent, attachments, file_paths, ctx.user_input
+            ctx.runtime, attachments, file_paths, ctx.user_input
         )
 
         if knowledge_store is None:
@@ -137,7 +141,7 @@ def try_knowledge_ingestion(
 
 
 def _build_knowledge_ingestion_resources(
-    agent: Any, attachments: List[Any], file_paths: List[str], prompt: str
+    runtime: Any, attachments: List[Any], file_paths: List[str], prompt: str
 ) -> List[dict]:
     """
     Parse conversation files into bounded, parser-neutral knowledge payloads.
@@ -145,7 +149,7 @@ def _build_knowledge_ingestion_resources(
     This is a direct migration from ui_helpers.build_knowledge_ingestion_resources().
 
     Args:
-        agent: ArtPMAgent instance with process_document() method
+        runtime: HarnessRuntime with a process_document() method
         attachments: List of attachment metadata dicts
         file_paths: List of file paths on disk
         prompt: User prompt for context
@@ -166,7 +170,7 @@ def _build_knowledge_ingestion_resources(
         raise ValueError("附件元数据与文件路径数量不一致")
 
     for attachment, file_path in zip(attachments, file_paths):
-        result = agent.process_document(file_path, prompt)
+        result = runtime.process_document(file_path, prompt)
         name = str(attachment.get("name") or Path(file_path).name)
 
         if not result.get("success"):
@@ -196,7 +200,7 @@ def _build_knowledge_ingestion_resources(
         extension = str(attachment.get("extension", "")).lower()
         if extension in {"xlsx", "xls", "csv"}:
             resource_type = "table"
-        elif extension in {"png", "jpg", "jpeg", "webp"}:
+        elif f".{extension}" in MINERU_IMAGE_SUFFIXES:
             resource_type = "image"
         else:
             resource_type = "document"
@@ -213,10 +217,17 @@ def _build_knowledge_ingestion_resources(
             continue
 
         # Build resource payload (matching WorkspaceKnowledgeStore format)
+        preprocessor = result.get("preprocessor")
+        conversion_backend = (
+            str(preprocessor.get("name"))
+            if isinstance(preprocessor, dict)
+            else "legacy"
+        )
+        searchable_limit = 131072 if conversion_backend == "mineru" else 32768
         resources.append(
             {
                 "title": name,
-                "searchable_text": raw_text[:32768],  # Bounded for indexing
+                "searchable_text": raw_text[:searchable_limit],  # Bounded for indexing
                 "resource_type": resource_type,
                 "source_type": "conversation_attachment",
                 "source_uri": str(
@@ -232,7 +243,13 @@ def _build_knowledge_ingestion_resources(
                     "original_name": name,
                     "size": attachment.get("size"),
                     "confidence": result.get("confidence"),
-                    "preprocessor": result.get("preprocessor") or None,
+                    "preprocessor": preprocessor or None,
+                    "conversion_backend": conversion_backend,
+                    "conversion_schema": (
+                        preprocessor.get("integration_schema")
+                        if isinstance(preprocessor, dict)
+                        else None
+                    ),
                 },
             }
         )

@@ -17,6 +17,7 @@ Importing this module has no side effects.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import RLock
 from typing import Any, Callable, List, Optional
 
 from artpm_agent.memory.feedback_store import (
@@ -50,55 +51,79 @@ class MemoryContextBudget:
     summarize_fn: Optional[Callable] = None  # LLM summarizer hook (optional)
 
 
-def _make_llm_callable(agent: Any):
-    """Extract a best-effort LLM callable from an agent instance.
-
-    Returns ``Callable[[str], str]`` or ``None``. Failures return "" so callers
-    can degrade to rule-based compression/extraction.
-    """
-    if agent is None:
+def _make_llm_callable(runtime: Any):
+    """Extract a best-effort compressor callable from the public runtime."""
+    if runtime is None:
         return None
-    llm_client = getattr(agent, "llm_client", None)
-    if llm_client is not None and hasattr(llm_client, "chat"):
-        def _fn(prompt: str) -> str:
-            try:
-                result = llm_client.chat(prompt)
-                if isinstance(result, dict):
-                    return result.get("content", result.get("text", str(result)))
-                return str(result)
-            except Exception:  # noqa: BLE001
-                return ""
-        return _fn
-    if hasattr(agent, "chat") and callable(agent.chat):
-        def _fn_fallback(prompt: str) -> str:
-            try:
-                result = agent.chat(prompt)
-                if isinstance(result, dict):
-                    return result.get("content", result.get("text", str(result)))
-                return str(result)
-            except Exception:  # noqa: BLE001
-                return ""
-        return _fn_fallback
-    return None
+    factory = getattr(runtime, "make_llm_callable", None)
+    return factory() if callable(factory) else None
+
+
+_COMPRESSION_INJECTOR_ATTR = "_artpm_compression_injector"
+_COMPRESSION_INJECTOR_LOCK = RLock()
+
+
+def _compression_injector(knowledge_store: Any, runtime: Any):
+    """Reuse compression state for the lifetime of the owning store/runtime."""
+    from artpm_agent.memory.memory_injector import MemoryInjector
+
+    owner = knowledge_store
+    if owner is None:
+        owner = getattr(runtime, "target", None) or runtime
+    if owner is None:
+        return MemoryInjector(knowledge_store)
+
+    with _COMPRESSION_INJECTOR_LOCK:
+        cached = getattr(owner, _COMPRESSION_INJECTOR_ATTR, None)
+        if isinstance(cached, MemoryInjector) and cached.store is knowledge_store:
+            return cached
+        injector = MemoryInjector(knowledge_store)
+        try:
+            setattr(owner, _COMPRESSION_INJECTOR_ATTR, injector)
+        except (AttributeError, TypeError):
+            # Slot-only third-party stores retain the previous best-effort path.
+            return injector
+        return injector
 
 
 def _build_query(user_input: str, history: Optional[List[dict]]) -> str:
-    """Compose a retrieval query from the current input and recent history."""
-    parts = [user_input.strip()] if user_input else []
-    if history:
-        for msg in history[-3:]:
-            text = ""
-            if isinstance(msg, dict):
-                text = str(msg.get("content") or msg.get("text") or "")
-            elif isinstance(msg, str):
-                text = msg
-            if text.strip():
-                parts.append(text.strip())
-    return "\n".join(parts).strip()
+    """Compose a bounded query without feeding model output back into recall."""
+    current = " ".join(str(user_input or "").split())
+    if not current:
+        return ""
+
+    # Assistant messages can contain guesses or stale facts. Using them as
+    # retrieval terms reinforces those guesses and can displace user-confirmed
+    # memories, so only recent user turns are eligible as disambiguating context.
+    parts = [current[:800]]
+    seen = {_snippet_key(current)}
+    previous_user_turns: list[str] = []
+    for message in reversed(list(history or [])):
+        if isinstance(message, dict):
+            if str(message.get("role") or "").casefold() != "user":
+                continue
+            text = str(message.get("content") or message.get("text") or "")
+        elif isinstance(message, str):
+            text = message
+        else:
+            continue
+        clean = " ".join(text.split())
+        key = _snippet_key(clean)
+        if not clean or not key or key in seen:
+            continue
+        seen.add(key)
+        previous_user_turns.append(clean[:300])
+        if len(previous_user_turns) >= 2:
+            break
+
+    parts.extend(reversed(previous_user_turns))
+    return "\n".join(parts)[:1200].rstrip()
 
 
 def _snippet_key(text: str) -> str:
-    return " ".join(str(text or "").casefold().split())[:240]
+    # Do not truncate the identity: two documents can share a long template
+    # prefix and contain different facts near the end.
+    return " ".join(str(text or "").casefold().split())
 
 
 def _append_snippet(
@@ -117,9 +142,9 @@ def _append_snippet(
     if not key or key in seen:
         return
     seen.add(key)
-    clean = clean[:max_chars].rstrip()
     if title:
         clean = f"{title}：{clean}"
+    clean = clean[:max_chars].rstrip()
     buckets.setdefault(bucket, []).append(clean)
 
 
@@ -162,6 +187,7 @@ def retrieve_memory_context(
     *,
     memory_manager: Optional[Any] = None,
     knowledge_store: Optional[Any] = None,
+    workspace_id: Optional[str] = None,
     top_k: int = 4,
     max_snippet_chars: int = 800,
     max_total_chars: int = 3200,
@@ -206,14 +232,30 @@ def retrieve_memory_context(
             try:
                 results = knowledge_store.search(
                     query,
+                    **({"workspace_id": workspace_id} if workspace_id else {}),
                     limit=top_k,
                     include_rules=False,
                     max_text_chars=max_snippet_chars,
                     use_confidence=True,
-                    confidence_floor=0.05,
+                    confidence_floor=confidence_floor,
                 )
             except TypeError:
-                results = knowledge_store.search(query, limit=top_k)
+                compatibility_kwargs: dict[str, Any] = {"limit": top_k}
+                if workspace_id:
+                    compatibility_kwargs["workspace_id"] = workspace_id
+                try:
+                    results = knowledge_store.search(query, **compatibility_kwargs)
+                except TypeError:
+                    default_workspace = getattr(
+                        knowledge_store,
+                        "DEFAULT_WORKSPACE_ID",
+                        "local-default",
+                    )
+                    if workspace_id and workspace_id != default_workspace:
+                        # A legacy backend that cannot scope its query must fail
+                        # closed rather than leak the default workspace.
+                        raise
+                    results = knowledge_store.search(query, limit=top_k)
             for r in results[:top_k]:
                 if not _passes_confidence(r, confidence_floor):
                     continue
@@ -232,13 +274,71 @@ def retrieve_memory_context(
 
     if not any(buckets.values()):
         return ""
+    return _format_retrieved_buckets(
+        buckets,
+        top_k=top_k,
+        max_total_chars=max_total_chars,
+    )
+
+
+def _format_retrieved_buckets(
+    buckets: dict[str, list[str]],
+    *,
+    top_k: int,
+    max_total_chars: int,
+) -> str:
+    """Render recall fairly so one backend cannot consume the whole budget."""
+    bucket_names = [
+        name
+        for name in ("长期记忆", "工作区资料")
+        if buckets.get(name)
+    ]
+    if not bucket_names or max_total_chars <= 0:
+        return ""
+
+    selected = {name: [] for name in bucket_names}
+    fixed_cost = len("【相关记忆】\n") + sum(
+        len(f"{name}：\n") for name in bucket_names
+    )
+    remaining = max(0, max_total_chars - fixed_cost)
+
+    # Reserve an equal slice for each source's best hit. If both top snippets do
+    # not fit, keep bounded excerpts from both instead of dropping one source.
+    first_lines = {name: f"- {buckets[name][0]}" for name in bucket_names}
+    first_cost = sum(len(line) + 1 for line in first_lines.values())
+    if first_cost <= remaining:
+        for name, line in first_lines.items():
+            selected[name].append(line)
+            remaining -= len(line) + 1
+    else:
+        per_source = remaining // len(bucket_names)
+        for name, line in first_lines.items():
+            if per_source <= 4:
+                continue
+            bounded = line[: per_source - 2].rstrip() + "…"
+            selected[name].append(bounded)
+            remaining -= len(bounded) + 1
+
+    # Continue round-robin so ranking is preserved inside each source.
+    for index in range(1, top_k):
+        for name in bucket_names:
+            snippets = buckets[name]
+            if index >= len(snippets):
+                continue
+            line = f"- {snippets[index]}"
+            cost = len(line) + 1
+            if cost <= remaining:
+                selected[name].append(line)
+                remaining -= cost
+
+    if not any(selected.values()):
+        return ""
     lines = ["【相关记忆】"]
-    for bucket_name in ("长期记忆", "工作区资料"):
-        snippets = buckets.get(bucket_name) or []
-        if not snippets:
+    for name in bucket_names:
+        if not selected[name]:
             continue
-        lines.append(f"{bucket_name}：")
-        lines.extend(f"- {snippet}" for snippet in snippets[:top_k])
+        lines.append(f"{name}：")
+        lines.extend(selected[name])
     return "\n".join(lines)[:max_total_chars].rstrip()
 
 
@@ -255,14 +355,14 @@ def _extract_text(record: Any) -> str:
             raw = f"{raw}\n{extracted}" if raw else extracted
         text = str(raw).strip()
         if text:
-            return text[:800]
+            return text
     # WorkspaceKnowledgeStore.search returns resource rows
     if "text" in record:
-        return str(record.get("text", "")).strip()[:800]
+        return str(record.get("text", "")).strip()
     if "searchable_text" in record:
-        return str(record.get("searchable_text", "")).strip()[:800]
+        return str(record.get("searchable_text", "")).strip()
     if "content" in record and isinstance(record["content"], str):
-        return record["content"].strip()[:800]
+        return record["content"].strip()
     return ""
 
 
@@ -349,7 +449,7 @@ def inject_memory_context(
 ) -> None:
     """Append retrieved memory + preferences + strategies to ``ctx.knowledge_context``.
 
-    Backends default to ``ctx.agent.memory`` (if present) and the lazily-built
+    Backends default to ``ctx.runtime.memory_manager`` (if present) and the lazily-built
     default FeedbackStore / StrategyStore, so callers can invoke this with no
     arguments and get automatic memory activation.
     """
@@ -363,8 +463,17 @@ def inject_memory_context(
 
     budget = MemoryContextBudget()
 
+    runtime = getattr(ctx, "runtime", None)
+    if runtime is None:
+        # ``inject_memory_context`` is also a public helper used with simple
+        # namespace contexts outside TurnContext. Keep that call shape
+        # compatible while still routing through the adapter boundary.
+        from .runtime import adapt_runtime
+
+        runtime = adapt_runtime(agent=getattr(ctx, "agent", None))
+
     if memory_manager is None:
-        memory_manager = getattr(ctx.agent, "memory", None)
+        memory_manager = getattr(runtime, "memory_manager", None)
     if feedback_store is None:
         feedback_store = get_default_feedback_store()
     if strategy_store is None:
@@ -387,18 +496,19 @@ def inject_memory_context(
     if existing_knowledge:
         _add(existing_knowledge)  # user-confirmed workspace facts (highest prio)
 
+    workspace_id = str(ctx.extra.get("workspace_id") or "").strip() or None
+
     # Conversation compression summary (best-effort): keep in-turn continuity
     # for long dialogues without re-running cross-session RAG.
     try:
-        from artpm_agent.memory.memory_injector import MemoryInjector
-
         history = list(getattr(ctx, "conversation_history", None) or [])
         if history:
-            llm_fn = _make_llm_callable(ctx.agent)
-            comp = MemoryInjector(knowledge_store).compression_block(
+            llm_fn = _make_llm_callable(runtime)
+            comp = _compression_injector(knowledge_store, runtime).compression_block(
                 history,
                 getattr(ctx, "conversation_id", "") or "",
                 llm_fn,
+                workspace_id=workspace_id or "local-default",
             )
             if comp:
                 _add("【对话摘要】\n" + comp)
@@ -412,6 +522,7 @@ def inject_memory_context(
             getattr(ctx, "conversation_history", None),
             memory_manager=memory_manager,
             knowledge_store=None if existing_knowledge else knowledge_store,
+            workspace_id=workspace_id,
             top_k=budget.top_k,
             max_snippet_chars=budget.max_snippet_chars,
             max_total_chars=budget.max_total_chars,

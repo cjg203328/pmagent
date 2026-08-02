@@ -8,8 +8,48 @@ from collections.abc import Callable
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 from artpm_agent.harness import TurnContext, run_turn
+from artpm_agent.harness.runtime import LegacyAgentRuntimeAdapter
 
 logger = logging.getLogger(__name__)
+
+# Keep injected long-term context bounded even when a caller does not provide
+# an explicit budget. The value is intentionally below the model output limit;
+# confirmed facts remain useful while prompt latency and cost stay predictable.
+DEFAULT_MEMORY_CONTEXT_MAX_TOKENS = 1200
+
+
+def resolve_memory_context_token_budget(
+    agent: Any,
+    explicit: Optional[int] = None,
+) -> int:
+    """Resolve the per-turn memory budget from an explicit value or config.
+
+    ``None`` means "use runtime configuration"; an explicit ``0`` preserves
+    the historical opt-out. Invalid values fail closed to no injected token
+    budget rather than making the chat entrypoint fail.
+    """
+    candidate: Any = explicit
+    if candidate is None:
+        config = getattr(agent, "config", None)
+        getter = getattr(config, "get", None)
+        if callable(getter):
+            candidate = getter(
+                "agent_runtime.memory_context_max_tokens",
+                DEFAULT_MEMORY_CONTEXT_MAX_TOKENS,
+            )
+        else:
+            candidate = DEFAULT_MEMORY_CONTEXT_MAX_TOKENS
+    if isinstance(candidate, bool):
+        return 0
+    try:
+        value = int(candidate)
+    except (TypeError, ValueError):
+        return 0
+    if value <= 0:
+        return 0
+    # Prevent a malformed environment/config value from reintroducing an
+    # unbounded prompt while still allowing deliberate small test budgets.
+    return min(value, 8192)
 
 
 def _record_evolution_event(
@@ -55,7 +95,7 @@ def execute_turn_with_harness(
     auto_activate_memory: bool = True,
     auto_reflect: bool = True,
     memory_inject_token_budget: int = 0,
-    memory_inject_max_tokens: int = 0,
+    memory_inject_max_tokens: Optional[int] = None,
 ) -> Tuple[str, bool, Dict[str, Any], Any]:
     """
     Execute a turn using the unified harness (run_turn()).
@@ -63,7 +103,7 @@ def execute_turn_with_harness(
     This is the Phase 3 Stage 4 integration point for chat.py.
 
     Args:
-        agent: ArtPMAgent instance
+        agent: Legacy application agent or a compatible host object
         prompt: User input text
         turn_id: Unique turn identifier
         conversation_id: Optional conversation ID for approvals
@@ -102,6 +142,7 @@ def execute_turn_with_harness(
         knowledge_context=agent_context.get("knowledge_context", ""),
         conversation_history=agent_context.get("conversation_history", []),
         agent=agent,
+        runtime=LegacyAgentRuntimeAdapter(agent),
         extra={
             # Pass through full context for compatibility
             **agent_context,
@@ -120,8 +161,12 @@ def execute_turn_with_harness(
     if isinstance(turn_ctx.extra, dict):
         if memory_inject_token_budget:
             turn_ctx.extra["memory_inject_max_chars"] = int(memory_inject_token_budget)
-        if memory_inject_max_tokens:
-            turn_ctx.extra["memory_inject_max_tokens"] = int(memory_inject_max_tokens)
+        resolved_token_budget = resolve_memory_context_token_budget(
+            agent,
+            memory_inject_max_tokens,
+        )
+        if resolved_token_budget > 0:
+            turn_ctx.extra["memory_inject_max_tokens"] = resolved_token_budget
 
     # Execute unified turn
     turn_result = run_turn(

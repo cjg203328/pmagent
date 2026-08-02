@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, Callable, List, Optional
+from typing import Callable, List, Optional
 
 try:  # tiktoken is optional; heuristic fallback keeps us dependency-free.
     import tiktoken
@@ -103,17 +103,28 @@ def _truncate_tokens(
     model: str = "",
     counter: Optional[Callable[[str], int]] = None,
 ) -> str:
-    """Token-accurate prefix truncation (binary search on char index)."""
+    """Token-accurate prefix truncation, including the marker in the budget."""
+    if max_tokens <= 0:
+        return ""
     if estimate_tokens(text, model=model, counter=counter) <= max_tokens:
         return text
+
+    marker = "…"
+    marker_tokens = estimate_tokens(marker, model=model, counter=counter)
+    if marker_tokens > max_tokens:
+        return ""
+
+    # Search for the longest prefix whose prefix plus truncation marker still
+    # fits. Counting the marker here prevents a subtle prompt-budget overflow.
     lo, hi = 0, len(text)
     while lo < hi:
         mid = (lo + hi + 1) // 2
-        if estimate_tokens(text[:mid], model=model, counter=counter) <= max_tokens:
+        candidate = text[:mid].rstrip() + marker
+        if estimate_tokens(candidate, model=model, counter=counter) <= max_tokens:
             lo = mid
         else:
             hi = mid - 1
-    return text[:lo].rstrip() + "…"
+    return text[:lo].rstrip() + marker if lo else marker
 
 
 def apply_token_budget(
@@ -131,7 +142,14 @@ def apply_token_budget(
     Drops lowest-priority whole blocks first (never the last one), then
     compresses + truncates the surviving top block to fit.
     """
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
+        raise TypeError("max_tokens must be an integer")
+    if max_tokens < 0:
+        raise ValueError("max_tokens must be non-negative")
+
     kept = [b for b in blocks if b and b.strip()]
+    if max_tokens == 0:
+        return []
 
     def _count(b: str) -> int:
         return estimate_tokens(b, model=model, counter=counter)
@@ -139,7 +157,12 @@ def apply_token_budget(
     def _prio(b: str) -> int:
         return priority_fn(b) if priority_fn is not None else 0
 
-    total = sum(_count(b) for b in kept)
+    def _joined_count(items: List[str]) -> int:
+        # The caller joins blocks with two newlines. Include that separator in
+        # the budget so the final rendered context cannot exceed the limit.
+        return _count("\n\n".join(items))
+
+    total = _joined_count(kept)
     if total <= max_tokens:
         return kept
 
@@ -149,8 +172,8 @@ def apply_token_budget(
             break
         if len(kept) == 1:
             break
-        total -= _count(block)
         kept.remove(block)
+        total = _joined_count(kept)
 
     # Still over: compress then token-truncate the top surviving block.
     if total > max_tokens and kept:

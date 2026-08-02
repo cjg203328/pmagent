@@ -37,7 +37,7 @@ def fallback_to_model(
         2. If not, return offline mode message (or parsed file results)
         3. Build system prompt with profile and knowledge context
         4. Build model prompt (add attachment context if present)
-        5. Call _chat_with_model_failover() with vision attachments
+        5. Call runtime.chat_with_failover() with vision attachments
         6. If model fails AND OCR text exists, return OCR text (transparent degradation)
         7. Otherwise propagate the error
 
@@ -47,7 +47,8 @@ def fallback_to_model(
 
     from .turn_service import TurnResult
 
-    if ctx.agent is None:
+    runtime = ctx.runtime
+    if runtime is None:
         return TurnResult(
             response="⚠️ Agent not initialized",
             success=False,
@@ -56,13 +57,13 @@ def fallback_to_model(
         )
 
     # Check if LLM is configured - safe attribute check
-    if not hasattr(ctx.agent, 'llm_client') or ctx.agent.llm_client is None:
+    if not runtime.model_available:
         # Offline mode: return parsed file results if available
         if parsed_files:
             responses = []
             for item in parsed_files:
                 if item.get("success"):
-                    formatted = ctx.agent._format_skill_result(
+                    formatted = runtime.format_skill_result(
                         "document_classifier_parser",
                         {
                             "success": True,
@@ -104,7 +105,7 @@ def fallback_to_model(
     profile = ctx.agent_profile
 
     # Build system prompt
-    system_prompt = ctx.agent._build_system_prompt(
+    system_prompt = runtime.build_system_prompt(
         profile,
         ctx.knowledge_context,
     )
@@ -123,36 +124,27 @@ def fallback_to_model(
         )
 
     # Determine if visual semantics needed
-    visual_semantics_requested = ctx.agent._needs_visual_semantics(ctx.user_input)
+    visual_semantics_requested = runtime.needs_visual_semantics(ctx.user_input)
 
     # Try model chat with failover
     try:
-        with ctx.agent._vision_attachment_paths(
+        with runtime.vision_attachment_paths(
             parsed_files,
             visual_semantics_requested,
         ) as image_paths:
-            gateway = getattr(ctx.agent, "model_gateway", None)
-            if gateway is not None:
-                # Task-aware model selection + cache + telemetry live in the
-                # gateway. Passing task_type=None lets the gateway lazily
-                # classify the task (opt-in LLM classifier on the cheap
-                # routing-tier model) and pick the right-sized model. When the
-                # classifier is disabled it defaults to "chat" — identical to
-                # the prior behaviour.
-                response_text = gateway.chat_with_failover(
-                    model_prompt,
-                    system_prompt,
-                    history,
-                    image_paths=image_paths,
-                    task_type=None,
+            chat_kwargs: Dict[str, Any] = {"image_paths": image_paths}
+            if getattr(runtime, "supports_response_cache_scope", False):
+                from artpm_agent.providers.response_cache import (
+                    response_cache_namespace,
                 )
-            else:
-                response_text = ctx.agent._chat_with_model_failover(
-                    model_prompt,
-                    system_prompt,
-                    history,
-                    image_paths=image_paths,
-                )
+
+                chat_kwargs["cache_scope"] = response_cache_namespace(ctx.extra)
+            response_text = runtime.chat_with_failover(
+                model_prompt,
+                system_prompt,
+                history,
+                **chat_kwargs,
+            )
 
             return TurnResult(
                 response=response_text,
@@ -161,9 +153,9 @@ def fallback_to_model(
                 metadata={
                     "turn_id": ctx.turn_id,
                     "conversation_id": ctx.conversation_id,
-                    "model": getattr(ctx.agent, "last_response_model", None),
+                    "model": getattr(runtime, "last_response_model", None),
                     "fallback_from": getattr(
-                        ctx.agent, "last_model_fallback_from", None
+                        runtime, "last_model_fallback_from", None
                     ),
                 },
             )

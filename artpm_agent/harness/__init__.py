@@ -17,6 +17,18 @@ from .workflow_handler import try_workflow_routing
 from .skill_handler import try_skill_routing
 from .model_handler import fallback_to_model
 from .agent_session import AgentSession, ModelToolCallsDisabledError
+from .runtime import (
+    BaseHarnessRuntime,
+    HarnessRuntime,
+    LegacyAgentRuntimeAdapter,
+    RuntimeCapabilities,
+    RuntimeCapabilityError,
+    adapt_runtime,
+)
+from .attachment_pipeline import (
+    parse_context_attachments,
+    vision_attachment_paths,
+)
 
 __all__ = [
     "TurnContext",
@@ -32,4 +44,12 @@ __all__ = [
     "fallback_to_model",
     "AgentSession",
     "ModelToolCallsDisabledError",
+    "BaseHarnessRuntime",
+    "HarnessRuntime",
+    "LegacyAgentRuntimeAdapter",
+    "RuntimeCapabilities",
+    "RuntimeCapabilityError",
+    "adapt_runtime",
+    "parse_context_attachments",
+    "vision_attachment_paths",
 ]

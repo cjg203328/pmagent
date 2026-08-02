@@ -47,11 +47,16 @@ def _attachment_context_for_artifact(ctx: "TurnContext") -> str:
     file_paths = ctx.extra.get("file_paths", [])
     if not file_paths or not _should_preparse_artifact_attachments(ctx.user_input):
         return str(ctx.extra.get("attachment_context") or "")
-    parser = getattr(ctx.agent, "_parse_context_attachments", None)
-    if not callable(parser):
+    # A preceding handler may already have normalized the same attachments.
+    # Reusing that snapshot avoids a second MinerU/OCR invocation during one
+    # turn and keeps artifact generation deterministic.
+    if ctx.extra.get("parsed_files") and ctx.extra.get("attachment_context"):
+        return str(ctx.extra.get("attachment_context") or "")
+    runtime = ctx.runtime
+    if runtime is None or not runtime.capabilities.attachment_parsing:
         return str(ctx.extra.get("attachment_context") or "")
     try:
-        parsed_files, attachment_context = parser(
+        parsed_files, attachment_context = runtime.parse_attachments(
             ctx.user_input,
             {**ctx.extra, "file_paths": file_paths},
         )
