@@ -9,6 +9,8 @@ Provider capability differences (what counts as a retryable error, what counts
 as a vision-capability error) live here rather than leaking into business Skills.
 """
 
+import hashlib
+import json
 import os
 import re
 import time
@@ -70,8 +72,12 @@ class ModelGateway:
         # by default → classify_task() falls back to "chat" (today's behaviour).
         self._task_classifier: Optional[Any] = None
         self._task_classification_enabled = self._read_task_classifier_flag()
+        self._failover_max_attempts = self._read_failover_max_attempts()
         self.last_response_model: Optional[str] = (
             str(self._llm_config.get("model", "") or "").strip() or None
+        )
+        self._primary_client_model: Optional[str] = (
+            self.last_response_model if primary_client is not None else None
         )
         self.last_model_fallback_from: Optional[str] = None
         if primary_client is not None and self.last_response_model:
@@ -248,13 +254,25 @@ class ModelGateway:
 
     def client_for_model(self, model_id: str):
         primary_model = self.primary_model_id()
-        if model_id == primary_model:
+        if model_id == primary_model and model_id == self._primary_client_model:
             return self._primary_client
         client = self._clients.get(model_id)
         if client is not None:
             return client
         config = dict(self._llm_config)
         config["model"] = model_id
+        if model_id != primary_model:
+            try:
+                primary_timeout = float(config.get("request_timeout_seconds", 12))
+                fallback_timeout = float(
+                    config.get("failover_request_timeout_seconds", 8)
+                )
+                config["request_timeout_seconds"] = min(
+                    primary_timeout,
+                    fallback_timeout,
+                )
+            except (TypeError, ValueError):
+                config["request_timeout_seconds"] = 8
         client = self._client_factory(config)
         self._clients[model_id] = client
         return client
@@ -280,6 +298,18 @@ class ModelGateway:
         if env.strip().lower() in {"1", "true", "yes", "on"}:
             return True
         return bool(self._llm_config.get("task_classifier_enabled", False))
+
+    def _read_failover_max_attempts(self) -> int:
+        """Bound total provider attempts so one turn cannot time out N times."""
+
+        raw_value = os.getenv("LLM_FAILOVER_MAX_ATTEMPTS", "") or self._llm_config.get(
+            "failover_max_attempts", 2
+        )
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            value = 2
+        return max(1, min(value, 8))
 
     def _get_task_classifier(self) -> Optional[Any]:
         if self._task_classifier is None and self._task_classification_enabled:
@@ -332,11 +362,11 @@ class ModelGateway:
         self, preferred: Optional[str], require_vision: bool
     ) -> List:
         attempts = self.model_attempts(require_vision=require_vision)
-        if not preferred or not attempts:
-            return attempts
-        reordered = [(m, c, f) for (m, c, f) in attempts if m == preferred]
-        reordered += [(m, c, f) for (m, c, f) in attempts if m != preferred]
-        return reordered
+        if preferred and attempts:
+            reordered = [(m, c, f) for (m, c, f) in attempts if m == preferred]
+            reordered += [(m, c, f) for (m, c, f) in attempts if m != preferred]
+            attempts = reordered
+        return attempts[: self._failover_max_attempts]
 
     def _record_telemetry(
         self,
@@ -394,6 +424,146 @@ class ModelGateway:
             if val:
                 return val
         return ""
+
+    def _cache_model_contract(self, model_id: Optional[str]) -> str:
+        """Fingerprint response-affecting settings without exposing credentials."""
+
+        contract = {
+            "model": str(model_id or ""),
+            "provider": self._provider(),
+            "endpoint": self._endpoint(),
+            "framework": self._llm_config.get("framework"),
+            "temperature": self._llm_config.get("temperature"),
+            "max_tokens": self._llm_config.get("max_tokens"),
+            "top_p": self._llm_config.get("top_p"),
+            "seed": self._llm_config.get("seed"),
+            "response_format": self._llm_config.get("response_format"),
+        }
+        raw = json.dumps(contract, ensure_ascii=False, sort_keys=True, default=str)
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+        return f"{model_id or ''}:{digest}"
+
+    def _cache_get(
+        self,
+        model_id: Optional[str],
+        system_prompt: str,
+        prompt: str,
+        history: Any,
+        image_paths: Optional[List[str]],
+        cache_scope: str,
+    ) -> Optional[str]:
+        cache = self._response_cache
+        if cache is None or not callable(getattr(cache, "get", None)):
+            return None
+        args = (
+            self._cache_model_contract(model_id),
+            system_prompt,
+            prompt,
+            history,
+            image_paths,
+        )
+        try:
+            return cache.get(*args, cache_scope)
+        except TypeError:
+            # Compatibility with injected cache implementations using the v1 API.
+            try:
+                return cache.get(*args)
+            except Exception:
+                logger.debug("Response cache read failed", exc_info=True)
+                return None
+        except Exception:
+            logger.debug("Response cache read failed", exc_info=True)
+            return None
+
+    def _cache_put(
+        self,
+        model_id: Optional[str],
+        system_prompt: str,
+        prompt: str,
+        history: Any,
+        image_paths: Optional[List[str]],
+        value: str,
+        cache_scope: str,
+    ) -> None:
+        cache = self._response_cache
+        if cache is None or not callable(getattr(cache, "put", None)):
+            return
+        args = (
+            self._cache_model_contract(model_id),
+            system_prompt,
+            prompt,
+            history,
+            image_paths,
+            value,
+        )
+        try:
+            cache.put(*args, cache_scope)
+        except TypeError:
+            try:
+                cache.put(*args)
+            except Exception:
+                logger.debug("Response cache write failed", exc_info=True)
+        except Exception:
+            logger.debug("Response cache write failed", exc_info=True)
+
+    def _cache_acquire(
+        self,
+        model_id: Optional[str],
+        system_prompt: str,
+        prompt: str,
+        history: Any,
+        image_paths: Optional[List[str]],
+        cache_scope: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        cache = self._response_cache
+        acquire = getattr(cache, "acquire", None)
+        if not callable(acquire):
+            return (
+                self._cache_get(
+                    model_id,
+                    system_prompt,
+                    prompt,
+                    history,
+                    image_paths,
+                    cache_scope,
+                ),
+                None,
+            )
+        try:
+            result = acquire(
+                self._cache_model_contract(model_id),
+                system_prompt,
+                prompt,
+                history,
+                image_paths,
+                cache_scope,
+            )
+            if isinstance(result, tuple) and len(result) == 2:
+                return result
+        except Exception:
+            logger.debug("Response cache reservation failed", exc_info=True)
+        return None, None
+
+    def _cache_release(self, reservation: Optional[str]) -> None:
+        if not reservation:
+            return
+        release = getattr(self._response_cache, "release", None)
+        if callable(release):
+            try:
+                release(reservation)
+            except Exception:
+                logger.debug("Response cache reservation release failed", exc_info=True)
+
+    def response_cache_stats(self) -> Dict[str, Any]:
+        cache = self._response_cache
+        stats = getattr(cache, "stats", None)
+        if callable(stats):
+            try:
+                result = stats()
+                return dict(result) if isinstance(result, Mapping) else {}
+            except Exception:
+                return {}
+        return {"enabled": bool(getattr(cache, "enabled", False))}
 
     @staticmethod
     def _http_status(error: BaseException) -> Optional[int]:
@@ -462,8 +632,17 @@ class ModelGateway:
 
         pt = _int(usage, "prompt_tokens")
         ct = _int(usage, "completion_tokens")
+        cached = max(
+            _int(usage, "cached_tokens"),
+            _int(usage, "prompt_cache_hit_tokens"),
+            _int(usage, "cache_read_input_tokens"),
+        )
         if pt or ct:
-            return {"prompt_tokens": pt, "completion_tokens": ct}
+            return {
+                "prompt_tokens": pt,
+                "completion_tokens": ct,
+                "cached_tokens": cached,
+            }
         return None
 
     def _estimate_usage(
@@ -508,7 +687,11 @@ class ModelGateway:
             )
         except Exception:  # noqa: BLE001
             cost = 0.0
-        cached_tokens = completion_tokens if cache_hit else 0
+        cached_tokens = (
+            prompt_tokens + completion_tokens
+            if cache_hit
+            else int((real or {}).get("cached_tokens", 0) or 0)
+        )
         return {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -550,14 +733,54 @@ class ModelGateway:
             from artpm_agent.providers.response_cache import ResponseCache
 
             env_on = os.getenv("ARTPM_RESPONSE_CACHE", "")
-            enabled = env_on.strip().lower() in {"1", "true", "yes", "on"} or bool(
-                self._llm_config.get("response_cache_enabled", False)
+            enabled = (
+                env_on.strip().lower() in {"1", "true", "yes", "on"}
+                if env_on.strip()
+                else bool(self._llm_config.get("response_cache_enabled", False))
             )
-            ttl = int(
-                os.getenv("ARTPM_RESPONSE_CACHE_TTL", "")
-                or self._llm_config.get("response_cache_ttl", 3600)
+
+            def _bounded_int(
+                env_name: str,
+                config_name: str,
+                default: int,
+                limit: int,
+            ) -> int:
+                raw = os.getenv(env_name, "") or self._llm_config.get(
+                    config_name, default
+                )
+                try:
+                    value = int(raw)
+                except (TypeError, ValueError):
+                    value = default
+                return max(0, min(value, limit))
+
+            ttl = _bounded_int(
+                "ARTPM_RESPONSE_CACHE_TTL",
+                "response_cache_ttl",
+                1800,
+                86_400,
             )
-            return ResponseCache(enabled=enabled, ttl=ttl)
+            max_size = max(
+                1,
+                _bounded_int(
+                    "ARTPM_RESPONSE_CACHE_MAX_SIZE",
+                    "response_cache_max_size",
+                    512,
+                    20_000,
+                ),
+            )
+            redis_env = os.getenv("ARTPM_RESPONSE_CACHE_REDIS", "")
+            redis_enabled = (
+                redis_env.strip().lower() in {"1", "true", "yes", "on"}
+                if redis_env.strip()
+                else bool(self._llm_config.get("response_cache_redis_enabled", True))
+            )
+            return ResponseCache(
+                enabled=enabled,
+                ttl=ttl,
+                max_size=max_size,
+                redis_enabled=redis_enabled,
+            )
         except Exception:  # noqa: BLE001
             return None
 
@@ -585,7 +808,12 @@ class ModelGateway:
 
         attempts = []
         if self.is_model_available(primary_model):
-            attempts.append((primary_model, self._primary_client, False))
+            primary_client = (
+                self._primary_client
+                if primary_model == self._primary_client_model
+                else self._clients.get(primary_model)
+            )
+            attempts.append((primary_model, primary_client, False))
         fallback_ids = (
             self.vision_fallback_model_ids(primary_model)
             if require_vision
@@ -614,6 +842,7 @@ class ModelGateway:
         image_paths: Optional[List[str]] = None,
         *,
         task_type: Optional[str] = None,
+        cache_scope: str = "local:default",
     ) -> str:
         primary_model = self.primary_model_id()
         requires_vision = bool(image_paths)
@@ -631,47 +860,7 @@ class ModelGateway:
             if task_type
             else None
         )
-        cache_model = preferred or primary_model
-
-        # Response cache: skip the API call for identical requests.
-        cache = self._response_cache
         cache_hit = False
-        cached = None
-        if cache is not None:
-            cached = cache.get(cache_model or "", system_prompt, prompt, history, image_paths)
-        if cached is not None:
-            cache_hit = True
-            usage = self._estimate_usage(
-                system_prompt=system_prompt,
-                prompt=prompt,
-                history=history,
-                output_text=cached,
-                model=cache_model,
-                cache_hit=True,
-            )
-            self._record_connection_attempt(
-                model_id=cache_model,
-                attempt_index=0,
-                ok=True,
-                error=None,
-                latency_ms=0.0,
-                task_type=task_type,
-            )
-            self._record_telemetry(
-                task_type,
-                cache_model,
-                0.0,
-                False,
-                True,
-                True,
-                prompt_tokens=usage["prompt_tokens"],
-                completion_tokens=usage["completion_tokens"],
-                cached_tokens=usage["cached_tokens"],
-                cost_usd=usage["cost_usd"],
-                attempt=0,
-            )
-            return cached
-
         attempts = self._attempts_with_preference(preferred, requires_vision)
         if not attempts:
             if primary_model:
@@ -682,7 +871,50 @@ class ModelGateway:
         last_error = None
         for i, (model_id, client, is_fallback) in enumerate(attempts):
             attempt_start = time.monotonic()
+            reservation: Optional[str] = None
             try:
+                cached, reservation = self._cache_acquire(
+                    model_id,
+                    system_prompt,
+                    prompt,
+                    history,
+                    image_paths,
+                    cache_scope,
+                )
+                if cached is not None:
+                    cache_hit = True
+                    self.record_success(
+                        model_id,
+                        primary_model if is_fallback else None,
+                    )
+                    latency = (time.monotonic() - attempt_start) * 1000
+                    usage = self._estimate_usage(
+                        system_prompt=system_prompt,
+                        prompt=prompt,
+                        history=history,
+                        output_text=cached,
+                        model=model_id,
+                        cache_hit=True,
+                    )
+                    self._record_telemetry(
+                        task_type,
+                        model_id,
+                        latency,
+                        bool(is_fallback),
+                        True,
+                        True,
+                        prompt_tokens=usage["prompt_tokens"],
+                        completion_tokens=usage["completion_tokens"],
+                        cached_tokens=usage["cached_tokens"],
+                        cost_usd=usage["cost_usd"],
+                        attempt=i,
+                    )
+                    if is_fallback and primary_model:
+                        return self.fallback_notice(primary_model, model_id) + cached
+                    return cached
+
+                if model_id and not self.is_model_available(model_id):
+                    continue
                 client = client or self.client_for_model(model_id)
                 if image_paths:
                     response = client.chat_with_images(
@@ -704,8 +936,15 @@ class ModelGateway:
                     primary_model if is_fallback else None,
                 )
                 answer = response.strip()
-                if cache is not None:
-                    cache.put(cache_model or "", system_prompt, prompt, history, image_paths, answer)
+                self._cache_put(
+                    model_id,
+                    system_prompt,
+                    prompt,
+                    history,
+                    image_paths,
+                    answer,
+                    cache_scope,
+                )
                 latency = (time.monotonic() - attempt_start) * 1000
                 self._record_connection_attempt(
                     model_id=model_id,
@@ -761,6 +1000,8 @@ class ModelGateway:
                     break
                 self.mark_model_unavailable(model_id)
                 logger.warning("模型 %s 暂时不可用，尝试候选模型", model_id)
+            finally:
+                self._cache_release(reservation)
 
         latency = (time.monotonic() - start) * 1000
         error_type = self._classify_error(last_error) if last_error is not None else ""
@@ -788,58 +1029,19 @@ class ModelGateway:
         image_paths: Optional[List[str]] = None,
         *,
         task_type: Optional[str] = None,
+        cache_scope: str = "local:default",
     ):
         primary_model = self.primary_model_id()
         requires_vision = bool(image_paths)
 
         if task_type is None and self._task_classification_enabled:
-            task_type = self.classify_task(user_input)
+            task_type = self.classify_task(user_input, image_paths)
         preferred = (
             self.best_model_for_task(task_type, require_vision=requires_vision)
             if task_type
             else None
         )
-        cache_model = preferred or primary_model
-
-        cache = self._response_cache
         cache_hit = False
-        cached = None
-        if cache is not None:
-            cached = cache.get(cache_model or "", system_prompt, user_input, history, image_paths)
-        if cached is not None:
-            cache_hit = True
-            usage = self._estimate_usage(
-                system_prompt=system_prompt,
-                prompt=user_input,
-                history=history,
-                output_text=cached,
-                model=cache_model,
-                cache_hit=True,
-            )
-            self._record_connection_attempt(
-                model_id=cache_model,
-                attempt_index=0,
-                ok=True,
-                error=None,
-                latency_ms=0.0,
-                task_type=task_type,
-            )
-            self._record_telemetry(
-                task_type,
-                cache_model,
-                0.0,
-                False,
-                True,
-                True,
-                prompt_tokens=usage["prompt_tokens"],
-                completion_tokens=usage["completion_tokens"],
-                cached_tokens=usage["cached_tokens"],
-                cost_usd=usage["cost_usd"],
-                attempt=0,
-            )
-            yield cached
-            return
-
         attempts = self._attempts_with_preference(preferred, requires_vision)
         if not attempts:
             if primary_model:
@@ -851,7 +1053,51 @@ class ModelGateway:
         for i, (model_id, client, is_fallback) in enumerate(attempts):
             yielded = False
             attempt_start = time.monotonic()
+            reservation: Optional[str] = None
             try:
+                cached, reservation = self._cache_acquire(
+                    model_id,
+                    system_prompt,
+                    user_input,
+                    history,
+                    image_paths,
+                    cache_scope,
+                )
+                if cached is not None:
+                    cache_hit = True
+                    self.record_success(
+                        model_id,
+                        primary_model if is_fallback else None,
+                    )
+                    latency = (time.monotonic() - attempt_start) * 1000
+                    usage = self._estimate_usage(
+                        system_prompt=system_prompt,
+                        prompt=user_input,
+                        history=history,
+                        output_text=cached,
+                        model=model_id,
+                        cache_hit=True,
+                    )
+                    self._record_telemetry(
+                        task_type,
+                        model_id,
+                        latency,
+                        bool(is_fallback),
+                        True,
+                        True,
+                        prompt_tokens=usage["prompt_tokens"],
+                        completion_tokens=usage["completion_tokens"],
+                        cached_tokens=usage["cached_tokens"],
+                        cost_usd=usage["cost_usd"],
+                        attempt=i,
+                    )
+                    if is_fallback and primary_model:
+                        yield self.fallback_notice(primary_model, model_id)
+                    yield cached
+                    return
+
+                if model_id and not self.is_model_available(model_id):
+                    continue
                 client = client or self.client_for_model(model_id)
                 stream_fn = getattr(client, "stream_chat_with_images", None)
                 if image_paths and stream_fn is not None:
@@ -868,22 +1114,43 @@ class ModelGateway:
                         history=history,
                     )
                 parts = []
-                for chunk in chunks:
-                    if not isinstance(chunk, str) or not chunk:
-                        continue
-                    if not yielded:
-                        self.record_success(
-                            model_id,
-                            primary_model if is_fallback else None,
-                        )
-                        if is_fallback and primary_model:
-                            yield self.fallback_notice(primary_model, model_id)
-                    yielded = True
-                    parts.append(chunk)
-                    yield chunk
+                chunks = iter(chunks)
+                try:
+                    for chunk in chunks:
+                        if not isinstance(chunk, str) or not chunk:
+                            continue
+                        if not yielded:
+                            self.record_success(
+                                model_id,
+                                primary_model if is_fallback else None,
+                            )
+                            if is_fallback and primary_model:
+                                yield self.fallback_notice(primary_model, model_id)
+                        yielded = True
+                        parts.append(chunk)
+                        yield chunk
+                finally:
+                    close = getattr(chunks, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except Exception:
+                            logger.warning(
+                                "Failed to close model response stream",
+                                exc_info=True,
+                            )
                 if not yielded:
                     raise RuntimeError("模型服务未返回有效回答")
                 answer_text = "".join(parts)
+                self._cache_put(
+                    model_id,
+                    system_prompt,
+                    user_input,
+                    history,
+                    image_paths,
+                    answer_text,
+                    cache_scope,
+                )
                 latency = (time.monotonic() - attempt_start) * 1000
                 self._record_connection_attempt(
                     model_id=model_id,
@@ -935,6 +1202,8 @@ class ModelGateway:
                     break
                 self.mark_model_unavailable(model_id)
                 logger.warning("模型 %s 流式请求失败，尝试候选模型", model_id)
+            finally:
+                self._cache_release(reservation)
 
         latency = (time.monotonic() - start) * 1000
         error_type = self._classify_error(last_error) if last_error is not None else ""
@@ -953,3 +1222,24 @@ class ModelGateway:
             http_status=http_status,
         )
         raise RuntimeError("模型请求失败") from last_error
+
+    def close(self) -> None:
+        """Close every distinct cached provider client exactly once."""
+        clients = list(self._clients.values())
+        if self._primary_client is not None:
+            clients.append(self._primary_client)
+        self._clients.clear()
+        self._primary_client = None
+        self._primary_client_model = None
+        closed: set[int] = set()
+        for client in clients:
+            if client is None or id(client) in closed:
+                continue
+            closed.add(id(client))
+            close = getattr(client, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except Exception:
+                logger.warning("Failed to close model client", exc_info=True)

@@ -2,11 +2,14 @@
 LLM Client Module - Unified interface for OpenAI and Anthropic
 """
 import base64
+import logging
 import time
 from typing import Dict, Any, Iterator, List, Optional
 from abc import ABC, abstractmethod
 
 from artpm_agent.utils.image_validation import load_validated_image
+
+logger = logging.getLogger(__name__)
 
 
 def is_valid_api_key(value: Optional[str]) -> bool:
@@ -21,8 +24,11 @@ def is_valid_api_key(value: Optional[str]) -> bool:
 class BaseLLMClient(ABC):
     """Base LLM Client"""
 
+    is_langchain = False
+
     def __init__(self, config: Dict[str, Any]):
         self.config = config
+        self.framework = str(config.get("framework", "native") or "native").strip().lower()
         self.model = config.get("model", "")
         self.temperature = config.get("temperature", 0.7)
         self.max_tokens = config.get("max_tokens", 4000)
@@ -49,6 +55,18 @@ class BaseLLMClient(ABC):
         response = self.chat(prompt, system_prompt=system_prompt, history=history)
         if response:
             yield response
+
+    def close(self) -> None:
+        """Release a provider SDK client when it exposes a close hook."""
+        seen: set[int] = set()
+        for name in ("model_client", "client"):
+            client = getattr(self, name, None)
+            if client is None or id(client) in seen:
+                continue
+            seen.add(id(client))
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
 
     def _prepare_history(
         self,
@@ -333,10 +351,15 @@ class OpenAIClient(BaseLLMClient):
             max_tokens=self.max_tokens,
             stream=True,
         )
-        for chunk in stream:
-            content = self._extract_stream_content(chunk)
-            if content:
-                yield content
+        try:
+            for chunk in stream:
+                content = self._extract_stream_content(chunk)
+                if content:
+                    yield content
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
 
     def chat_with_images(
         self,
@@ -396,6 +419,43 @@ def create_llm_client(config: Dict[str, Any]) -> BaseLLMClient:
         LLM client instance
     """
     provider = config.get("provider", "anthropic").lower()
+    framework = str(config.get("framework", "") or "").strip().lower()
+    if framework and framework not in {
+        "native",
+        "legacy",
+        "langchain",
+        "langchain-v1",
+        "lc",
+    }:
+        logger.warning(
+            "Unknown LLM framework '%s'; falling back to the native adapter",
+            framework,
+        )
+        config = dict(config)
+        config["framework"] = "native"
+        config["framework_fallback_from"] = framework
+        framework = "native"
+    if framework in {"langchain", "langchain-v1", "lc"}:
+        # Lazy import keeps offline/native installations usable when optional
+        # LangChain integration packages are not installed.
+        try:
+            from .langchain_client import LangChainClient
+
+            return LangChainClient(config)
+        except ImportError as error:
+            # A source checkout may intentionally install only the native SDKs.
+            # Keep the configured provider usable instead of turning that setup
+            # into an offline agent unexpectedly.
+            logger.warning(
+                "LangChain was requested but is unavailable; using the native "
+                "provider adapter instead: %s",
+                error,
+            )
+            # Keep runtime introspection honest: the returned client is a
+            # native adapter even though LangChain was originally requested.
+            config = dict(config)
+            config["framework"] = "native"
+            config["framework_fallback_from"] = framework
 
     if provider == "anthropic":
         return AnthropicClient(config)

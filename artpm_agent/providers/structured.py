@@ -509,6 +509,179 @@ class AnthropicStructuredAdapter(StructuredProviderAdapter):
             raise ProviderResponseError(str(error)) from error
 
 
+class LangChainStructuredAdapter(StructuredProviderAdapter):
+    """Structured-tool bridge for LangChain v1 chat models."""
+
+    provider_name = "langchain"
+
+    @staticmethod
+    def _tool_specs(tools: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": item["name"],
+                "description": item["description"],
+                "parameters": item["parameters"],
+            }
+            for item in _normalized_tool_specs(tools)
+        ]
+
+    @staticmethod
+    def _messages(
+        messages: Sequence[AgentMessage],
+        context: Mapping[str, Any],
+    ) -> list[Any]:
+        try:
+            from langchain_core.messages import (
+                AIMessage,
+                HumanMessage,
+                SystemMessage,
+                ToolMessage,
+            )
+        except ImportError as error:
+            raise ProviderAdapterError(
+                "langchain-core is required for structured LangChain calls"
+            ) from error
+
+        payload: list[Any] = []
+        system_prompt = StructuredProviderAdapter._system_prompt(messages, context)
+        if system_prompt:
+            payload.append(SystemMessage(content=system_prompt))
+        for message in messages:
+            if message.role == "system":
+                continue
+            if message.role == "user":
+                payload.append(HumanMessage(content=message.content))
+                continue
+            if message.role == "toolResult":
+                call_id = message.metadata.get("tool_call_id")
+                if not isinstance(call_id, str) or not call_id.strip():
+                    raise ProviderResponseError("tool result is missing tool_call_id")
+                payload.append(
+                    ToolMessage(
+                        content=message.content,
+                        tool_call_id=call_id.strip(),
+                    )
+                )
+                continue
+            if message.role != "assistant":
+                raise ProviderResponseError(
+                    f"unsupported runtime message role: {message.role}"
+                )
+            raw_calls = message.metadata.get("tool_calls", ())
+            tool_calls = []
+            if raw_calls:
+                if not isinstance(raw_calls, Sequence) or isinstance(
+                    raw_calls, (str, bytes)
+                ):
+                    raise ProviderResponseError(
+                        "assistant tool_calls metadata must be a list"
+                    )
+                for raw_call in raw_calls:
+                    item = (
+                        raw_call.to_dict()
+                        if isinstance(raw_call, ToolCall)
+                        else dict(raw_call)
+                        if isinstance(raw_call, Mapping)
+                        else None
+                    )
+                    if item is None:
+                        raise ProviderResponseError(
+                            "assistant tool call metadata is invalid"
+                        )
+                    name = item.get("name")
+                    call_id = item.get("id")
+                    arguments = item.get("arguments", {})
+                    if not isinstance(name, str) or not name.strip():
+                        raise ProviderResponseError(
+                            "assistant tool call name is missing"
+                        )
+                    if not isinstance(call_id, str) or not call_id.strip():
+                        raise ProviderResponseError(
+                            "assistant tool call id is missing"
+                        )
+                    if not isinstance(arguments, Mapping):
+                        raise ProviderResponseError(
+                            "assistant tool call arguments are invalid"
+                        )
+                    tool_calls.append(
+                        {
+                            "name": name.strip(),
+                            "args": dict(arguments),
+                            "id": call_id.strip(),
+                            "type": "tool_call",
+                        }
+                    )
+            payload.append(
+                AIMessage(
+                    content=message.content or "",
+                    tool_calls=tool_calls,
+                )
+            )
+        return payload
+
+    @staticmethod
+    def _response_tool_calls(response: Any) -> list[ToolCall]:
+        raw_calls = _value(response, "tool_calls", ()) or ()
+        if not raw_calls:
+            content = _value(response, "content", ())
+            if isinstance(content, Sequence) and not isinstance(content, (str, bytes)):
+                raw_calls = [
+                    block
+                    for block in content
+                    if _value(block, "type") in {"tool_use", "tool_call"}
+                ]
+        calls = []
+        for raw_call in raw_calls:
+            name = _value(raw_call, "name")
+            call_id = _value(raw_call, "id") or f"call_{uuid4().hex}"
+            arguments = _value(raw_call, "args")
+            if arguments is None:
+                arguments = _value(raw_call, "input", {})
+            if not isinstance(name, str) or not name.strip():
+                raise ProviderResponseError("provider tool call name is missing")
+            calls.append(
+                ToolCall(
+                    name.strip(),
+                    _json_arguments(arguments, tool_name=name),
+                    id=str(call_id).strip(),
+                )
+            )
+        return calls
+
+    def complete_turn(
+        self,
+        messages: tuple[AgentMessage, ...],
+        tools: tuple[dict[str, Any], ...],
+        context: Mapping[str, Any],
+    ) -> AssistantTurn:
+        tool_specs = self._tool_specs(tools)
+        model = self.client.bind_tools(tool_specs) if tool_specs else self.client
+        response = self._request(
+            lambda: model.invoke(self._messages(messages, context))
+        )
+        response_metadata = _value(response, "response_metadata", {})
+        usage = _value(response, "usage_metadata") or _value(
+            response_metadata, "usage"
+        )
+        model_id = _value(response_metadata, "model") or self.model
+        response_id = _value(response, "id") or _value(response_metadata, "id")
+        stop_reason = _value(response_metadata, "stop_reason")
+        try:
+            return AssistantTurn(
+                content=_text_content(_value(response, "content")),
+                tool_calls=tuple(self._response_tool_calls(response)),
+                metadata=self._metadata(
+                    provider=self.provider_name,
+                    model=model_id,
+                    response_id=response_id,
+                    stop_reason=stop_reason,
+                    usage=usage,
+                ),
+            )
+        except (TypeError, ValueError) as error:
+            raise ProviderResponseError(str(error)) from error
+
+
 def create_structured_provider_adapter(
     llm_client: Any,
     *,
@@ -520,6 +693,8 @@ def create_structured_provider_adapter(
         config = getattr(llm_client, "config", {})
         configured = config.get("provider") if isinstance(config, Mapping) else None
     normalized = str(configured or "").strip().lower()
+    if getattr(llm_client, "is_langchain", False):
+        return LangChainStructuredAdapter(llm_client, provider_name=normalized)
     if normalized == "anthropic":
         return AnthropicStructuredAdapter(llm_client, provider_name=normalized)
     if normalized in {"openai", "custom", "zhipu"}:

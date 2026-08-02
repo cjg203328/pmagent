@@ -13,7 +13,7 @@ from collections import deque
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from threading import RLock
-from typing import Any, Deque
+from typing import Deque
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ class HealthMetrics:
     success_rate: float  # 0.0 to 1.0
     avg_latency: float  # seconds
     p95_latency: float  # seconds
+    latency_score: float  # 0.0 to 1.0, normalized latency
     recency_score: float  # 0.0 to 1.0, time-decay weighted
     health_score: float  # 0.0 to 1.0, composite score
     sample_count: int
@@ -174,6 +175,7 @@ class ModelHealthTracker:
                     success_rate=1.0,
                     avg_latency=0.0,
                     p95_latency=0.0,
+                    latency_score=1.0,
                     recency_score=1.0,
                     health_score=1.0,
                     sample_count=0
@@ -233,6 +235,7 @@ class ModelHealthTracker:
             success_rate=success_rate,
             avg_latency=avg_latency,
             p95_latency=p95_latency,
+            latency_score=latency_score,
             recency_score=recency_score,
             health_score=health_score,
             sample_count=len(records),

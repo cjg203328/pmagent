@@ -18,10 +18,13 @@ def _gateway(
     available=None,
     primary_client=None,
     factory=None,
+    failover_max_attempts=None,
 ):
     llm_config = {"model": primary, "provider": provider}
     if available is not None:
         llm_config["available_models"] = available
+    if failover_max_attempts is not None:
+        llm_config["failover_max_attempts"] = failover_max_attempts
     return ModelGateway(
         llm_config,
         primary_client,
@@ -102,12 +105,76 @@ def test_chat_with_failover_tries_every_available_candidate():
         available=["b", "c"],
         primary_client=primary,
         factory=Mock(side_effect=[first_fallback, second_fallback]),
+        failover_max_attempts=3,
     )
 
     response = g.chat_with_failover("hi", "sys", [])
 
     assert response.endswith("final answer")
     assert g.last_response_model == "c"
+
+
+def test_chat_with_failover_caps_total_attempts_by_default():
+    primary = Mock()
+    primary.chat.side_effect = TimeoutError("primary timeout")
+    first_fallback = Mock()
+    first_fallback.chat.side_effect = TimeoutError("fallback timeout")
+    unused_fallback = Mock()
+    g = _gateway(
+        primary="a",
+        available=["b", "c", "d"],
+        primary_client=primary,
+        factory=Mock(side_effect=[first_fallback, unused_fallback]),
+    )
+
+    with pytest.raises(RuntimeError, match="模型请求失败"):
+        g.chat_with_failover("hi", "sys", [])
+
+    assert primary.chat.call_count == 1
+    assert first_fallback.chat.call_count == 1
+    assert unused_fallback.chat.call_count == 0
+
+
+def test_runtime_model_override_builds_client_for_selected_model():
+    original = Mock()
+    selected = Mock()
+    selected.chat.return_value = "selected answer"
+    factory = Mock(return_value=selected)
+    g = _gateway(
+        primary="a",
+        available=["a", "b"],
+        primary_client=original,
+        factory=factory,
+    )
+
+    g._llm_config["model"] = "b"
+
+    assert g.chat_with_failover("hi", "sys", []) == "selected answer"
+    original.chat.assert_not_called()
+    selected.chat.assert_called_once()
+    assert factory.call_args.args[0]["model"] == "b"
+
+
+def test_fallback_client_uses_shorter_request_timeout():
+    primary = Mock()
+    primary.chat.side_effect = TimeoutError("primary timeout")
+    fallback = Mock()
+    fallback.chat.return_value = "fallback answer"
+    factory = Mock(return_value=fallback)
+    g = ModelGateway(
+        {
+            "model": "a",
+            "provider": "custom",
+            "available_models": ["b"],
+            "request_timeout_seconds": 12,
+            "failover_request_timeout_seconds": 8,
+        },
+        primary,
+        client_factory=factory,
+    )
+
+    assert g.chat_with_failover("hi", "sys", []).endswith("fallback answer")
+    assert factory.call_args.args[0]["request_timeout_seconds"] == 8
 
 
 def test_model_not_found_404_can_fail_over_to_configured_model():

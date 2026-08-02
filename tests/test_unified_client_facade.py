@@ -123,3 +123,14 @@ def test_unified_client_is_singleton():
     a = get_unified_mcp_client()
     b = get_unified_mcp_client()
     assert a is b
+
+
+def test_unified_client_reuses_builtin_local_tool_client(monkeypatch, tmp_path):
+    from artpm_agent.core import mcp_client_enhanced
+
+    monkeypatch.setattr(mcp_client_enhanced, "_enhanced_mcp_client", None)
+    client = UnifiedMCPClient(str(tmp_path))
+
+    assert client._get_enhanced() is mcp_client_enhanced.get_enhanced_mcp_client(
+        str(tmp_path)
+    )

@@ -7,6 +7,7 @@ monolith so the agent stays a thin orchestration facade.
 from .gateway import ModelGateway
 from .structured import (
     AnthropicStructuredAdapter,
+    LangChainStructuredAdapter,
     OpenAIStructuredAdapter,
     ProviderAdapterError,
     ProviderResponseError,
@@ -17,6 +18,7 @@ from .structured import (
 
 __all__ = [
     "AnthropicStructuredAdapter",
+    "LangChainStructuredAdapter",
     "ModelGateway",
     "OpenAIStructuredAdapter",
     "ProviderAdapterError",
