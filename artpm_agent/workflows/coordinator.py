@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .engine import WorkflowEngine
 from .models import (
@@ -14,8 +14,9 @@ from .models import (
     WorkflowExecutionResult,
     WorkflowSelectionContext,
 )
+from .designer import capability_allowlist_from_skill_metadata
 from .risk_policy import DEFAULT_SKILL_CAPABILITIES
-from .selector import WorkflowSelector
+from .selector import CapabilityAllowlist, WorkflowSelector
 from .store import WorkflowStore
 
 
@@ -100,19 +101,134 @@ def _workflow_context(prompt: str, agent_context: Mapping[str, Any]) -> dict[str
 class WorkflowCoordinator:
     """Select and run safe workflows without replacing ordinary model chat."""
 
-    def __init__(self, store: WorkflowStore, agent: Any) -> None:
+    def __init__(
+        self,
+        store: WorkflowStore,
+        agent: Any,
+        *,
+        capability_allowlist: CapabilityAllowlist | None = None,
+    ) -> None:
         self.store = store
         self.agent = agent
-        self.selector = WorkflowSelector(WORKFLOW_CAPABILITY_ALLOWLIST)
         router = getattr(agent, "router", None)
         execute_skill = getattr(router, "execute_skill", None)
         if not callable(execute_skill):
             raise TypeError("agent must expose router.execute_skill")
+        if capability_allowlist is None:
+            list_skills = getattr(router, "list_skills", None)
+            metadata = list_skills() if callable(list_skills) else ()
+            capability_allowlist = capability_allowlist_from_skill_metadata(metadata)
+        self.capability_allowlist = capability_allowlist
+        self.selector = WorkflowSelector(capability_allowlist)
         self.engine = WorkflowEngine(
             store,
             execute_skill,
-            capability_allowlist=WORKFLOW_CAPABILITY_ALLOWLIST,
+            capability_allowlist=capability_allowlist,
         )
+
+    def create_task_orchestrator(
+        self,
+        *,
+        task_runner: Callable[..., Any] | None = None,
+        checkpointer: Any = None,
+        session_store: Any = None,
+        max_parallelism: int | None = None,
+        max_retries: int | None = None,
+    ) -> Any:
+        """Create the opt-in LangGraph collaboration runtime.
+
+        Existing chat turns continue to use :class:`WorkflowEngine`.  This
+        factory is the integration point for future specialist-agent flows;
+        callers can supply a runner for agent tasks, or use the built-in
+        read-only Skill adapter.  Side-effect Skills intentionally stay on the
+        persisted ``WorkflowEngine`` approval path.
+        """
+
+        from .task_graph import LangGraphTaskOrchestrator
+
+        runtime_config = getattr(self.agent, "config", None)
+        get_config_value = getattr(runtime_config, "get", None)
+        configured_framework = (
+            str(
+                get_config_value("agent_runtime.orchestration_framework", "langgraph")
+            ).strip().lower()
+            if callable(get_config_value)
+            else "langgraph"
+        )
+        graph_enabled = (
+            bool(get_config_value("agent_runtime.langgraph_enabled", True))
+            if callable(get_config_value)
+            else True
+        )
+        if not graph_enabled or configured_framework not in {"langgraph", "langgraph-v1"}:
+            raise RuntimeError(
+                "LangGraph orchestration is disabled by agent_runtime configuration"
+            )
+        if session_store is None:
+            try:
+                from artpm_agent.memory.session_store import SessionStore
+
+                session_store = SessionStore(self.store.db_path)
+            except Exception:
+                # Audit persistence is best effort; a supplied checkpointer
+                # remains sufficient for graph execution and testing.
+                session_store = None
+        configured_parallelism = (
+            get_config_value("agent_runtime.langgraph_max_parallelism", 4)
+            if callable(get_config_value)
+            else 4
+        )
+        configured_retries = (
+            get_config_value("agent_runtime.langgraph_max_retries", 2)
+            if callable(get_config_value)
+            else 2
+        )
+        return LangGraphTaskOrchestrator(
+            task_runner or self._run_read_only_graph_skill,
+            checkpointer=checkpointer,
+            session_store=session_store,
+            max_parallelism=(
+                configured_parallelism if max_parallelism is None else max_parallelism
+            ),
+            max_retries=(configured_retries if max_retries is None else max_retries),
+        )
+
+    def create_collaboration_graph(self, **options: Any) -> Any:
+        """Backward-friendly alias for ``create_task_orchestrator``."""
+
+        return self.create_task_orchestrator(**options)
+
+    def _run_read_only_graph_skill(self, task: Any, context: Mapping[str, Any]) -> Any:
+        """Run a server-allowlisted read-only Skill from a graph node."""
+
+        skill_id = getattr(task, "skill_id", None)
+        capability = getattr(task, "capability", None)
+        if not skill_id or not capability:
+            raise ValueError(
+                "the default graph runner requires task.skill_id and task.capability"
+            )
+        allowed_capabilities = self.engine.capability_allowlist.get(skill_id, frozenset())
+        if capability not in allowed_capabilities:
+            raise PermissionError("task capability is outside the server allowlist")
+        if not self.engine.risk_policy.is_allowed(capability):
+            raise PermissionError("task capability is blocked by the risk policy")
+        is_side_effect = capability in self.engine.side_effect_capabilities or (
+            self.engine.risk_policy.is_side_effect(
+                capability,
+                declared_side_effect=bool(getattr(task, "side_effect", False)),
+            )
+        )
+        if is_side_effect:
+            raise PermissionError(
+                "side-effect Skills must run through WorkflowEngine approval"
+            )
+        raw_inputs = context.get("inputs", {})
+        if not isinstance(raw_inputs, Mapping):
+            raise TypeError("graph task inputs must be a mapping for Skill execution")
+        result = self.engine.execute_skill(skill_id, dict(raw_inputs))
+        if isinstance(result, Mapping) and result.get("success") is False:
+            raise RuntimeError(str(result.get("error") or "Skill execution failed"))
+        return result
 
     def _prepare_inputs(
         self,

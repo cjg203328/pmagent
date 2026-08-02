@@ -1,0 +1,77 @@
+name: Pre-commit Checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  quick-check:
+    name: Quick Pre-commit Checks
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    # Install the declared dev extra so linter/test versions match pyproject
+    # instead of drifting to whatever the runner happens to resolve.
+    - name: Install dependencies
+      run: pip install -e ".[dev]"
+
+    # Ruff is the project's only configured linter; rules and per-file ignores
+    # live in ruff.toml. Do not narrow with --select here, or this gate stops
+    # matching the full lint step in ci.yml.
+    - name: Lint with Ruff
+      run: ruff check artpm_agent tests --output-format=github
+
+    # Fast feedback: skip the coverage gate and bail out after a few failures.
+    # The full suite plus the fail-under threshold runs in ci.yml.
+    - name: Run tests without the coverage gate
+      run: pytest -q --no-cov --maxfail=3
+
+  pr-checks:
+    name: PR Requirements
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    # PR title/body are attacker-controlled. Pass them through env vars rather
+    # than interpolating into the script, so a title containing $(...) or
+    # backticks cannot execute in the runner.
+    - name: Check PR title
+      env:
+        PR_TITLE: ${{ github.event.pull_request.title }}
+      run: |
+        printf '%s\n' "$PR_TITLE" | grep -qE "^(feat|fix|docs|style|refactor|perf|test|chore|build|ci)(\(.+\))?: .{5,}" || {
+          echo "::error::PR title must follow Conventional Commits format"
+          exit 1
+        }
+
+    - name: Check PR description
+      env:
+        PR_BODY: ${{ github.event.pull_request.body }}
+      run: |
+        if [ -z "$PR_BODY" ]; then
+          echo "::error::PR description cannot be empty"
+          exit 1
+        fi
+
+    - name: Report PR size
+      env:
+        BASE_REF: ${{ github.base_ref }}
+      run: |
+        git fetch --quiet origin "$BASE_REF"
+        FILES_CHANGED=$(git diff --name-only "origin/$BASE_REF...HEAD" | wc -l)
+        echo "Files changed: $FILES_CHANGED"
+        if [ "$FILES_CHANGED" -gt 50 ]; then
+          echo "::warning::Large PR ($FILES_CHANGED files). Consider splitting by theme."
+        fi

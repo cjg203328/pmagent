@@ -8,6 +8,7 @@ from typing import Any
 
 from .models import (
     ApprovalRequirement,
+    ApprovalStatus,
     WorkflowApproval,
     WorkflowDefinition,
     WorkflowExecutionResult,
@@ -113,16 +114,25 @@ class WorkflowEngine:
     ) -> WorkflowExecutionResult:
         return WorkflowExecutionResult(
             run=run,
-            steps=tuple(self.store.list_steps(run.id)),
+            steps=tuple(
+                self.store.list_steps(run.id, workspace_id=run.workspace_id)
+            ),
             approval=approval,
         )
 
-    def result(self, run_id: str) -> WorkflowExecutionResult:
+    def result(
+        self,
+        run_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> WorkflowExecutionResult:
         """Return the current persisted result without advancing the run."""
-        run = self.store.get_run(run_id)
+        run = self.store.get_run(run_id, workspace_id=workspace_id)
         if run is None:
             raise KeyError("unknown workflow run")
-        approvals = self.store.list_approvals(run_id)
+        approvals = self.store.list_approvals(
+            run_id, workspace_id=run.workspace_id
+        )
         current_approval = next(
             (
                 approval
@@ -159,7 +169,11 @@ class WorkflowEngine:
             turn_id=turn_id,
             idempotency_key=idempotency_key,
         )
-        return self.resume(run.id) if auto_resume else self._result(run)
+        return (
+            self.resume(run.id, workspace_id=definition.workspace_id)
+            if auto_resume
+            else self._result(run)
+        )
 
     def _effective_approval(
         self,
@@ -204,9 +218,14 @@ class WorkflowEngine:
         }
         return json_mapping(resolved, "resolved step inputs")
 
-    def resume(self, run_id: str) -> WorkflowExecutionResult:
+    def resume(
+        self,
+        run_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> WorkflowExecutionResult:
         """Advance until completion, approval, failure, or a concurrent claim."""
-        run = self.store.get_run(run_id)
+        run = self.store.get_run(run_id, workspace_id=workspace_id)
         if run is None:
             raise KeyError("unknown workflow run")
         if run.status in {"succeeded", "failed", "cancelled"}:
@@ -241,6 +260,7 @@ class WorkflowEngine:
                     run.id,
                     run.current_step,
                     requirement,
+                    workspace_id=run.workspace_id,
                 )
                 if approval is None:
                     approval = self.store.request_approval(
@@ -312,14 +332,15 @@ class WorkflowEngine:
         run_id: str,
         step_index: int,
         *,
-        decision: str,
+        decision: ApprovalStatus,
         actor: str,
         actor_level: ApprovalRequirement = "user",
         note: str | None = None,
         auto_resume: bool = True,
+        workspace_id: str | None = None,
     ) -> WorkflowExecutionResult:
         """Decide the current gate and optionally continue the run."""
-        run = self.store.get_run(run_id)
+        run = self.store.get_run(run_id, workspace_id=workspace_id)
         if run is None:
             raise KeyError("unknown workflow run")
         if step_index >= len(run.definition_snapshot.steps):
@@ -329,7 +350,12 @@ class WorkflowEngine:
         )
         if requirement == "none":
             raise ValueError("step does not require approval")
-        approval = self.store.get_approval(run_id, step_index, requirement)
+        approval = self.store.get_approval(
+            run_id,
+            step_index,
+            requirement,
+            workspace_id=run.workspace_id,
+        )
         if approval is None:
             raise KeyError("approval has not been requested")
         decided = self.store.decide_approval(
@@ -338,14 +364,20 @@ class WorkflowEngine:
             actor=actor,
             actor_level=actor_level,
             note=note,
+            workspace_id=run.workspace_id,
         )
-        current = self.store.get_run(run_id)
+        current = self.store.get_run(run_id, workspace_id=run.workspace_id)
         if decision == "approved" and auto_resume:
-            return self.resume(run_id)
+            return self.resume(run_id, workspace_id=run.workspace_id)
         return self._result(current, decided)
 
-    def cancel(self, run_id: str) -> WorkflowExecutionResult:
-        run = self.store.get_run(run_id)
+    def cancel(
+        self,
+        run_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> WorkflowExecutionResult:
+        run = self.store.get_run(run_id, workspace_id=workspace_id)
         if run is None:
             raise KeyError("unknown workflow run")
         cancelled = self.store.cancel_run(run_id, expected_version=run.state_version)

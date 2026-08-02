@@ -1,6 +1,14 @@
 """Declarative ArtPM workflow runtime."""
 
 from .defaults import BUILTIN_WORKFLOWS, get_builtin_workflows
+from .designer import (
+    WorkflowCapabilityOption,
+    WorkflowDraftConflictError,
+    capability_allowlist_from_skill_metadata,
+    list_capability_options,
+    parse_input_map,
+    save_workflow_draft,
+)
 from .coordinator import (
     WORKFLOW_CAPABILITY_ALLOWLIST,
     WorkflowChatOutcome,
@@ -37,10 +45,22 @@ from .risk_policy import (
     CapabilityRiskPolicy,
     CapabilityRiskRule,
     RegistryFinding,
+    action_is_allowed,
     audit_skill_capability_registry,
+    capability_for_action,
 )
 from .selector import WorkflowSelector
 from .store import WorkflowConflictError, WorkflowStore
+from .task_graph import (
+    LangGraphTaskOrchestrator,
+    TaskGraphInputError,
+    TaskGraphState,
+    TaskGraphStatus,
+    TaskGraphUnavailableError,
+    TaskRunner,
+    TaskSpec,
+    make_sqlite_session_audit,
+)
 
 __all__ = [
     "BUILTIN_WORKFLOWS",
@@ -56,12 +76,16 @@ __all__ = [
     "CapabilityRiskPolicy",
     "CapabilityRiskRule",
     "RegistryFinding",
+    "action_is_allowed",
     "WorkflowApproval",
+    "WorkflowCapabilityOption",
     "WorkflowConflictError",
     "WorkflowChatOutcome",
     "WorkflowCoordinator",
     "WorkflowDecision",
     "WorkflowDefinition",
+    "WorkflowDraftConflictError",
+    "capability_allowlist_from_skill_metadata",
     "WorkflowEngine",
     "WorkflowEvent",
     "WorkflowExecutionResult",
@@ -75,7 +99,19 @@ __all__ = [
     "WorkflowStore",
     "WorkflowTrigger",
     "WORKFLOW_CAPABILITY_ALLOWLIST",
+    "LangGraphTaskOrchestrator",
+    "TaskGraphInputError",
+    "TaskGraphState",
+    "TaskGraphStatus",
+    "TaskGraphUnavailableError",
+    "TaskRunner",
+    "TaskSpec",
     "audit_skill_capability_registry",
+    "capability_for_action",
     "format_workflow_result",
     "get_builtin_workflows",
+    "list_capability_options",
+    "make_sqlite_session_audit",
+    "parse_input_map",
+    "save_workflow_draft",
 ]

@@ -58,11 +58,15 @@ class WorkflowStore:
             timeout=self.BUSY_TIMEOUT_MS / 1000,
             isolation_level=None,
         )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute(f"PRAGMA busy_timeout = {self.BUSY_TIMEOUT_MS}")
-        conn.execute("PRAGMA synchronous = NORMAL")
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute(f"PRAGMA busy_timeout = {self.BUSY_TIMEOUT_MS}")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            return conn
+        except BaseException:
+            conn.close()
+            raise
 
     @contextmanager
     def _connection(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
@@ -637,10 +641,18 @@ class WorkflowStore:
             decided_at=row["decided_at"],
         )
 
-    def get_run(self, run_id: str) -> WorkflowRun | None:
+    def get_run(
+        self,
+        run_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> WorkflowRun | None:
+        workspace_clause = "" if workspace_id is None else " AND workspace_id = ?"
+        parameters = (run_id,) if workspace_id is None else (run_id, workspace_id)
         with self._connection() as conn:
             row = conn.execute(
-                "SELECT * FROM workflow_runs WHERE id = ?", (run_id,)
+                "SELECT * FROM workflow_runs WHERE id = ?" + workspace_clause,
+                parameters,
             ).fetchone()
         return self._run_from_row(row) if row is not None else None
 
@@ -705,27 +717,59 @@ class WorkflowStore:
             )
         return cursor.rowcount
 
-    def get_step(self, run_id: str, step_index: int) -> WorkflowStepRun | None:
+    def get_step(
+        self,
+        run_id: str,
+        step_index: int,
+        *,
+        workspace_id: str | None = None,
+    ) -> WorkflowStepRun | None:
+        workspace_clause = "" if workspace_id is None else " AND r.workspace_id = ?"
+        parameters: tuple[Any, ...] = (run_id, step_index)
+        if workspace_id is not None:
+            parameters += (workspace_id,)
         with self._connection() as conn:
             row = conn.execute(
-                "SELECT * FROM workflow_steps WHERE run_id = ? AND step_index = ?",
-                (run_id, step_index),
+                "SELECT s.* FROM workflow_steps s "
+                "JOIN workflow_runs r ON r.id = s.run_id "
+                "WHERE s.run_id = ? AND s.step_index = ?" + workspace_clause,
+                parameters,
             ).fetchone()
         return self._step_from_row(row) if row is not None else None
 
-    def list_steps(self, run_id: str) -> list[WorkflowStepRun]:
+    def list_steps(
+        self,
+        run_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> list[WorkflowStepRun]:
+        workspace_clause = "" if workspace_id is None else " AND r.workspace_id = ?"
+        parameters = (run_id,) if workspace_id is None else (run_id, workspace_id)
         with self._connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM workflow_steps WHERE run_id = ? ORDER BY step_index",
-                (run_id,),
+                "SELECT s.* FROM workflow_steps s "
+                "JOIN workflow_runs r ON r.id = s.run_id "
+                "WHERE s.run_id = ?"
+                + workspace_clause
+                + " ORDER BY s.step_index",
+                parameters,
             ).fetchall()
         return [self._step_from_row(row) for row in rows]
 
-    def list_events(self, run_id: str) -> list[WorkflowEvent]:
+    def list_events(
+        self,
+        run_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> list[WorkflowEvent]:
+        workspace_clause = "" if workspace_id is None else " AND r.workspace_id = ?"
+        parameters = (run_id,) if workspace_id is None else (run_id, workspace_id)
         with self._connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM workflow_events WHERE run_id = ? ORDER BY id",
-                (run_id,),
+                "SELECT e.* FROM workflow_events e "
+                "JOIN workflow_runs r ON r.id = e.run_id "
+                "WHERE e.run_id = ?" + workspace_clause + " ORDER BY e.id",
+                parameters,
             ).fetchall()
         return [
             WorkflowEvent(
@@ -1052,27 +1096,40 @@ class WorkflowStore:
         run_id: str,
         step_index: int,
         requirement: ApprovalRequirement,
+        *,
+        workspace_id: str | None = None,
     ) -> WorkflowApproval | None:
+        workspace_clause = "" if workspace_id is None else " AND r.workspace_id = ?"
+        parameters: tuple[Any, ...] = (run_id, step_index, requirement)
+        if workspace_id is not None:
+            parameters += (workspace_id,)
         with self._connection() as conn:
             row = conn.execute(
-                """
-                SELECT * FROM workflow_approvals
-                WHERE run_id = ? AND step_index = ? AND requirement = ?
-                """,
-                (run_id, step_index, requirement),
+                "SELECT a.* FROM workflow_approvals a "
+                "JOIN workflow_runs r ON r.id = a.run_id "
+                "WHERE a.run_id = ? AND a.step_index = ? AND a.requirement = ?"
+                + workspace_clause,
+                parameters,
             ).fetchone()
         return self._approval_from_row(row) if row is not None else None
 
-    def list_approvals(self, run_id: str) -> list[WorkflowApproval]:
+    def list_approvals(
+        self,
+        run_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> list[WorkflowApproval]:
         """List approval records for a run in step order."""
+        workspace_clause = "" if workspace_id is None else " AND r.workspace_id = ?"
+        parameters = (run_id,) if workspace_id is None else (run_id, workspace_id)
         with self._connection() as conn:
             rows = conn.execute(
-                """
-                SELECT * FROM workflow_approvals
-                WHERE run_id = ?
-                ORDER BY step_index, created_at, id
-                """,
-                (run_id,),
+                "SELECT a.* FROM workflow_approvals a "
+                "JOIN workflow_runs r ON r.id = a.run_id "
+                "WHERE a.run_id = ?"
+                + workspace_clause
+                + " ORDER BY a.step_index, a.created_at, a.id",
+                parameters,
             ).fetchall()
         return [self._approval_from_row(row) for row in rows]
 
@@ -1084,6 +1141,7 @@ class WorkflowStore:
         actor: str,
         actor_level: ApprovalRequirement,
         note: str | None = None,
+        workspace_id: str | None = None,
     ) -> WorkflowApproval:
         """CAS an approval decision and resume or fail the paused run."""
         if decision not in {"approved", "rejected"}:
@@ -1092,8 +1150,13 @@ class WorkflowStore:
             raise ValueError("actor is required")
         now = self._now()
         with self._connection(write=True) as conn:
+            scope_clause = "" if workspace_id is None else " AND r.workspace_id = ?"
+            params = (approval_id,) if workspace_id is None else (approval_id, workspace_id)
             approval = conn.execute(
-                "SELECT * FROM workflow_approvals WHERE id = ?", (approval_id,)
+                "SELECT a.* FROM workflow_approvals a "
+                "JOIN workflow_runs r ON r.id = a.run_id "
+                "WHERE a.id = ?" + scope_clause,
+                params,
             ).fetchone()
             if approval is None:
                 raise KeyError("unknown approval")

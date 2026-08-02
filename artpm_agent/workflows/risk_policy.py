@@ -84,7 +84,9 @@ def _rule(
     allowed: bool = True,
     idempotent: bool = False,
 ) -> CapabilityRiskRule:
-    confirmation_scope = "conversation" if approval != "none" else "none"
+    confirmation_scope: Literal["none", "conversation"] = (
+        "conversation" if approval != "none" else "none"
+    )
     return CapabilityRiskRule(
         capability=capability,
         operation=operation,
@@ -242,6 +244,58 @@ class CapabilityRiskPolicy:
 DEFAULT_RISK_POLICY = CapabilityRiskPolicy()
 
 
+# Actions are deliberately mapped only where the server already has a static
+# capability decision.  Unknown application Skills can still request a human
+# confirmation, while a capability explicitly denied by this registry can
+# never be upgraded into an allowed action by an approval button.
+_ACTION_CAPABILITY_ALIASES: Mapping[str, str] = MappingProxyType({
+    "bash": "commands.execute",
+    "cmd": "commands.execute",
+    "execute": "commands.execute",
+    "execute_command": "commands.execute",
+    "exec": "commands.execute",
+    "powershell": "commands.execute",
+    "pwsh": "commands.execute",
+    "run_command": "commands.execute",
+    "shell": "commands.execute",
+    "terminal": "commands.execute",
+})
+
+
+def capability_for_action(action: str) -> str | None:
+    """Resolve an action to a known server capability, if one exists."""
+
+    if not isinstance(action, str) or not action.strip():
+        raise ValueError("action must be a non-empty string")
+    normalized = action.strip().casefold()
+    if normalized in CAPABILITY_RISK_REGISTRY:
+        return normalized
+    for prefix in ("tool.", "skill.", "capability."):
+        if not normalized.startswith(prefix):
+            continue
+        candidate = normalized[len(prefix):]
+        if candidate in CAPABILITY_RISK_REGISTRY:
+            return candidate
+        return _ACTION_CAPABILITY_ALIASES.get(candidate)
+    return _ACTION_CAPABILITY_ALIASES.get(normalized)
+
+
+def action_is_allowed(
+    action: str,
+    *,
+    policy: CapabilityRiskPolicy = DEFAULT_RISK_POLICY,
+) -> bool:
+    """Return whether a known static capability may execute at all.
+
+    ``True`` for an unknown application action means it still needs its normal
+    approval/allowlist checks; it does not grant execution by itself.  Only an
+    explicit registry deny is handled here.
+    """
+
+    capability = capability_for_action(action)
+    return True if capability is None else policy.is_allowed(capability)
+
+
 def audit_skill_capability_registry(
     skill_metadata: Mapping[str, Mapping[str, object]],
     skill_capabilities: Mapping[str, frozenset[str]] = DEFAULT_SKILL_CAPABILITIES,
@@ -303,5 +357,7 @@ __all__ = [
     "CapabilityRiskPolicy",
     "CapabilityRiskRule",
     "RegistryFinding",
+    "action_is_allowed",
     "audit_skill_capability_registry",
+    "capability_for_action",
 ]
