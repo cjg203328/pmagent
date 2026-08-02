@@ -69,6 +69,8 @@ _MODEL_QUERIES = {
 _CAPABILITY_QUERIES = {
     "你可以帮我做什么",
     "你能帮我做什么",
+    "你可以为我做什么",
+    "你能为我做什么",
     "你可以做什么",
     "你能做什么",
     "你会做什么",
@@ -91,6 +93,46 @@ _CAPABILITY_QUERIES = {
     "howcanyouhelp",
     "whatcanyouhelpwith",
     "showcapabilities",
+}
+
+_MEMORY_CAPABILITY_QUERIES = {
+    "你是否会记忆",
+    "你会记忆吗",
+    "你有记忆吗",
+    "你有没有记忆",
+    "你有记忆功能吗",
+    "你是否具有记忆功能",
+    "你能记住我说的话吗",
+    "你会记住我说的话吗",
+    "你有长期记忆吗",
+    "你有没有长期记忆",
+    "你支持长期记忆吗",
+    "你能长期记住信息吗",
+    "你能跨会话记忆吗",
+    "你支持跨会话记忆吗",
+    "你能跨会话记住信息吗",
+    "你的记忆是跨会话的吗",
+    "你有知识库吗",
+    "你有没有知识库",
+    "你支持知识库吗",
+    "你有知识库功能吗",
+    "你有没有知识库功能",
+    "你是否具有知识库功能",
+    "你会学习吗",
+    "你能学习吗",
+    "你会学习和进化吗",
+    "你可以学习进化吗",
+    "你能学习进化吗",
+    "你是可以学习进化的吗",
+    "你会自我进化吗",
+    "你能自我学习吗",
+    "你会从反馈中学习吗",
+    "你会根据反馈改进吗",
+    "你会越用越聪明吗",
+    "doyouhavememory",
+    "canyourememberacrosschats",
+    "doyouhaveaknowledgebase",
+    "doyoulearnfromfeedback",
 }
 
 
@@ -122,6 +164,16 @@ def is_capability_query(value: str) -> bool:
     return normalize_chat_phrase(value) in _CAPABILITY_QUERIES
 
 
+def is_memory_capability_query(value: str) -> bool:
+    """Return whether a prompt asks how persistent memory or learning works.
+
+    Exact matching is intentional: action requests such as ``请记住：X`` and
+    ``把附件加入知识库`` must continue through the approval-gated knowledge
+    handlers instead of being consumed by the local informational response.
+    """
+    return normalize_chat_phrase(value) in _MEMORY_CAPABILITY_QUERIES
+
+
 def is_local_fast_intent(value: str) -> bool:
     """Return whether a prompt has a complete deterministic local response.
 
@@ -135,6 +187,7 @@ def is_local_fast_intent(value: str) -> bool:
             is_model_query,
             is_identity_query,
             is_exact_greeting,
+            is_memory_capability_query,
             is_capability_query,
         )
     )

@@ -92,6 +92,18 @@ def test_extract_inputs_delivery_acceptance():
     assert inp["project_id"] == 3
 
 
+def test_delivery_record_phrase_routes_and_extracts_identifiers():
+    agent = _make_agent()
+    prompt = "记录资产交付，项目7，交付单号D-7"
+
+    assert agent._detect_intent(prompt) == "delivery"
+    inputs = agent._extract_inputs(prompt, "delivery", {})
+
+    assert inputs["action"] == "record"
+    assert inputs["project_id"] == 7
+    assert inputs["delivery_no"] == "D-7"
+
+
 def test_extract_inputs_retrospective_lessons():
     agent = _make_agent()
     inp = agent._extract_inputs("把经验教训沉淀到知识库", "retrospective", {"project_id": 5})

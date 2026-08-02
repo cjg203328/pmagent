@@ -23,7 +23,6 @@ from collections import OrderedDict
 from threading import RLock
 from typing import Any, List, Mapping, Optional
 
-from artpm_agent.providers.model_registry import TASK_TYPES
 from artpm_agent.utils.logger import get_logger
 
 logger = get_logger(__name__)

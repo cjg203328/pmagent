@@ -459,14 +459,25 @@ def _extract_progress_delivery_and_retro(
             action = "acceptance"
         elif any(word in user_input for word in ["版本", "ver", "v1", "v2", "v3"]):
             action = "version"
-        elif any(word in user_input for word in ["记录交付", "交付记录", "登记交付"]):
+        elif any(word in user_input for word in ["记录交付", "交付记录", "登记交付"]) or (
+            "记录" in user_input and "交付" in user_input
+        ):
             action = "record"
         else:
             action = "manifest"
+        delivery_no = context.get("delivery_no")
+        delivery_match = re.search(
+            r"(?:交付单号|交付编号|delivery(?:[_ -]?(?:no|number))?)"
+            r"\s*[：:为是#]?\s*([A-Za-z0-9][A-Za-z0-9._-]{0,127})",
+            user_input,
+            re.I,
+        )
+        if delivery_match:
+            delivery_no = delivery_match.group(1)
         return {
             "action": action,
             "project_id": project_id,
-            "delivery_no": context.get("delivery_no") or f"D{project_id or ''}",
+            "delivery_no": delivery_no or f"D{project_id or ''}",
             "items": context.get("delivery_items"),
             "delivered_by": context.get("user_name"),
             "title": context.get("delivery_title"),

@@ -7,12 +7,11 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -448,7 +447,7 @@ class EnhancedIntentRouter:
             Dictionary with statistics
         """
         with self._lock:
-            stats = dict(self._stats)
+            stats: dict[str, Any] = dict(self._stats)
 
         stats["threshold_history"] = self.adjuster.get_stats()
 

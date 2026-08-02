@@ -1,8 +1,6 @@
 """Tests for the LLM task classifier + layered model selection."""
-import pytest
 
 from artpm_agent.providers.gateway import ModelGateway
-from artpm_agent.providers.response_cache import ResponseCache
 from artpm_agent.routing.task_classifier import LLMTaskClassifier
 
 
