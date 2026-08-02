@@ -2,11 +2,12 @@
 统一异常处理体系
 """
 from functools import wraps
+from typing import Any
 from artpm_agent.utils.logger import get_logger
 
 class ArtPMError(Exception):
     """基础异常类"""
-    def __init__(self, message: str, code: str = "UNKNOWN", details: dict = None):
+    def __init__(self, message: str, code: str = "UNKNOWN", details: dict[str, Any] | None = None):
         self.message = message
         self.code = code
         self.details = details or {}

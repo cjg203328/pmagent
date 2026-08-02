@@ -233,7 +233,6 @@ def test_adaptive_vector_store_creation():
 
 def test_adaptive_vector_store_index_upgrade():
     """Test automatic index type upgrade."""
-    import numpy as np
     from artpm_agent.memory.adaptive_vector_store import AdaptiveVectorStore
 
     store_path = Path("data/test_adaptive_upgrade")
@@ -259,11 +258,19 @@ def test_adaptive_vector_store_index_upgrade():
 @pytest.mark.benchmark
 def test_vector_store_performance_comparison():
     """Compare flat vs IVF index performance."""
+    import shutil
+
     import numpy as np
     from artpm_agent.memory.adaptive_vector_store import AdaptiveVectorStore
 
     n_vectors = 1000
     dimension = 128
+
+    # Ensure a clean slate — the store writes to a fixed path under data/,
+    # so a leftover index from a previous (possibly crashed) run must be
+    # removed before creating the store, otherwise we'd load stale vectors.
+    shutil.rmtree("data/test_flat", ignore_errors=True)
+    shutil.rmtree("data/test_ivf", ignore_errors=True)
 
     # Generate test data
     vectors = np.random.rand(n_vectors, dimension).astype(np.float32)

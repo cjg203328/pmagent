@@ -16,7 +16,9 @@ from artpm_agent.workflows.models import (
 from artpm_agent.workflows.risk_policy import (
     DEFAULT_RISK_POLICY,
     CapabilityRiskPolicy,
+    action_is_allowed,
     audit_skill_capability_registry,
+    capability_for_action,
 )
 from artpm_agent.workflows.store import WorkflowStore
 
@@ -95,6 +97,13 @@ def test_unknown_and_command_capabilities_fail_closed():
     assert unknown.allowed is False
     assert unknown.risk == "untrusted"
     assert unknown.minimum_approval == "admin"
+
+
+def test_permission_actions_reuse_static_command_deny():
+    assert capability_for_action("tool.execute_command") == "commands.execute"
+    assert capability_for_action("tool.commands.execute") == "commands.execute"
+    assert action_is_allowed("tool.execute_command") is False
+    assert action_is_allowed("skill.delivery") is True
 
 
 def test_effective_approval_cannot_be_downgraded_by_definition():

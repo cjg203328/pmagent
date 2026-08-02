@@ -10,7 +10,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,7 @@ class ProgressTracker:
         self._current_stage: TurnStage = TurnStage.INIT
         self._start_time: float = time.time()
         self._stage_start_times: dict[TurnStage, float] = {}
+        self._error: BaseException | None = None
 
     def update_stage(
         self,
@@ -150,6 +151,15 @@ def stream_with_progress(
     """
     tracker = ProgressTracker()
 
+    def emit_safely(event: ProgressEvent) -> None:
+        """Progress is best-effort and must never abort the model stream."""
+        if emit_progress is None:
+            return
+        try:
+            emit_progress(event)
+        except Exception as error:
+            logger.warning("Progress callback failed: %s", error)
+
     def emit(stage: TurnStage, custom_message: str | None = None, metadata: dict | None = None):
         """Helper to emit progress if callback provided."""
         event = tracker.update_stage(stage, custom_message, metadata)
@@ -197,13 +207,12 @@ def stream_with_progress(
                     + (tracker.STAGE_WEIGHTS[TurnStage.COMPLETE] -
                        tracker.STAGE_WEIGHTS[TurnStage.MODEL_GENERATION]) * 0.5
                 )
-                if emit_progress:
-                    emit_progress(ProgressEvent(
-                        stage=TurnStage.MODEL_GENERATION,
-                        message=f"💬 正在生成回答... ({chunk_count} 字符)",
-                        progress=min(current_progress, 0.95),
-                        metadata={"chunk_count": chunk_count}
-                    ))
+                emit_safely(ProgressEvent(
+                    stage=TurnStage.MODEL_GENERATION,
+                    message=f"💬 正在生成回答... ({chunk_count} 字符)",
+                    progress=min(current_progress, 0.95),
+                    metadata={"chunk_count": chunk_count}
+                ))
 
         # Stage 5: Complete
         emit(
@@ -248,20 +257,27 @@ def progress_context(
     tracker = ProgressTracker()
     event = tracker.update_stage(stage, message)
 
-    if emit_progress:
+    def emit_safely(progress_event: ProgressEvent) -> None:
+        if emit_progress is None:
+            return
         try:
-            emit_progress(event)
-        except Exception as e:
-            logger.warning(f"Progress callback failed: {e}")
+            emit_progress(progress_event)
+        except Exception as error:
+            logger.warning("Progress callback failed: %s", error)
+
+    emit_safely(event)
 
     try:
         yield tracker
-    finally:
-        # Emit completion or error
-        final_stage = TurnStage.COMPLETE if not hasattr(tracker, "_error") else TurnStage.ERROR
-        final_event = tracker.update_stage(final_stage)
-        if emit_progress:
-            try:
-                emit_progress(final_event)
-            except Exception as e:
-                logger.warning(f"Final progress callback failed: {e}")
+    except BaseException as error:
+        tracker._error = error
+        emit_safely(
+            tracker.update_stage(
+                TurnStage.ERROR,
+                custom_message=f"❌ 处理失败: {error}",
+                metadata={"error_type": type(error).__name__},
+            )
+        )
+        raise
+    else:
+        emit_safely(tracker.update_stage(TurnStage.COMPLETE))

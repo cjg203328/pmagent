@@ -53,7 +53,7 @@ def test_pricing_cache_hit_cost_is_zero_via_gateway_helper():
         model="gpt-4o", client=None, cache_hit=True,
     )
     assert usage["cost_usd"] == 0.0
-    assert usage["cached_tokens"] == usage["completion_tokens"]
+    assert usage["cached_tokens"] == usage["total_tokens"]
 
 
 # ─────────────────────────── telemetry storage ────────────────────────────
@@ -217,8 +217,8 @@ def test_gateway_cache_hit_records_zero_cost():
     assert len(tel.turns) == 1
     assert tel.turns[0]["cache_hit"] is True
     assert tel.turns[0]["cost_usd"] == 0.0
-    assert len(tel.conns) == 1
-    assert tel.conns[0]["ok"] is True
+    # A local response-cache hit does not contact the provider.
+    assert tel.conns == []
 
 
 def test_gateway_failure_records_error_and_connection_failure():

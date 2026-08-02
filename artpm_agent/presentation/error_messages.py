@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +237,14 @@ def format_error_for_user(
     Returns:
         Dictionary with message, suggestions, severity
     """
-    context = context or {}
+    context = dict(context or {})
+
+    # Generate the support identifier before formatting templates so
+    # suggestions such as ``{error_id}`` never leak an unresolved placeholder.
+    import uuid
+
+    error_id = str(uuid.uuid4())[:8]
+    context.setdefault("error_id", error_id)
 
     # Classify error if not provided
     if error_type is None:
@@ -260,10 +267,6 @@ def format_error_for_user(
             formatted_suggestions.append(suggestion.format(**context))
         except KeyError:
             formatted_suggestions.append(suggestion)
-
-    # Add error ID for support
-    import uuid
-    error_id = str(uuid.uuid4())[:8]
 
     result = {
         "message": user_message,

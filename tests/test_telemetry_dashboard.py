@@ -1,5 +1,4 @@
 """Tests for the telemetry dashboard (aggregations + HTML render + CLI)."""
-import pytest
 
 from artpm_agent.runtime.telemetry import AgentTelemetry
 from artpm_agent.runtime.telemetry_dashboard import (

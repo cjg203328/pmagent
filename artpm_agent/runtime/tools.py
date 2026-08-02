@@ -369,6 +369,7 @@ class AgentTool:
     requires_approval: bool = False
     risk: str = "low"
     read_only: bool = True
+    auto_approval_allowed: bool = False
     _parameter_validator: Any = field(
         init=False,
         repr=False,
@@ -390,7 +391,11 @@ class AgentTool:
             raise TypeError("tool parameters must be a mapping")
         if not all(
             isinstance(value, bool)
-            for value in (self.requires_approval, self.read_only)
+            for value in (
+                self.requires_approval,
+                self.read_only,
+                self.auto_approval_allowed,
+            )
         ):
             raise TypeError("tool policy flags must be booleans")
         object.__setattr__(self, "description", self.description.strip())
@@ -604,6 +609,9 @@ def registry_from_skill_router(router: Any) -> ToolRegistry:
                 requires_approval=requires_approval,
                 risk=str(item.get("risk") or "untrusted"),
                 read_only=read_only,
+                auto_approval_allowed=not bool(
+                    item.get("is_plugin_skill") or item.get("is_mcp_skill")
+                ),
             )
         )
     return registry

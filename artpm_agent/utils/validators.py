@@ -50,6 +50,8 @@ def check_rule(value: Any, rule: str) -> bool:
     }
 
     try:
+        left: Any
+        right: Any
         if left_name.lower() == "date" or raw_right.lower() == "today":
             left = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
             right = datetime.now() if raw_right.lower() == "today" else datetime.fromisoformat(

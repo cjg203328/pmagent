@@ -17,13 +17,13 @@ raise into the caller's hot path.
 
 from __future__ import annotations
 
-import os
 import sqlite3
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from artpm_agent.utils.logger import get_logger
 
@@ -165,11 +165,16 @@ class AgentTelemetry:
         )
         conn.commit()
 
-    def _conn(self) -> sqlite3.Connection:
+    @contextmanager
+    def _conn(self) -> Iterator[sqlite3.Connection]:
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self._db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def record(self, **kwargs: Any) -> None:
         if not self.enabled:
