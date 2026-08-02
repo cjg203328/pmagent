@@ -1,53 +1,34 @@
-#!/bin/bash
-# ArtPM Agent 快速启动脚本
+#!/usr/bin/env bash
+set -u
 
-echo "🚀 启动 ArtPM Agent..."
-echo ""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
-# 检查Python环境
-if ! command -v python &> /dev/null; then
-    echo "❌ 错误: 未找到Python"
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+else
+    echo "[ERROR] Python was not found."
     exit 1
 fi
 
-echo "✅ Python: $(python --version)"
-
-# 检查依赖
-if ! python -c "import streamlit" 2>/dev/null; then
-    echo "⚠️  安装依赖..."
-    pip install -r artpm_agent/requirements.txt
+if ! "$PYTHON_BIN" -c "import streamlit, fastapi, uvicorn" >/dev/null 2>&1; then
+    echo "Installing runtime dependencies..."
+    "$PYTHON_BIN" -m pip install -e . || exit 1
 fi
 
-# 检查.env文件
-if [ ! -f .env ]; then
-    echo "⚠️  创建 .env 配置文件..."
-    cp .env.example .env
-    echo "✅ 已创建 .env (离线模式)"
-fi
+[ -f .env ] || cp .env.example .env
+mkdir -p data artpm_agent/logs
 
-# 检查数据目录
-mkdir -p data logs
+export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+export ARTPM_API_HOST="${ARTPM_API_HOST:-127.0.0.1}"
+export ARTPM_API_PORT="${ARTPM_API_PORT:-8765}"
 
-echo ""
-echo "📊 配置信息:"
-echo "  - 工作模式: 离线优先"
-echo "  - 数据目录: ./data"
-echo "  - 日志目录: ./artpm_agent/logs"
-echo ""
+echo "ArtPM Agent"
+echo "  UI:  http://127.0.0.1:8501"
+echo "  API: http://${ARTPM_API_HOST}:${ARTPM_API_PORT}/docs"
+echo "Press Ctrl+C to stop both services."
+echo
 
-# 启动应用
-echo "🌐 启动 Streamlit 应用..."
-echo "访问地址: http://localhost:8501"
-echo ""
-echo "提示: 按 Ctrl+C 停止应用"
-echo ""
-
-cd "$(dirname "$0")"
-
-# 设置项目根目录到 Python 搜索路径（确保多页面导入不报错）
-export PYTHONPATH="$(pwd):${PYTHONPATH}"
-
-python -m streamlit run artpm_agent/app.py \
-    --server.address 127.0.0.1 \
-    --server.port 8501 \
-    --server.headless true
+exec "$PYTHON_BIN" start_with_checks.py

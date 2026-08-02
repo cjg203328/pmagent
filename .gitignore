@@ -35,10 +35,13 @@ env/
 # 数据文件
 data/*.db
 data/*.db-journal
+data/*.db-wal
+data/*.db-shm
 data/vector_store/
 data/chat_attachments/
 data/backups/
 data/artifacts/
+data/mineru/
 
 # 日志
 *.log
@@ -59,8 +62,11 @@ Thumbs.db
 # 测试
 .pytest_cache/
 .coverage
+coverage.json
 htmlcov/
 .tox/
+.ruff_cache/
+coverage.xml
 
 # 本地缓存（市场技能 TTL 缓存等，非源码）
 .cache/

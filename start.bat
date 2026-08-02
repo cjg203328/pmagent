@@ -1,44 +1,38 @@
 @echo off
+setlocal
 chcp 65001 >nul 2>&1
-REM ArtPM Agent Windows 启动脚本
-
 cd /d "%~dp0"
+
 set "ARTPM_PORT=8501"
+if not defined ARTPM_API_HOST set "ARTPM_API_HOST=127.0.0.1"
+if not defined ARTPM_API_PORT set "ARTPM_API_PORT=8765"
 
-echo   ArtPM Agent starting...
-echo.
-
-REM ---- 查找有依赖的 Python（优先 E:\python，再走 PATH）----
 set "PYTHON_CMD="
-where /q "E:\python\python.exe" 2>nul && (
+if exist "E:\python\python.exe" (
     set "PYTHON_CMD=E:\python\python.exe"
-) || (
-    where /q "python" 2>nul && set "PYTHON_CMD=python"
+) else (
+    where /q python >nul 2>&1 && set "PYTHON_CMD=python"
 )
 
-if "%PYTHON_CMD%"=="" (
-    echo [ERROR] No Python found.
-    pause & exit /b 1
+if not defined PYTHON_CMD (
+    echo [ERROR] Python was not found.
+    pause
+    exit /b 1
 )
 
-REM 验证依赖可用
-"%PYTHON_CMD%" -c "import streamlit" >nul 2>&1
+"%PYTHON_CMD%" -c "import streamlit, fastapi, uvicorn" >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Python at "%PYTHON_CMD%" is missing streamlit.
-    echo         Run:  pip install -r artpm_agent\requirements.txt
-    pause & exit /b 1
+    echo [ERROR] The selected Python environment is missing runtime dependencies.
+    echo         Run: "%PYTHON_CMD%" -m pip install -e .
+    pause
+    exit /b 1
 )
 
-for %%A in ("%PYTHON_CMD%") do set "PY_VER=%%~dpA"
-echo   Python: %PYTHON_CMD%
-call "%PYTHON_CMD%" --version
-
-REM ---- 环境准备 ----
 if not exist .env copy .env.example .env >nul 2>&1
 if not exist data mkdir data >nul 2>&1
 if not exist artpm_agent\logs mkdir artpm_agent\logs >nul 2>&1
 
-REM ---- 清理同项目旧实例，避免 localhost 命中残留的 IPv6 服务 ----
+REM Stop only a stale Streamlit instance belonging to this repository.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\prepare_streamlit_port.ps1" -Port %ARTPM_PORT%
 if errorlevel 1 (
     echo [ERROR] Port %ARTPM_PORT% is unavailable. ArtPM Agent was not started.
@@ -46,13 +40,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM ---- 关键：设置 PYTHONPATH 让多页面导入不报错 ----
 set "PYTHONPATH=%~dp0"
-
 echo.
-echo   http://127.0.0.1:%ARTPM_PORT%
+echo ArtPM Agent
+echo   UI:  http://127.0.0.1:%ARTPM_PORT%
+echo   API: http://%ARTPM_API_HOST%:%ARTPM_API_PORT%/docs
 echo.
 
-"%PYTHON_CMD%" -m streamlit run artpm_agent\app.py --server.address 127.0.0.1 --server.port %ARTPM_PORT% --server.headless true --browser.gatherUsageStats false
-
-pause
+"%PYTHON_CMD%" start_with_checks.py
+set "EXIT_CODE=%ERRORLEVEL%"
+if not "%EXIT_CODE%"=="0" pause
+exit /b %EXIT_CODE%

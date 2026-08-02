@@ -1,98 +1,43 @@
 #!/bin/bash
-# ArtPM Agent - 完整重启脚本
+# ArtPM Agent 项目重启脚本
 
-echo "╔════════════════════════════════════════════════════════╗"
-echo "║                                                        ║"
-echo "║         🔄 ArtPM Agent 重启脚本                       ║"
-echo "║                                                        ║"
-echo "╚════════════════════════════════════════════════════════╝"
+echo "🚀 重启 ArtPM Agent 项目"
+echo "================================"
 echo ""
 
-# 进入项目目录
-cd "$(dirname "$0")"
-PROJECT_DIR="$(pwd)"
-echo "📂 项目目录: $PROJECT_DIR"
-echo ""
-
-# 1. 停止现有进程
-echo "🛑 停止现有进程..."
-if command -v taskkill &> /dev/null; then
-    # Windows
-    taskkill /F /IM streamlit.exe 2>/dev/null && echo "  ✅ 已停止 Streamlit 进程" || echo "  ℹ️  没有运行中的进程"
-else
-    # Linux/Mac
-    pkill -f "streamlit run" && echo "  ✅ 已停止 Streamlit 进程" || echo "  ℹ️  没有运行中的进程"
-fi
+# 1. 停止所有运行中的进程
+echo "📝 步骤 1: 停止运行中的服务..."
+pkill -f "streamlit run" 2>/dev/null
+pkill -f "python.*app.py" 2>/dev/null
+pkill -f "artpm_agent.api" 2>/dev/null
 sleep 2
+echo "✅ 已停止所有服务"
 echo ""
 
 # 2. 检查 Python 环境
-echo "🐍 检查 Python 环境..."
-if ! command -v python &> /dev/null; then
-    echo "  ❌ 错误: 未找到 Python"
-    exit 1
-fi
-PYTHON_VERSION=$(python --version 2>&1)
-echo "  ✅ $PYTHON_VERSION"
+echo "📝 步骤 2: 检查 Python 环境..."
+python --version
+echo "✅ Python 环境正常"
 echo ""
 
-# 3. 检查项目安装
-echo "📦 检查项目安装..."
-if python -c "import artpm_agent" 2>/dev/null; then
-    echo "  ✅ 项目已安装（开发模式）"
-else
-    echo "  ⚠️  项目未安装，正在安装..."
-    pip install -e . --quiet
-    echo "  ✅ 安装完成"
-fi
+# 3. 安装/更新依赖
+echo "📝 步骤 3: 更新依赖..."
+pip install -e . -q
+echo "✅ 依赖已更新"
 echo ""
 
-# 4. 检查配置文件
-echo "⚙️  检查配置文件..."
-if [ ! -f .env ]; then
-    echo "  ⚠️  .env 不存在，从示例创建..."
-    cp .env.example .env
-    echo "  ✅ 已创建 .env 配置文件"
-    echo "  ℹ️  请编辑 .env 文件设置 API Key"
-else
-    echo "  ✅ 配置文件存在"
-fi
-echo ""
-
-# 5. 检查数据目录
-echo "💾 检查数据目录..."
-mkdir -p data artpm_agent/logs
-if [ -f data/artpm.db ]; then
-    DB_SIZE=$(du -h data/artpm.db | cut -f1)
-    echo "  ✅ 业务数据库: $DB_SIZE"
-else
-    echo "  ℹ️  业务数据库将在首次运行时创建"
-fi
-
-if [ -f data/conversations.db ]; then
-    CONV_SIZE=$(du -h data/conversations.db | cut -f1)
-    echo "  ✅ 对话数据库: $CONV_SIZE"
-else
-    echo "  ℹ️  对话数据库将在首次运行时创建"
-fi
-echo ""
-
-# 6. 清理缓存（可选）
-echo "🧹 清理 Python 缓存..."
+# 4. 清理临时文件
+echo "📝 步骤 4: 清理临时文件..."
 find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
-find . -name "*.pyc" -delete 2>/dev/null
-echo "  ✅ 缓存已清理"
+find . -type f -name "*.pyc" -delete 2>/dev/null
+echo "✅ 临时文件已清理"
 echo ""
 
-# 7. 启动应用
-echo "🚀 启动应用..."
-echo "  访问地址: http://localhost:8501"
-echo "  按 Ctrl+C 停止应用"
+echo "================================"
+echo "🎯 项目已准备就绪!"
 echo ""
-echo "════════════════════════════════════════════════════════"
-echo ""
-
-python -m streamlit run artpm_agent/app.py \
-    --server.address 127.0.0.1 \
-    --server.port 8501 \
-    --server.headless true
+echo "📝 启动选项:"
+echo "1. UI + API 一起启动: python start_with_checks.py"
+echo "2. 仅 REST API: python -m artpm_agent.api"
+echo "3. 运行测试: pytest tests/ -v"
+echo "================================"
