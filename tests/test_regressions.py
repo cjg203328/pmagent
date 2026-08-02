@@ -38,6 +38,7 @@ from artpm_agent.utils.chat_intent import (
     chat_processing_label,
     is_capability_query,
     is_local_fast_intent,
+    is_memory_capability_query,
 )
 from artpm_agent.visualization.advanced_charts import AdvancedVisualizer
 from artpm_agent.core.token_monitor import TokenBudgetManager, TokenMonitor
@@ -253,6 +254,33 @@ def test_memory_manager_retrieves_documents_without_faiss(tmp_path):
     })
     results = memory.retrieve("腾讯", top_k=5)
     assert [item["id"] for item in results] == [document_id]
+
+
+def test_memory_manager_literal_fallback_ranks_multi_term_queries(tmp_path):
+    memory = MemoryManager(
+        str(tmp_path / "memory.db"),
+        str(tmp_path / "vectors"),
+        llm_client=None,
+    )
+    relevant_id = memory.save_document(
+        {
+            "document_type": "project_note",
+            "raw_text": "星河项目预算已经确认，所有交付物必须包含版本号",
+            "extracted_data": {"project_info": {"project_name": "星河项目"}},
+        }
+    )
+    memory.save_document(
+        {
+            "document_type": "project_note",
+            "raw_text": "另一个项目只讨论预算",
+        }
+    )
+    memory.vector_db.available = False
+
+    results = memory.retrieve("星河 预算 版本号", top_k=1)
+
+    assert [item["id"] for item in results] == [relevant_id]
+    assert "星河项目" in memory._build_embedding_text(results[0]["data"])
 
 
 def test_query_sql_rejects_writes(tmp_path):
@@ -659,6 +687,7 @@ def test_exact_greeting_is_answered_locally(greeting):
     "question",
     [
         "你可以帮我做什么？",
+        "你能为我做什么？",
         "你有什么功能",
         "怎么使用你",
         "Help",
@@ -671,12 +700,35 @@ def test_capability_questions_use_the_local_fast_intent(question):
 
 
 @pytest.mark.parametrize(
+    "question",
+    [
+        "你是否会记忆？",
+        "你会记住我说的话吗？",
+        "你有长期记忆吗",
+        "你能跨会话记忆吗？",
+        "你有知识库功能吗？",
+        "你会学习和进化吗？",
+        "你是可以学习进化的吗？",
+        "你会根据反馈改进吗？",
+        "Do you learn from feedback?",
+    ],
+)
+def test_memory_capability_questions_use_the_local_fast_intent(question):
+    assert is_memory_capability_query(question) is True
+    assert is_local_fast_intent(question) is True
+
+
+@pytest.mark.parametrize(
     "prompt",
     [
         "帮我计算这个项目的利润",
         "帮助我删除这个文件",
         "你可以帮我做一份排期表吗",
         "大语言模型是什么？",
+        "请记住：项目代号是星河计划",
+        "把这份附件加入知识库",
+        "将报价规则写入知识库",
+        "学习这份文档并保存到资料库",
     ],
 )
 def test_action_and_general_questions_do_not_use_the_local_fast_intent(prompt):
@@ -727,6 +779,35 @@ def test_agent_describes_profile_and_loaded_capabilities_without_calling_llm():
     assert "删除项目文件" not in response
     assert "未授权扩展" not in response
     agent.llm_client.chat.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "question",
+    ["你是否会记忆？", "你有知识库功能吗？", "你会学习和进化吗？"],
+)
+def test_agent_truthfully_describes_persistent_memory_without_calling_llm(question):
+    agent = ArtPMAgent()
+    agent.llm_client = Mock()
+
+    response = agent.chat(question)
+
+    assert "跨会话记忆" in response
+    assert "工作区知识库" in response
+    assert "确认后" in response
+    assert "普通聊天不会静默写入" in response
+    assert "不会训练或改写基础模型" in response
+    agent.llm_client.chat.assert_not_called()
+
+
+def test_system_prompt_states_the_real_memory_and_learning_boundaries():
+    agent = ArtPMAgent()
+
+    prompt = agent._build_system_prompt()
+
+    assert "后续新会话中按相关性召回" in prompt
+    assert "用户反馈与回合结果会持久记录" in prompt
+    assert "不会训练、微调或改写基础模型" in prompt
+    assert "普通聊天不会静默写入长期知识库" in prompt
 
 
 def test_agent_stream_chat_preserves_deterministic_skill_results():
@@ -850,6 +931,33 @@ def test_agent_stream_fails_over_before_first_chunk(monkeypatch):
     assert agent.last_response_model == "deepseek-v4-pro"
     assert primary.stream_chat.call_count == 1
     assert fallback.stream_chat.call_count == 1
+
+
+def test_agent_streams_text_attachment_after_single_parse(monkeypatch):
+    primary = Mock()
+    primary.stream_chat.return_value = iter(["文档", "分析"])
+    fallback = Mock()
+    agent, _ = _failover_agent(monkeypatch, primary, fallback)
+    agent.process_document = Mock(
+        return_value={
+            "success": True,
+            "document_type": "普通文档",
+            "raw_text": "附件正文",
+            "markdown": "附件正文",
+        }
+    )
+
+    chunks = list(
+        agent.stream_chat(
+            "继续分析",
+            context={"file_paths": ["brief.docx"]},
+        )
+    )
+
+    assert chunks == ["文档", "分析"]
+    agent.process_document.assert_called_once_with("brief.docx", "继续分析")
+    primary.stream_chat.assert_called_once()
+    primary.chat.assert_not_called()
 
 
 def test_agent_stream_does_not_fail_over_after_partial_output(monkeypatch):

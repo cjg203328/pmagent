@@ -11,7 +11,6 @@ Validates the architecture closure:
 import ast
 import pathlib
 
-import pytest
 
 _CHAT = pathlib.Path("artpm_agent/views/chat.py")
 _TURN = pathlib.Path("artpm_agent/harness/turn_service.py")

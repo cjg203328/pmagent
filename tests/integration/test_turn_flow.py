@@ -5,8 +5,6 @@ including profile proposals, knowledge ingestion, skill routing, and model fallb
 """
 import pytest
 import time
-from pathlib import Path
-from typing import Any, Dict
 
 
 class MockAgent:
@@ -61,8 +59,10 @@ class MockSkillRouter:
 
     def __init__(self):
         self.skills = {"cost_control": MockSkill()}
+        self.calls = []
 
     def execute_skill(self, skill_name, inputs):
+        self.calls.append((skill_name, dict(inputs)))
         return {"success": True, "result": "Mock result"}
 
 
@@ -122,27 +122,33 @@ class TestTurnFlow:
         assert result.response
         assert result.handled_by is not None
 
-    def test_skill_routing_flow(self, mock_agent):
-        """Test turn with skill routing."""
+    def test_skill_routing_flow(self, mock_agent, tmp_path):
+        """Protected skills stop at a durable permission request."""
         from artpm_agent.harness.turn_service import TurnContext, run_turn
+        from artpm_agent.security import PermissionStore
+
+        permission_store = PermissionStore(tmp_path / "permissions.db")
 
         ctx = TurnContext(
             turn_id="test_002",
             conversation_id="conv_002",
             user_input="报价10万成本7万帮我算利润",
-            agent=mock_agent
+            agent=mock_agent,
+            extra={
+                "permission_store": permission_store,
+                "workspace_id": "test-workspace",
+            },
         )
 
         result = run_turn(ctx)
 
         assert result.success is True
-        # Should route to skill. The harness returns the specific skill id
-        # (e.g. "skill:cost_control") for richer telemetry, so accept both the
-        # legacy generic marker and the per-skill id.
-        assert result.handled_by is not None and (
-            result.handled_by in ("skill_handler", "model_handler")
-            or result.handled_by.startswith("skill")
-        )
+        assert result.awaiting_approval is True
+        assert result.handled_by == "permission_gate"
+        request = permission_store.get(result.metadata["permission_request_id"])
+        assert request.status == "pending"
+        assert request.workspace_id == "test-workspace"
+        assert mock_agent.router.calls == []
 
     def test_profile_proposal_detection(self, mock_agent, mock_profile_store):
         """Test profile change proposal detection."""

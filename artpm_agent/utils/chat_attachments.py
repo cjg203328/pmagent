@@ -11,6 +11,8 @@ import shutil
 from typing import Any
 from uuid import uuid4
 
+from .mineru_adapter import MINERU_SUPPORTED_SUFFIXES
+
 
 DEFAULT_ALLOWED_EXTENSIONS = frozenset(
     {
@@ -27,33 +29,37 @@ DEFAULT_ALLOWED_EXTENSIONS = frozenset(
         "jpeg",
         "webp",
     }
+    | {suffix.lstrip(".") for suffix in MINERU_SUPPORTED_SUFFIXES}
 )
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 DEFAULT_MAX_TOTAL_SIZE = 100 * 1024 * 1024
 _CONVERSATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-_ATTACHMENT_REFERENCE_WORDS = (
-    "附件",
-    "文件",
-    "这份",
-    "继续",
-    "报价",
-    "成本",
-    "利润",
-    "表格",
-    "数据",
-    "项目",
-)
-
-
-_ATTACHMENT_REFERENCE_WORDS = _ATTACHMENT_REFERENCE_WORDS + (
-    "附件",
-    "文件",
-    "这份",
-    "这个",
-    "模板",
-    "格式",
-    "表格",
-    "样式",
+_ATTACHMENT_REFERENCE_PHRASES = (
+    "这个附件",
+    "这些附件",
+    "这份附件",
+    "上个附件",
+    "上一份附件",
+    "这个文件",
+    "这些文件",
+    "这份文件",
+    "上个文件",
+    "上一份文件",
+    "继续分析",
+    "继续处理",
+    "继续编辑",
+    "使用附件",
+    "使用文件",
+    "用附件",
+    "用文件",
+    "这份报价",
+    "这个模板",
+    "这份模板",
+    "这个格式",
+    "这种格式",
+    "保存为模板",
+    "沿用模板",
+    "按模板",
     "template",
     "format",
 )
@@ -243,6 +249,26 @@ class ChatAttachmentStore:
             raise ValueError("Conversation attachment path is not a directory")
         shutil.rmtree(conversation_dir)
 
+    def remove_files(self, attachments: Iterable[Mapping[str, Any]]) -> None:
+        """Best-effort rollback for a just-saved attachment batch."""
+        parents: set[Path] = set()
+        for attachment in attachments:
+            if not isinstance(attachment, Mapping):
+                continue
+            stored_path = attachment.get("stored_path")
+            if not isinstance(stored_path, str) or not stored_path.strip():
+                continue
+            path = self._safe_path(stored_path)
+            path.unlink(missing_ok=True)
+            parents.add(path.parent)
+        for parent in sorted(parents, key=lambda item: len(item.parts), reverse=True):
+            if parent == self.root:
+                continue
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
+
     def resolve_paths(self, attachments: Iterable[Mapping[str, Any]]) -> list[str]:
         """Resolve persisted metadata into verified, existing local file paths."""
         resolved_paths: list[str] = []
@@ -289,6 +315,16 @@ def normalize_chat_submission(value: Any) -> tuple[str, list[Any]]:
     return text.strip(), files
 
 
+def chat_submission_audio(value: Any) -> Any | None:
+    """Return Streamlit's recorded audio without treating it as an attachment."""
+
+    if value is None or isinstance(value, str):
+        return None
+    if isinstance(value, Mapping):
+        return value.get("audio")
+    return getattr(value, "audio", None)
+
+
 def _attachment_metadata(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Iterable) or isinstance(value, (str, bytes, Mapping)):
         return []
@@ -306,7 +342,9 @@ def select_conversation_attachments(
         return current
 
     normalized_prompt = str(prompt or "").casefold()
-    if not any(word in normalized_prompt for word in _ATTACHMENT_REFERENCE_WORDS):
+    if not any(
+        phrase in normalized_prompt for phrase in _ATTACHMENT_REFERENCE_PHRASES
+    ):
         return []
 
     for message in reversed(list(messages or [])):

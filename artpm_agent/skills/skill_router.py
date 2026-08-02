@@ -6,6 +6,7 @@ Core skill implementations and adapters used by the synchronous agent router.
 from copy import deepcopy
 from hashlib import sha256
 import json
+import logging
 from pathlib import Path
 from threading import RLock
 from tempfile import TemporaryDirectory
@@ -24,14 +25,26 @@ from .retrospective_skill import RetrospectiveSkill
 from .input_schemas import BUILTIN_SKILL_INPUT_SCHEMAS
 from artpm_agent.parsers.excel_parser import ExcelQuoteParser
 from artpm_agent.utils.image_validation import MAX_IMAGE_FILE_SIZE, load_validated_image
+from artpm_agent.utils.mineru_adapter import (
+    MINERU_SUPPORTED_SUFFIXES,
+    MinerUDocumentConverter,
+)
 from artpm_agent.utils.unlimited_ocr import UnlimitedOCRClient
+from artpm_agent.plugins import PluginManager
+from artpm_agent.tenancy import (
+    TenantContext,
+    TenantContextError,
+    WorkspaceAccessDenied,
+    tenant_context_from_host,
+)
 
 
+logger = logging.getLogger(__name__)
 _REMINDER_DISPATCH_RESULTS: Dict[str, Dict[str, Any]] = {}
 _REMINDER_DISPATCH_LOCK = RLock()
 MAX_DOCUMENT_FILE_SIZE = 50 * 1024 * 1024
 MAX_EXTRACTED_TEXT_CHARS = 32768
-_SUPPORTED_DOCUMENT_SUFFIXES = frozenset({
+_LEGACY_DOCUMENT_SUFFIXES = frozenset({
     ".xlsx",
     ".xls",
     ".txt",
@@ -45,6 +58,7 @@ _SUPPORTED_DOCUMENT_SUFFIXES = frozenset({
     ".jpeg",
     ".webp",
 })
+_SUPPORTED_DOCUMENT_SUFFIXES = _LEGACY_DOCUMENT_SUFFIXES | MINERU_SUPPORTED_SUFFIXES
 
 
 def _ocr_client_ready(client: Any) -> bool:
@@ -93,6 +107,45 @@ class DocumentClassifierParser(BaseSkill):
             return {
                 "success": False,
                 "error": "单个附件不能超过 50 MB",
+            }
+
+        # MinerU is an optional document backend.  It is injected by the
+        # Agent context so direct skill calls and LangGraph tasks share the
+        # same conversion contract; unavailable/failed conversion falls back
+        # to the existing lightweight parsers below.
+        mineru_converter = self.context.get("mineru_converter")
+        if mineru_converter is None:
+            mineru_config = self.config.get("mineru") if isinstance(self.config, dict) else None
+            if isinstance(mineru_config, dict):
+                mineru_converter = MinerUDocumentConverter(mineru_config)
+                self.context["mineru_converter"] = mineru_converter
+        mineru_error = None
+        if mineru_converter is not None and suffix in MINERU_SUPPORTED_SUFFIXES:
+            try:
+                converted = mineru_converter.convert(
+                    path,
+                    user_hint=str(inputs.get("user_hint") or ""),
+                )
+                if converted.success:
+                    return converted.as_document_result(path, source=source)
+                if converted.attempted:
+                    mineru_error = converted.error
+                    self._log(
+                        f"MinerU conversion failed; using local fallback: {converted.error}",
+                        "WARNING",
+                    )
+            except Exception as error:
+                mineru_error = str(error)
+                self._log(
+                    f"MinerU adapter failed; using local fallback: {error}",
+                    "WARNING",
+                )
+
+        if suffix not in _LEGACY_DOCUMENT_SUFFIXES:
+            detail = mineru_error or "MinerU backend is not available"
+            return {
+                "success": False,
+                "error": f"This format requires MinerU: {suffix}. {detail}",
             }
 
         if suffix in {".xlsx", ".xls"}:
@@ -503,7 +556,10 @@ class ReminderBot(BaseSkill):
     skill_name = "reminder_bot"
     description = "生成催办消息预览，不执行外部发送"
     version = "1.0"
-    requires_llm = True
+    # Preview generation is deterministic and intentionally offline.  Marking
+    # this as LLM-dependent caused unnecessary provider probes and misleading
+    # capability reports even when no model was configured.
+    requires_llm = False
     input_schema = BUILTIN_SKILL_INPUT_SCHEMAS[skill_name]
 
     def execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
@@ -786,7 +842,7 @@ SKILL_METADATA = {
     "reminder_bot": {
         "description": "生成催办消息预览，不执行外部发送",
         "version": "1.0",
-        "requires_llm": True,
+        "requires_llm": False,
         "risk": "low",
         "read_only": True,
         "requires_approval": False,
@@ -803,57 +859,57 @@ SKILL_METADATA = {
         "description": "美术外包质量把控：提交评审、通过/驳回/返工状态机、质量评分与质检报告",
         "version": "1.0",
         "requires_llm": False,
-        "risk": "low",
+        "risk": "medium",
         "read_only": False,
-        "requires_approval": False,
+        "requires_approval": True,
     },
     "requirements_assessment": {
         "description": "需求评估增强：资产复杂度判定、需求范围确认清单、报价解析自动建库",
         "version": "1.0",
         "requires_llm": False,
-        "risk": "low",
+        "risk": "medium",
         "read_only": False,
-        "requires_approval": False,
+        "requires_approval": True,
     },
     "cost_control": {
         "description": "成本管控：人天成本推导、预算跟踪、超支告警",
         "version": "1.0",
         "requires_llm": False,
-        "risk": "low",
+        "risk": "medium",
         "read_only": False,
-        "requires_approval": False,
+        "requires_approval": True,
     },
     "quote_scheduling": {
         "description": "报价排期：人天估算引擎、排期时间线、里程碑计划",
         "version": "1.0",
         "requires_llm": False,
-        "risk": "low",
+        "risk": "medium",
         "read_only": False,
-        "requires_approval": False,
+        "requires_approval": True,
     },
     "progress_management": {
         "description": "进度管理：里程碑视图、阻塞卡点、每日站会摘要",
         "version": "1.0",
         "requires_llm": False,
-        "risk": "low",
+        "risk": "medium",
         "read_only": False,
-        "requires_approval": False,
+        "requires_approval": True,
     },
     "delivery": {
         "description": "产品交付：交付清单、验收单、交付与版本记录",
         "version": "1.0",
         "requires_llm": False,
-        "risk": "low",
+        "risk": "medium",
         "read_only": False,
-        "requires_approval": False,
+        "requires_approval": True,
     },
     "retrospective": {
         "description": "复盘总结：结项复盘报告、经验教训自动沉淀",
         "version": "1.0",
         "requires_llm": False,
-        "risk": "low",
+        "risk": "medium",
         "read_only": False,
-        "requires_approval": False,
+        "requires_approval": True,
     },
 }
 
@@ -891,11 +947,11 @@ try:
             "is_mcp_skill": True,
         }
 
-    print(f"[SkillRouter] Loaded {len(MCP_SKILLS)} MCP skills")
+    logger.info("Loaded %d MCP skills", len(MCP_SKILLS))
 except ImportError as e:
-    print(f"[SkillRouter] MCP skills not available: {e}")
+    logger.debug("MCP skills are not available: %s", e)
 except Exception as e:
-    print(f"[SkillRouter] Failed to load MCP skills: {e}")
+    logger.warning("Failed to load MCP skills: %s", e)
 
 
 class SkillRouter:
@@ -907,6 +963,10 @@ class SkillRouter:
     def __init__(self, context: Dict[str, Any]):
         self.context = context
         self.skills: Dict[str, BaseSkill] = {}
+        self.plugin_load_report = None
+        self.plugin_errors: tuple[str, ...] = ()
+        self._plugin_metadata: Dict[str, Dict[str, Any]] = {}
+        self.tenant_context = tenant_context_from_host(context)
         self._load_skills()
 
     def _load_skills(self):
@@ -914,11 +974,59 @@ class SkillRouter:
         for skill_id, skill_class in SKILL_REGISTRY.items():
             try:
                 self.skills[skill_id] = skill_class(self.context)
-                print(f"[SkillRouter] Loaded skill: {skill_id}")
+                logger.debug("Loaded skill: %s", skill_id)
             except Exception as e:
-                print(f"[SkillRouter] Failed to load skill {skill_id}: {e}")
+                logger.warning("Failed to load skill %s: %s", skill_id, e)
 
-    def route(self, intent: str, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        plugin_manager = self.context.get("plugin_manager")
+        if plugin_manager is None:
+            return
+        if not isinstance(plugin_manager, PluginManager):
+            self.plugin_errors = (
+                "plugin_manager must be a server-created PluginManager instance",
+            )
+            logger.warning("%s", self.plugin_errors[0])
+            return
+        report = plugin_manager.load_skills(reserved_names=set(self.skills))
+        self.plugin_load_report = report
+        errors = [failure.error for failure in report.failures]
+        for registration in report.registrations:
+            try:
+                instance = registration.skill_class(self.context)
+            except BaseException as error:
+                errors.append(
+                    f"{registration.plugin_id}/{registration.name}: {error}"
+                )
+                logger.warning(
+                    "Failed to instantiate plugin skill %s: %s",
+                    registration.name,
+                    error,
+                )
+                continue
+            self.skills[registration.name] = instance
+            self._plugin_metadata[registration.name] = dict(registration.metadata)
+            logger.info(
+                "Loaded plugin skill: %s/%s",
+                registration.plugin_id,
+                registration.name,
+            )
+        self.plugin_errors = tuple(errors)
+
+    def get_skill_metadata(self, skill_name: str) -> Dict[str, Any]:
+        """Return router-local plugin metadata or built-in capability metadata."""
+
+        metadata = self._plugin_metadata.get(skill_name)
+        if metadata is None:
+            metadata = SKILL_METADATA.get(skill_name, {})
+        return deepcopy(metadata)
+
+    def route(
+        self,
+        intent: str,
+        inputs: Dict[str, Any],
+        *,
+        tenant_context: TenantContext | None = None,
+    ) -> Dict[str, Any]:
         """
         Route intent to appropriate skill
 
@@ -931,7 +1039,9 @@ class SkillRouter:
         """
         # 1. Direct match by skill name
         if intent in self.skills:
-            return self.execute_skill(intent, inputs)
+            return self.execute_skill(
+                intent, inputs, tenant_context=tenant_context
+            )
 
         # 2. LLM semantic matching
         skill_info = [
@@ -942,14 +1052,22 @@ class SkillRouter:
         matched_skill = self._match_by_llm(intent, skill_info)
 
         if matched_skill and matched_skill in self.skills:
-            return self.execute_skill(matched_skill, inputs)
+            return self.execute_skill(
+                matched_skill, inputs, tenant_context=tenant_context
+            )
 
         return {
             "success": False,
             "error": f"No matching skill found for intent: {intent}"
         }
 
-    def execute_skill(self, skill_name: str, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def execute_skill(
+        self,
+        skill_name: str,
+        inputs: Dict[str, Any],
+        *,
+        tenant_context: TenantContext | None = None,
+    ) -> Dict[str, Any]:
         """
         Execute skill by name
 
@@ -966,7 +1084,26 @@ class SkillRouter:
                 "error": f"Skill not found: {skill_name}"
             }
 
-        metadata = SKILL_METADATA.get(skill_name, {})
+        try:
+            if tenant_context is not None and not isinstance(
+                tenant_context, TenantContext
+            ):
+                raise TenantContextError(
+                    "tenant_context must be a server-created TenantContext instance"
+                )
+            effective_tenant = tenant_context or self.tenant_context
+            if effective_tenant is not None:
+                inputs = effective_tenant.bind_inputs(inputs)
+            else:
+                inputs = dict(inputs)
+        except (TenantContextError, WorkspaceAccessDenied) as error:
+            return {
+                "success": False,
+                "error": str(error),
+                "error_code": "workspace_access_denied",
+            }
+
+        metadata = self.get_skill_metadata(skill_name)
         if metadata.get("is_mcp_skill") and not metadata.get("read_only", False):
             return {
                 "success": False,
@@ -990,7 +1127,36 @@ class SkillRouter:
                     "requires_approval": True,
                 }
 
-        return self.skills[skill_name].run(inputs)
+        skill = self.skills[skill_name]
+        if tenant_context is not None:
+            # A shared cloud router must not expose a previous request's
+            # principal or workspace through a cached Skill instance. Create
+            # only the selected Skill for this request; plugin modules remain
+            # cached, while request context never is.
+            request_context = dict(self.context)
+            request_context["tenant_context"] = tenant_context
+            request_context["tenant_id"] = tenant_context.tenant_id
+            request_context["workspace_id"] = tenant_context.workspace_id
+            request_context["principal_id"] = tenant_context.principal_id
+            try:
+                skill = type(skill)(request_context)
+            except BaseException as error:
+                return {
+                    "success": False,
+                    "error": f"Failed to initialize request-scoped skill: {error}",
+                    "error_code": "skill_initialization_failed",
+                }
+
+        return skill.run(inputs)
+
+    def for_tenant(self, tenant_context: TenantContext) -> "TenantBoundSkillRouter":
+        """Return an immutable request-scoped view over this shared router."""
+
+        if not isinstance(tenant_context, TenantContext):
+            raise TenantContextError(
+                "tenant_context must be a server-created TenantContext instance"
+            )
+        return TenantBoundSkillRouter(self, tenant_context)
 
     def _match_by_llm(self, intent: str, skill_info: List[Dict]) -> Optional[str]:
         """
@@ -1023,7 +1189,7 @@ class SkillRouter:
 
             return matched if matched in self.skills else None
         except Exception as e:
-            print(f"[SkillRouter] LLM matching failed: {e}")
+            logger.warning("LLM skill matching failed: %s", e)
             return None
 
     def _get_all_skill_info(self) -> List[Dict]:
@@ -1031,12 +1197,19 @@ class SkillRouter:
         skill_info = []
         for skill_name, skill in self.skills.items():
             info = skill.get_info()
-            metadata = SKILL_METADATA.get(skill_name, {})
+            metadata = self.get_skill_metadata(skill_name)
             info.update({
+                "name": skill_name,
                 "risk": metadata.get("risk", "untrusted"),
                 "read_only": metadata.get("read_only", False),
                 "requires_approval": metadata.get("requires_approval", True),
             })
+            if metadata.get("is_plugin_skill"):
+                info["is_plugin_skill"] = True
+                info["plugin_id"] = metadata.get("plugin_id")
+                info["plugin_version"] = metadata.get("plugin_version")
+                info["capabilities"] = list(metadata.get("capabilities") or ())
+                info["required_role"] = metadata.get("required_role", "user")
             if metadata.get("is_mcp_skill"):
                 info["is_mcp_skill"] = True
                 info["side_effects_allowed"] = metadata.get(
@@ -1053,3 +1226,49 @@ class SkillRouter:
             List of skill metadata
         """
         return self._get_all_skill_info()
+
+
+class TenantBoundSkillRouter:
+    """Request-scoped router facade with no mutable tenant state on the base router."""
+
+    def __init__(self, router: SkillRouter, tenant_context: TenantContext):
+        self._router = router
+        self.tenant_context = tenant_context
+
+    @property
+    def skills(self) -> Dict[str, BaseSkill]:
+        """Expose the base catalog for compatibility; execution stays scoped."""
+
+        return self._router.skills
+
+    @property
+    def plugin_load_report(self):
+        return self._router.plugin_load_report
+
+    @property
+    def plugin_errors(self) -> tuple[str, ...]:
+        return self._router.plugin_errors
+
+    def route(self, intent: str, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        return self._router.route(
+            intent,
+            inputs,
+            tenant_context=self.tenant_context,
+        )
+
+    def execute_skill(
+        self,
+        skill_name: str,
+        inputs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return self._router.execute_skill(
+            skill_name,
+            inputs,
+            tenant_context=self.tenant_context,
+        )
+
+    def get_skill_metadata(self, skill_name: str) -> Dict[str, Any]:
+        return self._router.get_skill_metadata(skill_name)
+
+    def list_skills(self) -> List[Dict[str, Any]]:
+        return self._router.list_skills()

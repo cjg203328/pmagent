@@ -13,6 +13,7 @@ APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
 from artpm_agent.utils.chat_attachments import (
     ChatAttachmentStore,
     normalize_chat_submission,
+    chat_submission_audio,
     select_conversation_attachments,
 )
 
@@ -153,6 +154,24 @@ def test_remove_conversation_only_removes_its_own_directory(tmp_path):
         store.resolve_paths(first)
 
 
+def test_remove_files_rolls_back_only_the_new_attachment_batch(tmp_path):
+    store = ChatAttachmentStore(tmp_path / "attachments")
+    existing = store.save_files(
+        "conversation",
+        [FakeUploadedFile("existing.txt", b"keep")],
+    )
+    transient = store.save_files(
+        "conversation",
+        [FakeUploadedFile("transient.txt", b"remove")],
+    )
+
+    store.remove_files(transient)
+
+    assert Path(store.resolve_paths(existing)[0]).read_bytes() == b"keep"
+    with pytest.raises(FileNotFoundError):
+        store.resolve_paths(transient)
+
+
 def test_normalize_chat_submission_handles_string_mapping_and_object():
     first = FakeUploadedFile("a.txt", b"a")
     second = FakeUploadedFile("b.md", b"b")
@@ -169,6 +188,17 @@ def test_normalize_chat_submission_handles_string_mapping_and_object():
 
     with pytest.raises(TypeError):
         normalize_chat_submission({"text": 123, "files": []})
+
+
+def test_recorded_audio_is_separate_from_persistent_attachments():
+    audio = FakeUploadedFile("recording.wav", b"RIFF")
+
+    assert chat_submission_audio({"text": "", "files": [], "audio": audio}) is audio
+    assert chat_submission_audio(SimpleNamespace(text="", files=[], audio=audio)) is audio
+    assert chat_submission_audio("text only") is None
+    assert normalize_chat_submission(
+        {"text": "", "files": [], "audio": audio}
+    ) == ("", [])
 
 
 def test_select_conversation_attachments_prefers_current_files():
@@ -193,5 +223,6 @@ def test_select_conversation_attachments_reuses_only_referenced_recent_files():
 
     assert select_conversation_attachments("你好", [], messages) == []
     assert select_conversation_attachments("继续分析这份报价", [], messages) == recent
-    assert select_conversation_attachments("项目利润怎么样", None, messages) == recent
-    assert select_conversation_attachments("继续", None, []) == []
+    assert select_conversation_attachments("项目利润怎么样", None, messages) == []
+    assert select_conversation_attachments("看看这些文件", None, messages) == recent
+    assert select_conversation_attachments("继续", None, messages) == []

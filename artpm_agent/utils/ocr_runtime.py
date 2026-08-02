@@ -8,6 +8,7 @@ across processes, and only terminates processes it created itself.
 
 from __future__ import annotations
 
+import atexit
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import ipaddress
@@ -169,6 +170,11 @@ class OCRRuntimeManager:
         self._launch_attempts = 0
         self._restart_count = 0
         self._last_launch_at = 0.0
+        if self.config.enabled and self.config.managed:
+            # The sidecar is shared across Streamlit sessions, so individual
+            # Agent replacement does not stop it. Process exit is the
+            # ownership boundary that must never leave an orphan.
+            atexit.register(self.stop_owned)
 
     @property
     def _state_dir(self) -> Path:

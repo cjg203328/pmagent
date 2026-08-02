@@ -734,7 +734,14 @@ class UnlimitedOCRClient:
                 parts.append(accepted)
                 length += len(accepted)
                 if on_delta is not None:
-                    on_delta(accepted)
+                    try:
+                        on_delta(accepted)
+                    except Exception as error:
+                        # Rendering callbacks can disappear during a
+                        # Streamlit rerun. OCR itself succeeded, so keep the
+                        # result and disable only the stale callback window.
+                        logger.warning("OCR stream callback failed: %s", error)
+                        on_delta = None
             if len(accepted) < len(delta):
                 truncated = True
                 break
