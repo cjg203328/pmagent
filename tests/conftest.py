@@ -27,6 +27,10 @@ def isolate_state_and_disable_llm(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_API_KEY", "")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("ZHIPU_API_KEY", "")
+    # Unit tests must never start the external stdio MCP process. Tests that
+    # exercise that transport opt in explicitly after this fixture runs.
+    monkeypatch.setenv("MCP_ENABLED", "false")
+    monkeypatch.setenv("SKILLS_FORGE_KEY", "")
 
     # ── Single data root: everything else defaults underneath it ──
     monkeypatch.setenv("DATA_ROOT", str(tmp_path))

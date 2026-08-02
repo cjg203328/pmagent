@@ -2,6 +2,7 @@
 from artpm_agent.memory.episode_store import Episode, EpisodeStore
 from artpm_agent.memory.feedback_store import FeedbackStore
 from artpm_agent.evolution.strategy_store import StrategyStore
+from artpm_agent.evolution.scheduler import ReflectionScheduler
 from artpm_agent.evolution.reflection import (
     ImprovementProposal,
     apply_proposal,
@@ -103,3 +104,48 @@ def test_auto_approve_forces_apply(tmp_path):
     assert apply_proposal(proposal, st, fb, auto_approve=True) is True
     assert proposal.status == "applied"
     assert st.active()
+
+
+def test_scheduler_reflects_only_episodes_added_since_last_run(tmp_path):
+    ep = EpisodeStore(str(tmp_path / "ep.db"))
+    fb = FeedbackStore(str(tmp_path / "fb.db"))
+    st = StrategyStore(str(tmp_path / "st.db"))
+    scheduler = ReflectionScheduler(str(tmp_path / "reflection.db"))
+
+    # The first run consumes the initial backlog and creates one strategy.
+    _seed(ep, "skill_handler", n_fail=5, n_ok=5)
+    first = scheduler.run_if_due(
+        ep,
+        fb,
+        st,
+        interval_minutes=0,
+        min_new_episodes=5,
+    )
+    assert first is not None
+    assert first.episodes_analyzed == 10
+    assert len(st.active()) == 1
+
+    # The next run sees only the newly-added successful episodes.  If the
+    # scheduler re-mined the full history, the old 50% failure pattern would
+    # produce a duplicate strategy here.
+    for i in range(5):
+        ep.record(
+            Episode(
+                turn_id=f"new-ok-{i}",
+                conversation_id="c",
+                handler="skill_handler",
+                success=True,
+                user_input_excerpt="x",
+            )
+        )
+    second = scheduler.run_if_due(
+        ep,
+        fb,
+        st,
+        interval_minutes=0,
+        min_new_episodes=5,
+    )
+    assert second is not None
+    assert second.episodes_analyzed == 5
+    assert second.proposals_total == 0
+    assert len(st.active()) == 1

@@ -10,6 +10,7 @@ data/ 备份脚本测试
 
 全部使用临时目录，绝不触碰真实 data/。
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -28,10 +29,15 @@ def _make_data(tmp_path: Path) -> Path:
 
 
 def _run(data_dir: Path, *extra):
+    environment = dict(os.environ)
+    environment["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run(
         [sys.executable, str(SCRIPT), "--data-dir", str(data_dir), *extra],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="strict",
+        env=environment,
     )
 
 
