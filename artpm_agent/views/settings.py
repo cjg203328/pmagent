@@ -16,15 +16,11 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from artpm_agent.ui_helpers import *  # noqa: F401,F403
+from artpm_agent.ui_feedback import build_error_info, render_error_callback
 from artpm_agent.config import PROJECT_ENV_PATH, resolve_data_root, save_data_root, reset_config
-
-# UI Optimizations: Fast toast notifications
-try:
-    from artpm_agent.ui.ui_optimizations import show_toast, show_toast_info
-    UI_OPTIMIZATIONS_AVAILABLE = True
-except ImportError:
-    UI_OPTIMIZATIONS_AVAILABLE = False
-    # Fallback to standard Streamlit notifications
+from artpm_agent.tenancy import TenantContext
+from artpm_agent.views.workflow_designer import render_workflow_designer
+from artpm_agent.workflows.designer import capability_allowlist_from_skill_metadata
 
 # 显式导入 Agent / Config，避免降级态（核心模块导入失败时）下
 # 依赖通配导入拿不到名字而触发 NameError。
@@ -37,6 +33,66 @@ except Exception:
 
 MANUAL_MODEL_OPTION = "手动输入模型 ID"
 _ENV_ASSIGNMENT_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+
+
+def _toast(message: str) -> None:
+    """Show one short completion notice without adding a persistent alert."""
+
+    try:
+        st.toast(str(message))
+    except (AttributeError, TypeError):
+        # Streamlit versions without toast still get a visible, non-fatal notice.
+        st.success(str(message))
+
+
+def _mcp_refresh_ready(*, enabled: bool, transport: str, api_key: str, url: str) -> bool:
+    """Return whether the connection probe has enough user input to run."""
+
+    if not enabled or not api_key.strip():
+        return False
+    return transport.strip().lower() != "http" or bool(url.strip())
+
+
+def _mcp_status_message(*, enabled: bool, error_category: str | None = None) -> str:
+    """Map connection state to concise, non-technical UI copy."""
+
+    if not enabled:
+        return "未启用"
+    messages = {
+        "auth": "连接失败，请检查 API Key。",
+        "config": "连接配置不完整，请检查 API Key 和地址。",
+        "url": "连接地址无效，请检查地址格式。",
+        "parse": "连接地址无效，请填写服务端地址。",
+        "network": "暂时无法连接，请检查网络后重试。",
+        "http": "服务暂时不可用，请稍后重试。",
+    }
+    return messages.get(error_category or "", "连接检查失败，请检查配置后重试。")
+
+
+def _trusted_workflow_scope():
+    """Resolve workflow scope from a server-created tenant context only."""
+
+    candidate = st.session_state.get("tenant_context")
+    if candidate is None:
+        candidate = TenantContext.local()
+        st.session_state["tenant_context"] = candidate
+    if not isinstance(candidate, TenantContext):
+        raise RuntimeError("tenant_context must be created by the application host")
+    profile_id = str(st.session_state.get("profile_id") or "local-default")
+    return candidate, profile_id
+
+
+def _workflow_capability_allowlist():
+    agent = st.session_state.get("agent")
+    router = getattr(agent, "router", None)
+    list_skills = getattr(router, "list_skills", None)
+    if not callable(list_skills):
+        return capability_allowlist_from_skill_metadata(())
+    try:
+        return capability_allowlist_from_skill_metadata(list_skills())
+    except Exception:
+        logger.warning("Unable to build plugin workflow allowlist", exc_info=True)
+        return capability_allowlist_from_skill_metadata(())
 
 
 def _dotenv_value(value):
@@ -98,6 +154,14 @@ def _persist_env_in_place(env_path, values, keys_to_unset):
 def _replace_session_agent(refreshed_agent):
     """Install a ready Agent, then release the replaced instance."""
     previous_agent = st.session_state.get("agent")
+    active_chat_model = st.session_state.get("chat_active_model")
+    if active_chat_model:
+        # The selector is session-scoped. Rebuilding the Agent after saving
+        # settings or moving DATA_ROOT must not make the visible model differ
+        # from the gateway that will actually serve the next turn.
+        from artpm_agent.views.chat_model_selector import apply_model_override_to_agent
+
+        apply_model_override_to_agent(refreshed_agent, active_chat_model)
     st.session_state["agent"] = refreshed_agent
     st.session_state["db"] = refreshed_agent.database
     if previous_agent is None or previous_agent is refreshed_agent:
@@ -134,19 +198,24 @@ def _pick_directory() -> Optional[str]:
         return None
 
 
+def _is_cloud_deployment() -> bool:
+    return os.getenv("ARTPM_DEPLOYMENT_MODE", "local").strip().lower() in {
+        "cloud",
+        "container",
+        "remote",
+        "server",
+    }
+
+
 def _render_storage_settings():
     """让用户选择知识库与缓存的统一数据目录，并支持热重载与迁移。"""
-    render_section_heading("数据存储目录", "知识库与缓存统一存放处")
+    render_section_heading("数据目录")
     cfg = Config() if Config is not None else None
     current_root = resolve_data_root()
     db = (cfg.get("database", {}) if cfg is not None else {}) or {}
+    managed_data_root = bool(os.getenv("DATA_ROOT", "").strip())
 
-    st.caption(
-        "所有本地知识库、向量索引、会话/业务数据库与运行缓存都会写入这个目录。"
-        "修改后点击「保存并重载」，应用会在不重启进程的情况下切换到新目录。"
-    )
-
-    with st.expander("查看当前目录结构", expanded=False):
+    with st.expander("目录明细", expanded=False):
         st.code(
             f"数据根目录: {current_root}\n"
             f"  会话库:    {db.get('conversation_db_path')}\n"
@@ -161,45 +230,83 @@ def _render_storage_settings():
         "数据根目录",
         value=str(current_root),
         key="storage_data_root_input",
-        help="知识库与所有缓存将存放于此。留空或「恢复默认目录」会使用项目内的 data/ 目录。",
+        help="留空或恢复默认时使用项目内的 data 目录。",
+        disabled=managed_data_root,
     ).strip()
 
-    browse_col, _ = st.columns([1, 3])
-    with browse_col:
-        if st.button("📂 浏览…", key="storage_browse", use_container_width=True):
-            chosen = _pick_directory()
-            if chosen:
-                st.session_state.storage_data_root_input = chosen
-                st.rerun()
+    if managed_data_root:
+        st.caption("当前目录由部署环境变量 DATA_ROOT 管理。")
+    elif _is_cloud_deployment():
+        st.caption("云端部署请填写服务端挂载路径；系统文件选择器仅在本地桌面模式提供。")
+    else:
+        browse_col, _ = st.columns([1, 3])
+        with browse_col:
+            if st.button(
+                "选择目录",
+                key="storage_browse",
+                icon=":material/folder_open:",
+                width="stretch",
+            ):
+                chosen = _pick_directory()
+                if chosen:
+                    st.session_state.storage_data_root_input = chosen
+                    st.rerun()
 
     migrate = st.checkbox(
         "同时把现有数据迁移到新目录",
         value=True,
         key="storage_migrate",
-        help="勾选后，当前目录下的数据库与缓存会被复制到新目录（旧目录保留、不删除）。",
+        help="复制现有数据，旧目录保留。",
+        disabled=managed_data_root,
     )
 
     save_col, reset_col = st.columns(2)
     with save_col:
-        if st.button("保存并重载", key="storage_save", type="primary", use_container_width=True):
+        if st.button(
+            "保存并重载",
+            key="storage_save",
+            type="primary",
+            width="stretch",
+            disabled=managed_data_root,
+        ):
             _apply_data_root(new_root if new_root else None, migrate=migrate, reset=False)
     with reset_col:
-        if st.button("恢复默认目录", key="storage_reset", use_container_width=True):
+        if st.button(
+            "恢复默认目录",
+            key="storage_reset",
+            width="stretch",
+            disabled=managed_data_root,
+        ):
             _apply_data_root(None, migrate=False, reset=True)
 
 
-def _apply_mcp_env_preview(mcp_enabled: bool) -> None:
+def _apply_mcp_env_preview(
+    mcp_enabled: bool,
+    mcp_transport: str | None = None,
+) -> None:
     """将 MCP 设置页当前填写的 URL/Key/开关即时写入 os.environ，
     使「刷新连接状态」按钮无需先保存即可测试新配置。
     注意：这只影响当前进程内存，不写 .env 文件。"""
     os.environ["MCP_ENABLED"] = "true" if mcp_enabled else "false"
+    transport = str(
+        mcp_transport
+        or st.session_state.get("mcp_transport", "")
+        or os.getenv("MCP_TRANSPORT", "stdio")
+    ).strip().lower()
+    if transport not in {"stdio", "http"}:
+        transport = "stdio"
+    os.environ["MCP_TRANSPORT"] = transport
     # 从 session_state 的 widget 值读取（st.text_input 在 rerun 前已写入）
     key = st.session_state.get("Skills Forge API Key", "")
     url = st.session_state.get("Skills Forge URL", "").strip()
     if key:
         os.environ["SKILLS_FORGE_KEY"] = key
+    else:
+        os.environ.pop("SKILLS_FORGE_KEY", None)
     if url:
         os.environ["SKILLS_FORGE_URL"] = url
+    else:
+        os.environ.pop("SKILLS_FORGE_URL", None)
     # 重置 unified mcp_client 单例，让下次 get 重建时读新 env
     from artpm_agent.core.mcp_client import reset_mcp_client
     reset_mcp_client()
@@ -217,6 +324,7 @@ def _apply_data_root(new_root, *, migrate, reset):
     import shutil
 
     old_root = resolve_data_root()
+    previous_agent = st.session_state.get("agent")
     target = None
     if new_root:
         target = Path(new_root).expanduser()
@@ -227,7 +335,11 @@ def _apply_data_root(new_root, *, migrate, reset):
         try:
             target.mkdir(parents=True, exist_ok=True)
         except OSError as error:
-            st.error(f"无法创建目录 {target}：{error}")
+            render_error_callback(
+                build_error_info(error, context={"operation": "data_root_create"}),
+                key="data_root_create_error",
+                retry=False,
+            )
             return
         if not os.access(str(target), os.W_OK):
             st.error(f"目录不可写：{target}")
@@ -239,11 +351,37 @@ def _apply_data_root(new_root, *, migrate, reset):
             st.toast(f"已迁移现有数据到 {target}")
         except Exception as error:
             logger.exception("迁移数据失败")
-            st.error(f"迁移现有数据失败：{error}；未切换目录。")
+            render_error_callback(
+                build_error_info(error, context={"operation": "data_root_migrate"}),
+                key="data_root_migrate_error",
+                retry=False,
+            )
             return
 
-    save_data_root(str(target) if target else None)
-    reset_config()
+    try:
+        save_data_root(str(target) if target else None)
+        reset_config()
+    except OSError as error:
+        logger.exception("保存数据目录失败")
+        render_error_callback(
+            build_error_info(error, context={"operation": "data_root_save"}),
+            key="data_root_save_error",
+            retry=False,
+        )
+        return
+
+    # The MCP transport is process-global. Reset it before creating the first
+    # replacement Agent; otherwise init_session would reuse the old client and
+    # closing the previous Agent would also close the replacement's session.
+    from artpm_agent.core.mcp_client import reset_mcp_client
+
+    reset_mcp_client()
+    close_previous = getattr(previous_agent, "close", None)
+    if callable(close_previous):
+        try:
+            close_previous()
+        except Exception:
+            logger.warning("关闭旧 Agent 失败", exc_info=True)
 
     # 清空会话内已缓存的存储实例，迫使按新目录重建。
     for key in (
@@ -269,25 +407,12 @@ def _apply_data_root(new_root, *, migrate, reset):
         st.error("目录已切换，但重建存储失败，请重启服务。")
         return
 
-    if ArtPMAgent is not None and Config is not None:
-        try:
-            refreshed = ArtPMAgent(Config())
-            _replace_session_agent(refreshed)
-        except Exception:
-            logger.exception("重建 Agent 失败")
-
     try:
         _load_knowledge_snapshot.clear()
     except Exception:
         pass
 
-    st.success("数据存储目录已切换并重新加载。")
-    # Optimized: Use toast for faster feedback
-    if UI_OPTIMIZATIONS_AVAILABLE:
-        try:
-            st.toast("✅ 数据存储目录已切换并重新加载", icon="✅")
-        except Exception:
-            pass  # Fallback already shown above
+    _toast("数据目录已切换")
     st.rerun()
 
 
@@ -305,9 +430,17 @@ def persist_settings(config, env_path=None):
         "LLM_PROVIDER": config["provider"],
         "LLM_MODEL": config["model"],
         "MCP_ENABLED": str(config["mcp_enabled"]).lower(),
+        "MCP_TRANSPORT": (
+            config.get("mcp_transport", "stdio")
+            if config.get("mcp_transport", "stdio") in {"stdio", "http"}
+            else "stdio"
+        ),
         "SKILLS_FORGE_KEY": config["mcp_key"],
         "SKILLS_FORGE_URL": config["mcp_url"],
     }
+    framework = str(config.get("framework", "") or "").strip().lower()
+    if framework in {"langchain", "langchain-v1", "lc", "native"}:
+        values["LLM_FRAMEWORK"] = "native" if framework == "native" else "langchain"
     # Legacy callers may still persist seed values. The settings page no longer
     # writes them because quote rules are managed by confirmed conversation changes.
     if "overhead_rate" in config:
@@ -341,6 +474,8 @@ def persist_settings(config, env_path=None):
 
     if config["api_key"]:
         values[provider_key] = config["api_key"]
+    else:
+        keys_to_unset.add(provider_key)
     if config["api_base_url"]:
         values[provider_base] = config["api_base_url"]
     else:
@@ -362,6 +497,57 @@ def _load_knowledge_snapshot():
     knowledge_store = get_knowledge_store()
     if knowledge_store is None:
         return None
+
+    # The knowledge tab is also the operator's proof that the learning loop is
+    # alive.  Keep these counters sourced from the same durable stores used by
+    # the turn pipeline; never infer learning from a model response string.
+    learning = {
+        "feedback": 0,
+        "episodes": 0,
+        "strategies": 0,
+        "knowledge_gaps": 0,
+        "last_reflection": None,
+    }
+    try:
+        from artpm_agent.memory.feedback_store import get_default_feedback_store
+
+        feedback_store = get_default_feedback_store()
+        if feedback_store is not None:
+            learning["feedback"] = len(feedback_store.active())
+    except Exception:
+        logger.exception("读取反馈统计失败")
+    try:
+        from artpm_agent.harness.outcome_recorder import default_episode_db_path
+        from artpm_agent.memory.episode_store import EpisodeStore
+
+        learning["episodes"] = EpisodeStore(default_episode_db_path()).count()
+    except Exception:
+        logger.exception("读取回合经验统计失败")
+    try:
+        from artpm_agent.evolution.strategy_store import get_default_strategy_store
+
+        strategy_store = get_default_strategy_store()
+        if strategy_store is not None:
+            learning["strategies"] = len(strategy_store.active())
+    except Exception:
+        logger.exception("读取进化策略统计失败")
+    try:
+        from artpm_agent.evolution.meta_memory import get_default_meta_memory_store
+
+        learning["knowledge_gaps"] = len(
+            get_default_meta_memory_store().top_gaps(limit=100)
+        )
+    except Exception:
+        logger.exception("读取知识缺口统计失败")
+    try:
+        from artpm_agent.evolution.scheduler import get_default_scheduler
+
+        scheduler = get_default_scheduler()
+        if scheduler is not None:
+            learning["last_reflection"] = scheduler.last_run()[0]
+    except Exception:
+        logger.exception("读取复盘状态失败")
+
     return {
         "resources": knowledge_store.list_resources(limit=100),
         "active_rules": knowledge_store.get_active_rules(limit=100),
@@ -369,19 +555,29 @@ def _load_knowledge_snapshot():
             status="pending", limit=100
         ),
         "pending_rules": knowledge_store.list_rules(status="proposed", limit=100),
+        "learning": learning,
     }
 
 
 def settings_page():
     """设置页面"""
-    render_page_header("系统 / 设置", "设置", "模型、工具与业务参数")
+    render_page_header("系统 / 设置", "设置")
 
-    # MCP 连接状态：仅首次进入或显式刷新时检测，避免每次 rerun 打远端。
+    # 远端状态只在用户主动刷新时检测，避免打开设置页就产生网络等待。
     mcp_skills = st.session_state.get("mcp_skills_cache", [])
     mcp_error = st.session_state.get("mcp_error_cache", None)
+    mcp_error_category = st.session_state.get("mcp_error_category_cache", None)
     mcp_market = st.session_state.get("mcp_market_cache", [])
-    if st.session_state.get("mcp_skills_refresh") or "mcp_skills_cache" not in st.session_state:
-        mcp_skills, mcp_error, mcp_market = [], None, []
+    configured_mcp_enabled = os.getenv("MCP_ENABLED", "false").lower() == "true"
+    refresh_mcp = bool(st.session_state.get("mcp_skills_refresh"))
+    if not configured_mcp_enabled and not refresh_mcp:
+        mcp_skills, mcp_error, mcp_error_category, mcp_market = [], None, None, []
+        st.session_state.mcp_skills_cache = []
+        st.session_state.mcp_error_cache = None
+        st.session_state.mcp_error_category_cache = None
+        st.session_state.mcp_market_cache = []
+    elif refresh_mcp:
+        mcp_skills, mcp_error, mcp_error_category, mcp_market = [], None, None, []
         if AVAILABLE and st.session_state.get("agent"):
             try:
                 mcp_client = getattr(st.session_state.agent, "mcp_client", None)
@@ -403,21 +599,35 @@ def settings_page():
                                     mcp_market = []
                         else:
                             mcp_error = msg
+                            mcp_error_category = getattr(
+                                mcp_client, "last_error_category", None
+                            )
                     elif mcp_client.enabled:
                         mcp_skills = mcp_client.list_skills()
                     else:
                         # 未启用但有 remote client 实例 → 取诊断信息
                         diag = getattr(mcp_client, "last_error", None)
                         mcp_error = diag or "Skills Forge 未启用"
+                        mcp_error_category = getattr(
+                            mcp_client, "last_error_category", None
+                        )
             except Exception as error:
                 logger.warning("MCP 状态检查失败: %s", error, exc_info=True)
-                mcp_error = f"Skills Forge 状态检查异常: {error}"
+                mcp_error = "connection_check_failed"
+                mcp_error_category = "unknown"
         elif not AVAILABLE:
             mcp_error = "Agent 运行时未就绪"
+            mcp_error_category = "runtime"
         st.session_state.mcp_skills_cache = mcp_skills
         st.session_state.mcp_error_cache = mcp_error
+        st.session_state.mcp_error_category_cache = mcp_error_category
         st.session_state.mcp_market_cache = mcp_market
         st.session_state.mcp_skills_refresh = False
+    elif "mcp_skills_cache" not in st.session_state:
+        st.session_state.mcp_skills_cache = []
+        st.session_state.mcp_error_cache = None
+        st.session_state.mcp_error_category_cache = None
+        st.session_state.mcp_market_cache = []
 
     provider_options = ["openai", "anthropic", "zhipu", "custom"]
     configured_provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
@@ -427,15 +637,27 @@ def settings_page():
         else 0
     )
 
-    model_tab, mcp_tab, workflow_tab, knowledge_tab, storage_tab, business_tab = st.tabs(
-        ["模型", "工具与连接", "工作流", "知识", "存储", "Agent"]
+    model_tab, mcp_tab, workflow_tab, knowledge_tab, storage_tab, identity_tab = st.tabs(
+        ["模型", "工具与连接", "工作流", "知识", "存储", "身份"]
     )
     with model_tab:
+        framework_options = ["langchain", "native"]
+        configured_framework = os.getenv("LLM_FRAMEWORK", "langchain").lower()
+        if configured_framework not in framework_options:
+            configured_framework = "langchain"
+        framework = st.selectbox(
+            "模型框架",
+            framework_options,
+            index=framework_options.index(configured_framework),
+            format_func=lambda value: (
+                "LangChain v1" if value == "langchain" else "原生 SDK"
+            ),
+            key="llm_framework",
+        )
         llm_provider = st.selectbox(
             "LLM 提供商",
             provider_options,
             index=provider_index,
-            help="支持官方服务和 OpenAI 兼容接口",
             key="llm_provider",
         )
         provider_key_names = {
@@ -495,6 +717,7 @@ def settings_page():
             MODEL_CATALOG_AVAILABLE
             and llm_provider in {"openai", "custom", "zhipu"}
         )
+        can_sync_models = supports_model_sync and bool(api_key.strip())
         sync_feedback = None
         sync_col, sync_meta_col = st.columns([1.2, 3.8], vertical_alignment="bottom")
         with sync_col:
@@ -502,8 +725,8 @@ def settings_page():
                 "同步模型",
                 key=f"sync_models_{llm_provider}",
                 icon=":material/sync:",
-                disabled=not supports_model_sync,
-                use_container_width=True,
+                disabled=not can_sync_models,
+                width="stretch",
             )
         if sync_requested:
             try:
@@ -523,22 +746,17 @@ def settings_page():
             if synced_at:
                 st.caption(f"最近同步：{synced_at}")
             elif not MODEL_CATALOG_AVAILABLE:
-                st.caption("模型同步组件不可用，请查看服务日志")
-            elif supports_model_sync:
-                st.caption("尚未同步模型列表")
+                st.caption("模型同步不可用")
+            elif not supports_model_sync:
+                st.caption("当前提供商不支持模型同步")
+            elif not api_key.strip():
+                st.caption("填写 API Key 后可同步")
             else:
-                st.caption("此提供商不使用 OpenAI 兼容 /models")
+                st.caption("尚未同步模型列表")
         if sync_feedback:
             feedback_type, feedback_message = sync_feedback
             if feedback_type == "success":
-                # Optimized: Use toast instead of st.success
-                if UI_OPTIMIZATIONS_AVAILABLE:
-                    try:
-                        st.toast(f"✅ {feedback_message}", icon="✅")
-                    except Exception:
-                        st.success(feedback_message)
-                else:
-                    st.success(feedback_message)
+                _toast(feedback_message)
             else:
                 st.error(feedback_message)
 
@@ -574,81 +792,23 @@ def settings_page():
             model = model_choice
 
     with mcp_tab:
-        if mcp_error:
-            st.error(mcp_error)
-            # 如果错误类别是 url/parse，额外给一个可操作的提示
-            if AVAILABLE and st.session_state.get("agent"):
-                mc = getattr(st.session_state.agent, "mcp_client", None)
-                cat = getattr(mc, "last_error_category", None) if mc else None
-                if cat in ("url", "parse"):
-                    st.caption(
-                        "💡 **常见原因**：URL 填的是网站前台地址（如 `skillsforge.xyz`），"
-                        "而不是 API 服务端地址。请尝试改为 `https://api.skillsforge.xyz` "
-                        "或服务方提供的 API 地址。"
-                    )
-        elif mcp_skills:
-            transport = os.getenv("MCP_TRANSPORT", "http").lower()
-            transport_label = "stdio (npx)" if transport == "stdio" else "HTTP REST"
-            if mcp_market:
-                success_msg = (
-                    f"Skills Forge 已连接（{transport_label}），"
-                    f"{len(mcp_skills)} 个 MCP 工具 + {len(mcp_market)} 个市场技能可用"
-                )
-                # Optimized: Use toast for faster feedback
-                if UI_OPTIMIZATIONS_AVAILABLE:
-                    try:
-                        st.toast(f"🔗 {success_msg}", icon="🔗")
-                    except Exception:
-                        st.success(success_msg)
-                else:
-                    st.success(success_msg)
-                # 市场技能列表是否命中本地 TTL 缓存（无需再次打云端 2.4s）
-                mcp_client = getattr(st.session_state.get("agent"), "mcp_client", None)
-                cache_hit = getattr(mcp_client, "last_market_cache_hit", None)
-                if cache_hit is True:
-                    st.caption("🟢 市场技能列表来自本地 TTL 缓存（0s 云端开销）")
-                elif cache_hit is False:
-                    st.caption("🔵 市场技能列表本次从云端拉取并写入缓存（TTL 300s）")
-            else:
-                success_msg = f"Skills Forge 已连接（{transport_label}），{len(mcp_skills)} 个技能可用"
-                # Optimized: Use toast for faster feedback
-                if UI_OPTIMIZATIONS_AVAILABLE:
-                    try:
-                        st.toast(f"🔗 {success_msg}", icon="🔗")
-                    except Exception:
-                        st.success(success_msg)
-                else:
-                    st.success(success_msg)
-            skill_rows = [
-                {
-                    "技能": skill.get("name", "未命名"),
-                    "说明": skill.get("description", "—"),
-                }
-                for skill in mcp_skills
-            ]
-            st.dataframe(
-                pd.DataFrame(skill_rows),
-                use_container_width=True,
-                hide_index=True,
-                height=min(280, 38 + len(skill_rows) * 36),
-                key="mcp_skills_table",
-            )
-        else:
-            st.info("Skills Forge 当前未连接。保存有效配置并点击「刷新连接状态」测试。")
         mcp_enabled = st.toggle(
             "启用远程 Skills Forge",
             value=os.getenv("MCP_ENABLED", "false").lower() == "true",
         )
-        if st.button(
-            "刷新连接状态",
-            key="refresh_mcp_status",
-            icon=":material/refresh:",
-            help="重新检测 Skills Forge 连接（用当前填写的 URL 和 Key）",
-        ):
-            # 先把界面上的值写进 os.environ，让 ping() 能读到最新的配置
-            _apply_mcp_env_preview(mcp_enabled)
-            st.session_state.mcp_skills_refresh = True
-            st.rerun()
+        transport_options = ["stdio", "http"]
+        configured_transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
+        if configured_transport not in transport_options:
+            configured_transport = "stdio"
+        mcp_transport = st.selectbox(
+            "连接协议",
+            options=transport_options,
+            index=transport_options.index(configured_transport),
+            key="mcp_transport",
+            format_func=lambda value: (
+                "MCP stdio" if value == "stdio" else "HTTP REST"
+            ),
+        )
         mcp_key = st.text_input(
             "Skills Forge API Key",
             type="password",
@@ -659,22 +819,102 @@ def settings_page():
             "Skills Forge URL",
             value=os.getenv("SKILLS_FORGE_URL", ""),
             placeholder="https://api.skillsforge.xyz",
-            help=(
-                "HTTP REST 模式使用此地址。当前若为 stdio 模式，"
-                "连接由 npx 包 @skills-forge/mcp-server 内部负责，此字段不参与连接。"
-            ),
+            disabled=mcp_transport == "stdio",
         ).strip()
+        can_refresh_mcp = _mcp_refresh_ready(
+            enabled=mcp_enabled,
+            transport=mcp_transport,
+            api_key=mcp_key,
+            url=mcp_url,
+        )
+        mcp_config_changed = (
+            mcp_enabled != configured_mcp_enabled
+            or mcp_transport != os.getenv("MCP_TRANSPORT", "stdio").lower()
+            or mcp_key != os.getenv("SKILLS_FORGE_KEY", "")
+            or (
+                mcp_transport == "http"
+                and mcp_url != os.getenv("SKILLS_FORGE_URL", "").strip()
+            )
+        )
+        if st.button(
+            "刷新连接状态",
+            key="refresh_mcp_status",
+            icon=":material/refresh:",
+            disabled=not can_refresh_mcp,
+        ):
+            _apply_mcp_env_preview(mcp_enabled, mcp_transport)
+            st.session_state.mcp_skills_refresh = True
+            st.rerun()
+
+        if not mcp_enabled:
+            st.caption("状态：未启用")
+        elif not can_refresh_mcp:
+            missing = "API Key" if not mcp_key.strip() else "服务地址"
+            st.caption(f"填写 {missing} 后可检查连接")
+        elif mcp_config_changed:
+            st.caption("状态：当前配置尚未检查")
+        elif mcp_error:
+            st.warning(
+                _mcp_status_message(
+                    enabled=True,
+                    error_category=mcp_error_category,
+                )
+            )
+        elif mcp_skills:
+            transport_label = "MCP stdio" if mcp_transport == "stdio" else "HTTP REST"
+            market_count = len(mcp_market)
+            count_text = f"{len(mcp_skills)} 个工具"
+            if market_count:
+                count_text += f"，{market_count} 个技能"
+            st.success(f"已连接 · {transport_label} · {count_text}")
+            skill_rows = [
+                {
+                    "技能": skill.get("name", "未命名"),
+                    "说明": skill.get("description", "—"),
+                }
+                for skill in mcp_skills
+            ]
+            st.dataframe(
+                pd.DataFrame(skill_rows),
+                width="stretch",
+                hide_index=True,
+                height=min(280, 38 + len(skill_rows) * 36),
+                key="mcp_skills_table",
+            )
+        else:
+            st.caption("状态：尚未检查")
 
     with workflow_tab:
         workflow_store = get_workflow_store()
-        if st.session_state.pop("reset_workflow_widget_state", False):
+        reset_widget_state = st.session_state.pop(
+            "reset_workflow_widget_state", False
+        )
+        if reset_widget_state:
             for state_key in list(st.session_state):
                 if state_key.startswith(("workflow_enabled_", "workflow_priority_")):
                     del st.session_state[state_key]
+            _toast("工作流已恢复默认")
         if workflow_store is None:
             st.error("工作流运行时未就绪，请查看服务日志。")
         else:
-            workflow_definitions = workflow_store.list_definitions()
+            tenant_context, workflow_profile_id = _trusted_workflow_scope()
+            workflow_workspace_id = tenant_context.workspace_id
+            workflow_capability_allowlist = _workflow_capability_allowlist()
+            with st.expander(
+                "可视化编排",
+                expanded=True,
+                icon=":material/account_tree:",
+            ):
+                render_workflow_designer(
+                    workflow_store,
+                    workspace_id=workflow_workspace_id,
+                    profile_id=workflow_profile_id,
+                    capability_allowlist=workflow_capability_allowlist,
+                )
+            workflow_definitions = workflow_store.list_definitions(
+                workspace_id=workflow_workspace_id,
+                profile_id=workflow_profile_id,
+            )
             workflow_values = []
             for definition in workflow_definitions:
                 with st.expander(
@@ -716,13 +956,13 @@ def settings_page():
                     "保存工作流设置",
                     key="save_workflow_settings",
                     type="primary",
-                    use_container_width=True,
+                    width="stretch",
                 )
             with reset_flow_col:
                 reset_workflows = st.button(
                     "恢复默认",
                     key="reset_workflow_settings",
-                    use_container_width=True,
+                    width="stretch",
                 )
             if save_workflows:
                 try:
@@ -731,33 +971,44 @@ def settings_page():
                             WorkflowOverride(
                                 workflow_id=definition.id,
                                 workflow_version=definition.version,
+                                workspace_id=workflow_workspace_id,
+                                profile_id=workflow_profile_id,
                                 enabled=enabled,
                                 priority=priority,
                             )
                         )
-                    # Optimized: Use toast for faster feedback
-                    if UI_OPTIMIZATIONS_AVAILABLE:
-                        try:
-                            st.toast("✅ 工作流设置已保存", icon="💾")
-                        except Exception:
-                            st.success("工作流设置已保存。")
-                    else:
-                        st.success("工作流设置已保存。")
+                    _toast("工作流设置已保存")
                 except Exception as error:
                     logger.exception("保存工作流设置失败")
-                    st.error(f"工作流设置保存失败：{error}")
+                    render_error_callback(
+                        build_error_info(
+                            error,
+                            context={"operation": "workflow_settings_save"},
+                        ),
+                        key="workflow_settings_save_error",
+                        retry=False,
+                    )
             if reset_workflows:
                 try:
                     for definition in workflow_definitions:
                         workflow_store.clear_override(
                             definition.id,
                             version=definition.version,
+                            workspace_id=workflow_workspace_id,
+                            profile_id=workflow_profile_id,
                         )
                     st.session_state.reset_workflow_widget_state = True
                     st.rerun()
                 except Exception as error:
                     logger.exception("恢复默认工作流失败")
-                    st.error(f"恢复失败：{error}")
+                    render_error_callback(
+                        build_error_info(
+                            error,
+                            context={"operation": "workflow_settings_reset"},
+                        ),
+                        key="workflow_settings_reset_error",
+                        retry=False,
+                    )
 
     with knowledge_tab:
         snapshot = _load_knowledge_snapshot()
@@ -768,10 +1019,25 @@ def settings_page():
             active_rules = snapshot["active_rules"]
             pending_ingestions = snapshot["pending_ingestions"]
             pending_rules = snapshot["pending_rules"]
+            learning = snapshot.get("learning", {})
             st.caption(
                 f"资料 {len(resources)} · 已采纳规则 {len(active_rules)} · "
                 f"待确认 {len(pending_ingestions) + len(pending_rules)}"
             )
+            st.markdown("#### 知识与记录")
+            metric_cols = st.columns(4)
+            with metric_cols[0]:
+                st.metric("资料", len(resources))
+            with metric_cols[1]:
+                st.metric("反馈", int(learning.get("feedback", 0)))
+            with metric_cols[2]:
+                st.metric("回合记录", int(learning.get("episodes", 0)))
+            with metric_cols[3]:
+                st.metric("策略", int(learning.get("strategies", 0)))
+            last_reflection = learning.get("last_reflection")
+            gap_count = int(learning.get("knowledge_gaps", 0))
+            reflection_text = last_reflection or "无"
+            st.caption(f"知识缺口 {gap_count} 条 · 最近复盘 {reflection_text}")
             if resources:
                 st.dataframe(
                     pd.DataFrame(
@@ -785,7 +1051,7 @@ def settings_page():
                             for resource in resources
                         ]
                     ),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     key="knowledge_resources_table",
                 )
@@ -800,7 +1066,7 @@ def settings_page():
                             for rule in active_rules
                         ]
                     ),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     key="knowledge_rules_table",
                 )
@@ -810,7 +1076,7 @@ def settings_page():
     with storage_tab:
         _render_storage_settings()
 
-    with business_tab:
+    with identity_tab:
         current_profile = get_current_profile()
         if current_profile is not None:
             identity_defaults = current_profile.identity
@@ -818,14 +1084,14 @@ def settings_page():
         else:
             identity_defaults = AgentIdentity() if AgentIdentity else None
 
-        render_section_heading("Agent 身份", "当前工作区")
+        render_section_heading("身份配置")
         identity_name = st.text_input(
             "名称",
             value=getattr(identity_defaults, "display_name", "ArtPM 助手"),
         ).strip()
         identity_role = st.text_input(
             "角色",
-            value=getattr(identity_defaults, "role", "游戏美术项目管理智能体"),
+            value=getattr(identity_defaults, "role", "游戏美术项目管理"),
         ).strip()
         identity_domain = st.text_input(
             "业务领域",
@@ -858,13 +1124,12 @@ def settings_page():
             max_chars=1000,
         ).strip()
 
-    render_section_heading("保存", "保存后立即应用")
-    if st.button("保存更改", type="primary", key="save_settings"):
+    if st.button("保存模型、连接与身份", type="primary", key="save_settings"):
         if not model.strip():
             st.error("请从模型列表选择模型，或填写手动模型 ID。")
             return
         if not identity_name or not identity_role or not identity_domain:
-            st.error("Agent 名称、角色和业务领域不能为空。")
+            st.error("名称、角色和业务领域不能为空。")
             return
         profile_patch = None
         if current_profile is not None and AgentProfilePatch is not None:
@@ -886,11 +1151,13 @@ def settings_page():
         settings = {
             "provider": llm_provider,
             "model": model.strip(),
+            "framework": framework,
             "api_key": api_key.strip(),
             "api_base_url": api_base_url,
             "available_models": available_models,
             "models_synced_at": st.session_state.get(synced_at_key, ""),
             "mcp_enabled": mcp_enabled,
+            "mcp_transport": mcp_transport,
             "mcp_key": mcp_key.strip(),
             "mcp_url": mcp_url,
         }
@@ -898,11 +1165,15 @@ def settings_page():
             persist_settings(settings)
         except Exception as error:
             logger.exception("保存配置失败")
-            st.error(f"保存失败：{error}。请检查 .env 文件权限后重试。")
+            render_error_callback(
+                build_error_info(error, context={"operation": "settings_save"}),
+                key="settings_save_error",
+                retry=False,
+            )
             return
 
         # 保存后即时将 MCP 配置刷入进程环境，让后续 ping() 读到新值
-        _apply_mcp_env_preview(mcp_enabled)
+        _apply_mcp_env_preview(mcp_enabled, mcp_transport)
 
         applied_profile = current_profile
         if profile_patch is not None:
@@ -925,24 +1196,34 @@ def settings_page():
                 )
             except Exception as error:
                 logger.exception("保存 Agent Profile 失败")
-                st.error(f"模型配置已保存，但 Agent Profile 保存失败：{error}")
+                render_error_callback(
+                    build_error_info(error, context={"operation": "profile_save"}),
+                    key="profile_save_error",
+                    retry=False,
+                )
                 return
 
+        if ArtPMAgent is None or Config is None:
+            st.warning("配置已保存；当前运行实例未刷新，重启服务后生效。")
+            return
         try:
-            if ArtPMAgent is None or Config is None:
-                st.warning("配置已保存；当前 Agent 实例未能刷新（依赖未加载），重启服务后生效。")
-            else:
-                refreshed_agent = ArtPMAgent(Config())
-                _replace_session_agent(refreshed_agent)
-            profile_version = (
-                f"，Agent 配置 v{applied_profile.revision}"
-                if applied_profile is not None
-                else ""
+            refreshed_agent = ArtPMAgent(Config())
+            _replace_session_agent(refreshed_agent)
+        except Exception as error:
+            logger.exception("配置已保存，但当前运行实例刷新失败")
+            render_error_callback(
+                build_error_info(error, context={"operation": "agent_refresh"}),
+                key="agent_refresh_error",
+                retry=False,
             )
-            st.success(
-                f"配置已保存并应用，当前模型：{model.strip()}"
-                f"{profile_version}"
-            )
-        except Exception:
-            logger.exception("配置已保存，但当前 Agent 刷新失败")
-            st.warning("配置已保存；当前会话刷新失败，重启服务后生效。")
+            return
+
+        profile_version = (
+            f"，身份配置 v{applied_profile.revision}"
+            if applied_profile is not None
+            else ""
+        )
+        st.success(
+            f"配置已保存并应用，当前模型：{model.strip()}"
+            f"{profile_version}"
+        )

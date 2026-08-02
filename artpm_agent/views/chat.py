@@ -1,7 +1,11 @@
 # ruff: noqa: E402,F405 - Streamlit may execute this page as a standalone script
 """聊天页面（从 app.py 拆分）。"""
+
+from collections.abc import Mapping
+from html import escape
 import sys
 import re
+import time
 from pathlib import Path
 
 # 确保项目根目录在 Python 路径中（页面被 Streamlit 直接作为脚本运行时也能找到包）
@@ -13,6 +17,7 @@ if str(_project_root) not in sys.path:
 
 from artpm_agent.ui_helpers import *  # noqa: F401,F403
 from artpm_agent.memory import SessionStore
+from artpm_agent.utils.mineru_adapter import MINERU_SUPPORTED_SUFFIXES
 from artpm_agent.editing import (
     EditableDocument,
     run_edit_instruction,
@@ -22,6 +27,7 @@ from artpm_agent.editing import (
     RuleDistiller,
     distill_from_correction,
 )
+
 # 通配导入会跳过下划线开头的名称，这里显式补齐被 chat_page 直接调用的内部辅助函数。
 from artpm_agent.ui_helpers import (
     _chat_error_message,
@@ -29,6 +35,7 @@ from artpm_agent.ui_helpers import (
     _current_model_id,
     _history_limits,
     _pending_request,
+    _render_permission_approvals,
     _render_knowledge_approvals,
     _render_knowledge_ingestion_approvals,
     _render_message_artifacts,
@@ -38,19 +45,30 @@ from artpm_agent.ui_helpers import (
     _response_model_id,
     extract_knowledge_rule,  # For knowledge rule extraction (not yet in harness)
 )
+
 # Phase 3 Stage 4: Import harness integration helper
 from artpm_agent.internal.chat_harness_integration import execute_turn_with_harness
+from artpm_agent.ui_feedback import build_error_info, render_error_callback
+from artpm_agent.ui_feedback import build_attachment_error_info
+from artpm_agent.security import (
+    ACCESS_MODE_CONTROLLED,
+    ACCESS_MODE_FULL,
+    normalize_access_mode,
+)
+from artpm_agent.utils.chat_attachments import DEFAULT_MAX_FILE_SIZE
+from artpm_agent.voice import VoiceAudioService, VoiceError
+
 # Phase 1 (记忆激活 · 加深): 聊天页反馈按钮 -> FeedbackStore + Episode
 from artpm_agent.harness.memory_retrieval import (
     FEEDBACK_CATEGORIES,
     record_turn_feedback,
 )
+
 # 对话页模型选择器
 from artpm_agent.views.chat_model_selector import (
     render_model_selector,
     get_current_model,
     apply_model_override_to_agent,
-    get_agent_current_model,
 )
 
 _LEGACY_MODEL_RUNTIME_RE = re.compile(
@@ -65,6 +83,275 @@ _LEGACY_FALLBACK_NOTICE_RE = re.compile(
     r"默认模型 `[^`]+` 暂时不可用，本次临时使用 `(?P<model>[^`]+)` "
     r"生成回答；默认设置未修改。\n\n",
 )
+
+_FULL_ACCESS_TTL_SECONDS = 60 * 60
+_MAX_PERMISSION_GRANTS = 128
+_VOICE_CALLBACK_ACTIVE_TTL_SECONDS = 5 * 60
+_VOICE_CALLBACK_TERMINAL_TTL_SECONDS = 45
+_VOICE_CALLBACK_STATES = {
+    "transcribing": {
+        "label": "正在识别语音",
+        "icon": "graphic_eq",
+        "tone": "active",
+        "terminal": False,
+    },
+    "thinking": {
+        "label": "语音已识别，正在生成回复",
+        "icon": "neurology",
+        "tone": "active",
+        "terminal": False,
+    },
+    "synthesizing": {
+        "label": "正在生成语音回复",
+        "icon": "graphic_eq",
+        "tone": "active",
+        "terminal": False,
+    },
+    "approval": {
+        "label": "语音任务等待确认",
+        "icon": "shield",
+        "tone": "warning",
+        "terminal": False,
+    },
+    "playing": {
+        "label": "正在播放语音回复",
+        "icon": "volume_up",
+        "tone": "success",
+        "terminal": True,
+    },
+    "fallback": {
+        "label": "已切换为文字回复",
+        "icon": "volume_off",
+        "tone": "warning",
+        "terminal": True,
+    },
+    "error": {
+        "label": "语音处理未完成",
+        "icon": "mic_off",
+        "tone": "danger",
+        "terminal": True,
+    },
+}
+
+
+def _trusted_permission_binding(conversation_id: str | None) -> dict[str, str] | None:
+    tenant_context = st.session_state.get("tenant_context")
+    if not conversation_id or not isinstance(tenant_context, TenantContext):
+        return None
+    return {
+        "tenant_id": tenant_context.tenant_id,
+        "workspace_id": tenant_context.workspace_id,
+        "principal_id": tenant_context.principal_id,
+        "conversation_id": str(conversation_id),
+    }
+
+
+def _controlled_permission_grant(conversation_id: str | None) -> dict[str, object]:
+    return {
+        "mode": ACCESS_MODE_CONTROLLED,
+        **(_trusted_permission_binding(conversation_id) or {}),
+    }
+
+
+def _conversation_permission_grant(
+    conversation_id: str | None,
+    *,
+    now: float | None = None,
+) -> dict[str, object]:
+    binding = _trusted_permission_binding(conversation_id)
+    if binding is None:
+        return _controlled_permission_grant(conversation_id)
+    grants = st.session_state.get("conversation_permission_grants", {})
+    if not isinstance(grants, dict):
+        st.session_state.conversation_permission_grants = {}
+        return _controlled_permission_grant(conversation_id)
+    entry = grants.get(str(conversation_id))
+    if not isinstance(entry, Mapping):
+        return _controlled_permission_grant(conversation_id)
+    mode = normalize_access_mode(entry.get("mode"))
+    expires_at = entry.get("expires_at")
+    current_time = time.time() if now is None else float(now)
+    binding_matches = all(entry.get(key) == value for key, value in binding.items())
+    if (
+        mode != ACCESS_MODE_FULL
+        or not binding_matches
+        or not isinstance(expires_at, (int, float))
+        or isinstance(expires_at, bool)
+        or float(expires_at) <= current_time
+    ):
+        grants.pop(str(conversation_id), None)
+        return _controlled_permission_grant(conversation_id)
+    return dict(entry)
+
+
+def _set_conversation_permission_mode(
+    conversation_id: str,
+    mode: str,
+    *,
+    now: float | None = None,
+) -> None:
+    normalized = normalize_access_mode(mode)
+    grants = st.session_state.get("conversation_permission_grants")
+    if not isinstance(grants, dict):
+        grants = {}
+        st.session_state.conversation_permission_grants = grants
+    if normalized == ACCESS_MODE_CONTROLLED:
+        grants.pop(str(conversation_id), None)
+        return
+    binding = _trusted_permission_binding(conversation_id)
+    if binding is None or get_permission_store() is None:
+        raise RuntimeError("当前会话无法启用完全访问")
+    issued_at = time.time() if now is None else float(now)
+    grants[str(conversation_id)] = {
+        "mode": ACCESS_MODE_FULL,
+        **binding,
+        "issued_at": issued_at,
+        "expires_at": issued_at + _FULL_ACCESS_TTL_SECONDS,
+    }
+    while len(grants) > _MAX_PERMISSION_GRANTS:
+        grants.pop(next(iter(grants)))
+
+
+def _pending_permission_grant(
+    pending_request: Mapping[str, object],
+    conversation_id: str | None,
+    *,
+    now: float | None = None,
+) -> dict[str, object]:
+    binding = _trusted_permission_binding(conversation_id)
+    grant = pending_request.get("permission_grant")
+    if binding is None or not isinstance(grant, Mapping):
+        return _controlled_permission_grant(conversation_id)
+    mode = normalize_access_mode(grant.get("mode"))
+    if mode != ACCESS_MODE_FULL:
+        return _controlled_permission_grant(conversation_id)
+    expires_at = grant.get("expires_at")
+    current_time = time.time() if now is None else float(now)
+    if (
+        not all(grant.get(key) == value for key, value in binding.items())
+        or not isinstance(expires_at, (int, float))
+        or isinstance(expires_at, bool)
+        or float(expires_at) <= current_time
+    ):
+        return _controlled_permission_grant(conversation_id)
+    return dict(grant)
+
+
+@st.dialog(
+    "启用完全访问",
+    width="small",
+    dismissible=True,
+    icon=":material/admin_panel_settings:",
+)
+def _confirm_full_access_dialog(conversation_id: str) -> None:
+    st.warning("完全访问会预授权当前会话中的受信任低/中风险操作。")
+    st.markdown("外发、删除、命令执行、高风险、管理员操作和未知插件仍会逐项确认。")
+    acknowledged = st.checkbox(
+        "我了解该授权仅限当前会话，并会在 1 小时后失效。",
+        key=f"ack_full_access_{conversation_id}",
+    )
+    confirm_col, cancel_col = st.columns(2)
+    with confirm_col:
+        if st.button(
+            "确认启用",
+            key=f"confirm_full_access_{conversation_id}",
+            type="primary",
+            disabled=not acknowledged,
+            width="stretch",
+        ):
+            try:
+                _set_conversation_permission_mode(
+                    conversation_id,
+                    ACCESS_MODE_FULL,
+                )
+            except Exception as error:
+                render_error_callback(
+                    build_error_info(
+                        error,
+                        context={"operation": "permission_mode_upgrade"},
+                    ),
+                    key="permission_mode_upgrade_error",
+                    retry=False,
+                )
+                return
+            st.rerun()
+    with cancel_col:
+        if st.button(
+            "取消",
+            key=f"cancel_full_access_{conversation_id}",
+            width="stretch",
+        ):
+            st.rerun()
+
+
+def _render_chat_access_control(
+    conversation_id: str | None,
+    *,
+    mode_change_disabled: bool,
+) -> str:
+    grant = _conversation_permission_grant(conversation_id)
+    mode = normalize_access_mode(grant.get("mode"))
+    label = "完全访问" if mode == ACCESS_MODE_FULL else "按需确认"
+    with st.popover(
+        label,
+        key="chat_access_popover",
+        icon=":material/admin_panel_settings:",
+        type="tertiary",
+        help="设置当前会话的工具访问权限",
+        width="content",
+    ):
+        description = (
+            "受信任的低/中风险操作可直接执行；高风险操作仍需确认。"
+            if mode == ACCESS_MODE_FULL
+            else "读取操作直接执行；修改、外发和高风险操作先确认。"
+        )
+        st.markdown(
+            '<span class="pm-access-panel-anchor" aria-hidden="true"></span>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="pm-access-panel-copy">'
+            '<div class="pm-access-panel-title">工具访问</div>'
+            f'<div class="pm-access-panel-description">{description}</div>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        if mode == ACCESS_MODE_FULL:
+            if st.button(
+                "切换为按需确认",
+                key="use_controlled_access",
+                icon=":material/verified_user:",
+                disabled=mode_change_disabled,
+                width="stretch",
+            ):
+                _set_conversation_permission_mode(
+                    str(conversation_id),
+                    ACCESS_MODE_CONTROLLED,
+                )
+                st.rerun()
+        else:
+            full_access_available = bool(
+                conversation_id
+                and get_permission_store() is not None
+                and _trusted_permission_binding(conversation_id) is not None
+            )
+            if st.button(
+                "启用完全访问",
+                key="request_full_access",
+                icon=":material/shield:",
+                disabled=mode_change_disabled or not full_access_available,
+                width="stretch",
+            ):
+                _confirm_full_access_dialog(str(conversation_id))
+            if not full_access_available:
+                st.caption("权限服务未就绪，无法提升访问级别。")
+        st.markdown(
+            '<div class="pm-access-panel-footnote">'
+            "已有待确认请求不会因模式切换自动执行。"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    return mode
 
 
 def _compact_legacy_assistant_copy(content: str) -> str:
@@ -86,6 +373,233 @@ def _compact_legacy_assistant_copy(content: str) -> str:
         text,
         count=1,
     )
+
+
+def _turn_progress_context(prompt: str, model_id: str, *, local_fast: bool):
+    """Show meaningful turn status without adding motion to the chat history."""
+    if local_fast:
+        return nullcontext()
+
+    label = chat_processing_label(prompt, model_id)
+    # Streamlit's status container communicates an ongoing operation and its
+    # terminal state. Keep the spinner fallback for older Streamlit builds.
+    status_factory = getattr(st, "status", None)
+    if callable(status_factory):
+        try:
+            return status_factory(label, expanded=False, type="compact")
+        except TypeError:
+            return status_factory(label, expanded=False)
+    return st.spinner(label)
+
+
+def _voice_provider_label(provider: object) -> str:
+    return {
+        "cartesia": "Cartesia",
+        "minimax": "MiniMax",
+        "local": "本地语音",
+    }.get(str(provider or "").strip().casefold(), "")
+
+
+def _set_voice_callback(
+    state: str,
+    conversation_id: str | None,
+    *,
+    turn_id: str | None = None,
+    provider: object = None,
+    detail: str = "",
+    now: float | None = None,
+) -> dict[str, object] | None:
+    if state not in _VOICE_CALLBACK_STATES:
+        raise ValueError(f"unsupported voice callback state: {state}")
+    conversation_id = str(conversation_id or "").strip()
+    if not conversation_id:
+        return None
+    callback = {
+        "state": state,
+        "conversation_id": conversation_id,
+        "turn_id": str(turn_id or "").strip(),
+        "provider": str(provider or "").strip().casefold(),
+        "detail": str(detail or "").strip()[:160],
+        "updated_at": time.time() if now is None else float(now),
+    }
+    st.session_state.voice_callback = callback
+    return callback
+
+
+def _clear_voice_callback(conversation_id: str | None = None) -> None:
+    callback = st.session_state.get("voice_callback")
+    if not isinstance(callback, Mapping):
+        st.session_state.pop("voice_callback", None)
+        return
+    if conversation_id and callback.get("conversation_id") != conversation_id:
+        return
+    st.session_state.pop("voice_callback", None)
+
+
+def _voice_callback_for(
+    conversation_id: str | None,
+    *,
+    now: float | None = None,
+) -> dict[str, object] | None:
+    callback = st.session_state.get("voice_callback")
+    if not isinstance(callback, Mapping):
+        return None
+    if not conversation_id or callback.get("conversation_id") != conversation_id:
+        return None
+    state = str(callback.get("state") or "")
+    definition = _VOICE_CALLBACK_STATES.get(state)
+    if definition is None:
+        _clear_voice_callback(conversation_id)
+        return None
+    try:
+        age = (time.time() if now is None else float(now)) - float(
+            callback.get("updated_at", 0)
+        )
+    except (TypeError, ValueError):
+        _clear_voice_callback(conversation_id)
+        return None
+    ttl = (
+        _VOICE_CALLBACK_TERMINAL_TTL_SECONDS
+        if definition["terminal"]
+        else _VOICE_CALLBACK_ACTIVE_TTL_SECONDS
+    )
+    if age < 0 or age > ttl:
+        _clear_voice_callback(conversation_id)
+        return None
+    return dict(callback)
+
+
+def _render_voice_callback(
+    conversation_id: str | None,
+    *,
+    target=None,
+) -> None:
+    callback = _voice_callback_for(conversation_id)
+    target = target or st
+    if callback is None:
+        empty = getattr(target, "empty", None)
+        if callable(empty):
+            empty()
+        return
+    definition = _VOICE_CALLBACK_STATES[str(callback["state"])]
+    detail = str(callback.get("detail") or "").strip()
+    provider = _voice_provider_label(callback.get("provider"))
+    secondary = " · ".join(part for part in (provider, detail) if part)
+    target.markdown(
+        (
+            f'<div class="pm-voice-callback pm-voice-callback--{definition["tone"]}" '
+            'role="status" aria-live="polite" aria-atomic="true">'
+            f'<span class="material-symbols-rounded pm-voice-callback-icon" '
+            f'aria-hidden="true">{escape(str(definition["icon"]))}</span>'
+            '<span class="pm-voice-callback-copy">'
+            f'<span class="pm-voice-callback-label">{escape(str(definition["label"]))}</span>'
+            + (
+                f'<span class="pm-voice-callback-detail">{escape(secondary)}</span>'
+                if secondary
+                else ""
+            )
+            + "</span></div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _voice_audio_service() -> VoiceAudioService:
+    service = st.session_state.get("voice_audio_service")
+    if not isinstance(service, VoiceAudioService):
+        service = VoiceAudioService()
+        st.session_state.voice_audio_service = service
+    return service
+
+
+def _voice_recording_ready() -> bool:
+    """Expose the microphone only when recording can complete successfully."""
+
+    try:
+        status = _voice_audio_service().status()
+    except (VoiceError, OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return isinstance(status, Mapping) and bool(status.get("recording_ready"))
+
+
+def _recording_bytes(recording) -> bytes:
+    if recording is None:
+        return b""
+    getvalue = getattr(recording, "getvalue", None)
+    if callable(getvalue):
+        return bytes(getvalue())
+    read = getattr(recording, "read", None)
+    if callable(read):
+        seek = getattr(recording, "seek", None)
+        if callable(seek):
+            seek(0)
+        return bytes(read())
+    raise TypeError("Recorded audio must be a file-like object")
+
+
+def _voice_error_info(error: Exception) -> dict[str, object]:
+    message = str(error).casefold()
+    if "not enabled" in message:
+        title = "语音输入尚未启用，文字对话仍可正常使用。"
+        suggestions = ["启用语音配置后重启服务", "继续输入文字"]
+    elif "not configured" in message or "required" in message:
+        title = "语音服务尚未配置完成，文字对话仍可正常使用。"
+        suggestions = ["检查 Cartesia 语音配置", "继续输入文字"]
+    elif "no speech" in message or "too short" in message:
+        title = "没有识别到清晰语音，请靠近麦克风后重试。"
+        suggestions = ["重新录音", "改用文字输入"]
+    else:
+        title = "语音处理暂时不可用，已保留文字对话入口。"
+        suggestions = ["稍后重新录音", "改用文字输入"]
+    return {
+        "message": title,
+        "suggestions": suggestions,
+        "severity": "warning",
+        "error_id": f"voice-{uuid4().hex[:8]}",
+    }
+
+
+def _cache_voice_reply(turn_id: str, response: str) -> str | None:
+    try:
+        audio = _voice_audio_service().synthesize(response)
+    except VoiceError as error:
+        logger.info("语音回复降级为文字: %s", type(error).__name__)
+        st.toast("语音播放暂时不可用，已保留文字回答。", icon=":material/volume_off:")
+        return None
+    cache = st.session_state.setdefault("voice_reply_audio", {})
+    if not isinstance(cache, dict):
+        cache = {}
+        st.session_state.voice_reply_audio = cache
+    cache[str(turn_id)] = {
+        "data": audio.data,
+        "mime_type": audio.mime_type,
+        "sample_rate": audio.sample_rate,
+        "provider": audio.provider,
+        "played": False,
+    }
+    while len(cache) > 8:
+        cache.pop(next(iter(cache)))
+    return audio.provider
+
+
+def _render_voice_reply(message: Mapping, fallback_key: object) -> None:
+    turn_id = str(message.get("turn_id") or fallback_key)
+    cache = st.session_state.get("voice_reply_audio")
+    if not isinstance(cache, dict):
+        return
+    audio = cache.get(turn_id)
+    if not isinstance(audio, dict) or not audio.get("data"):
+        return
+    autoplay = not bool(audio.get("played"))
+    st.audio(
+        audio["data"],
+        format=str(audio.get("mime_type") or "audio/wav"),
+        sample_rate=audio.get("sample_rate"),
+        autoplay=autoplay,
+        width="stretch",
+    )
+    audio["played"] = True
+
 
 def chat_page():
     """对话页面"""
@@ -117,7 +631,9 @@ def chat_page():
 
             with title_col:
                 conversation_title = (
-                    active_conversation["title"] if active_conversation else "ArtPM 助手"
+                    active_conversation["title"]
+                    if active_conversation
+                    else "ArtPM 助手"
                 )
                 st.title(conversation_title)
 
@@ -192,13 +708,31 @@ def chat_page():
                     unsafe_allow_html=True,
                 )
                 if msg.get("status") == "error":
-                    st.error(content)
-                    retry_prompt = msg.get("retry_prompt") or metadata.get("retry_prompt")
+                    # Rendered below through the structured error callback.
+                    retry_prompt = msg.get("retry_prompt") or metadata.get(
+                        "retry_prompt"
+                    )
+                    invalid_attachments = bool(metadata.get("invalid_attachments"))
                     message_id = msg.get("id", index)
-                    if retry_prompt and st.button(
-                        "重新生成",
-                        key=f"retry_{active_id or 'legacy'}_{message_id}",
-                    ):
+                    error_info = metadata.get("error_info")
+                    if not isinstance(error_info, dict):
+                        error_info = {
+                            "message": str(content).split("\n", 1)[0],
+                            "suggestions": [
+                                "点击重试；如果问题持续，请检查模型连接和配置。"
+                            ],
+                            "severity": "error",
+                            "error_id": "legacy",
+                        }
+                    retry_action = render_error_callback(
+                        error_info,
+                        key=f"error_callback_{active_id or 'legacy'}_{message_id}",
+                        retry=bool(retry_prompt),
+                        retry_label=(
+                            "移除附件并重试" if invalid_attachments else "重试"
+                        ),
+                    )
+                    if retry_prompt and retry_action == "retry":
                         if store is not None and msg.get("id"):
                             store.delete_message(msg["id"])
                             user_message = next(
@@ -228,7 +762,14 @@ def chat_page():
                                 user_message.get("id") if user_message else None
                             ),
                             "turn_id": msg.get("turn_id", uuid4().hex),
-                            "attachments": metadata.get("attachments", []),
+                            "attachments": (
+                                []
+                                if invalid_attachments
+                                else metadata.get("attachments", [])
+                            ),
+                            "permission_grant": _conversation_permission_grant(
+                                active_id
+                            ),
                         }
                         st.rerun()
                 else:
@@ -246,10 +787,12 @@ def chat_page():
                             metadata,
                             msg.get("id", index),
                         )
+                        _render_voice_reply(msg, index)
                         # Phase 1 (加深): 每条成功的助手消息下方提供
                         # 👍/👎 反馈控件，让 Agent 即时「记住」用户偏好。
                         _render_turn_feedback(msg, index, active_id)
 
+        _render_permission_approvals(active_id)
         _render_profile_approvals(active_id)
         _render_knowledge_ingestion_approvals(active_id)
         _render_knowledge_approvals(active_id)
@@ -257,7 +800,9 @@ def chat_page():
 
         if pending_request:
             prompt = pending_request["prompt"]
-            request_conversation_id = pending_request.get("conversation_id") or active_id
+            request_conversation_id = (
+                pending_request.get("conversation_id") or active_id
+            )
             if active_id and request_conversation_id != active_id:
                 st.warning("该提问所属会话已切换，已忽略上一条待处理消息。")
                 st.session_state.pop("pending_prompt", None)
@@ -278,13 +823,19 @@ def chat_page():
                         )
                         local_fast = not attachments and is_local_fast_intent(prompt)
                         history = []
-                        if not local_fast and store is not None and request_conversation_id:
+                        if (
+                            not local_fast
+                            and store is not None
+                            and request_conversation_id
+                        ):
                             max_messages, max_chars = _history_limits(agent)
                             history = store.build_context(
                                 request_conversation_id,
                                 max_messages=max_messages,
                                 max_chars=max_chars,
-                                before_message_id=pending_request.get("user_message_id"),
+                                before_message_id=pending_request.get(
+                                    "user_message_id"
+                                ),
                             )
                         # ── 附件解析一次性契约 ──
                         # 这里是对话路径上唯一解析附件落盘路径的位置：把持久化的
@@ -301,12 +852,19 @@ def chat_page():
 
                         # 获取用户临时选择的模型（如果有）
                         user_selected_model = get_current_model()
+                        permission_grant = _pending_permission_grant(
+                            pending_request,
+                            request_conversation_id,
+                        )
 
                         agent_context = {
                             "conversation_id": request_conversation_id,
                             "turn_id": pending_request["turn_id"],
-                            "workspace_id": getattr(
-                                ConversationStore, "DEFAULT_WORKSPACE_ID", "local-default"
+                            "workspace_id": st.session_state.get(
+                                "tenant_context", TenantContext.local()
+                            ).workspace_id,
+                            "tenant_context": st.session_state.get(
+                                "tenant_context", TenantContext.local()
                             ),
                             "conversation_history": history,
                             "attachments": attachments,
@@ -317,21 +875,35 @@ def chat_page():
                                 "" if local_fast else build_knowledge_context(prompt)
                             ),
                             # 用户临时选择的模型（如果有）
-                            "preferred_model": user_selected_model if user_selected_model else None,
+                            "permission_store": get_permission_store(),
+                            "permission_mode": normalize_access_mode(
+                                permission_grant.get("mode")
+                            ),
+                            "agent_id": "artpm-agent",
+                            "preferred_model": user_selected_model
+                            if user_selected_model
+                            else None,
                         }
                         workflow_metadata = {}
                         awaiting_approval = False
                         response_rendered = False
                         turn_error = False
-                        progress_context = (
-                            nullcontext()
-                            if local_fast
-                            else st.spinner(
-                                chat_processing_label(
-                                    prompt,
-                                    _current_model_id(agent),
-                                )
+                        if pending_request.get("voice_input"):
+                            voice_metadata = pending_request.get("voice")
+                            _set_voice_callback(
+                                "thinking",
+                                request_conversation_id,
+                                turn_id=pending_request["turn_id"],
+                                provider=(
+                                    voice_metadata.get("provider")
+                                    if isinstance(voice_metadata, Mapping)
+                                    else None
+                                ),
                             )
+                        progress_context = _turn_progress_context(
+                            prompt,
+                            _current_model_id(agent),
+                            local_fast=local_fast,
                         )
                         with progress_context:
                             harness_result = None
@@ -344,15 +916,38 @@ def chat_page():
                                     agent.chat(prompt, context=agent_context)
                                 )
                             else:
+
                                 def respond_from_public_agent_api(_turn_ctx):
-                                    if not attachments and callable(
-                                        getattr(agent, "stream_chat", None)
-                                    ):
+                                    # ``run_turn`` enriches the context before the
+                                    # response handler runs (workspace RAG,
+                                    # preferences, reflection strategies and
+                                    # meta-memory).  Build the public API context
+                                    # from that enriched snapshot; reusing the
+                                    # pre-harness closure here silently discarded
+                                    # every block injected by Step 0.
+                                    response_context = {
+                                        **agent_context,
+                                        **(
+                                            _turn_ctx.extra
+                                            if isinstance(_turn_ctx.extra, dict)
+                                            else {}
+                                        ),
+                                        "conversation_id": _turn_ctx.conversation_id,
+                                        "turn_id": _turn_ctx.turn_id,
+                                        "conversation_history": (
+                                            _turn_ctx.conversation_history
+                                        ),
+                                        "agent_profile": _turn_ctx.agent_profile,
+                                        "knowledge_context": (
+                                            _turn_ctx.knowledge_context
+                                        ),
+                                    }
+                                    if callable(getattr(agent, "stream_chat", None)):
                                         return (
                                             stream_agent_response(
                                                 agent,
                                                 prompt,
-                                                agent_context,
+                                                response_context,
                                             ),
                                             True,
                                         )
@@ -360,30 +955,33 @@ def chat_page():
                                         normalize_agent_response(
                                             agent.chat(
                                                 prompt,
-                                                context=agent_context,
+                                                context=response_context,
                                             )
                                         ),
                                         False,
                                     )
 
                                 # Use harness for unified turn execution
-                                response, awaiting_approval, harness_metadata, harness_result = (
-                                    execute_turn_with_harness(
-                                        agent,
-                                        prompt,
-                                        pending_request["turn_id"],
-                                        request_conversation_id,
-                                        agent_context,
-                                        attachments,
-                                        file_paths,
-                                        get_profile_store(),
-                                        get_knowledge_store(),
-                                        get_artifact_coordinator(),
-                                        knowledge_rule_extractor=extract_knowledge_rule,
-                                        workflow_coordinator=get_workflow_coordinator(),
-                                        workflow_formatter=format_workflow_result,
-                                        response_handler=respond_from_public_agent_api,
-                                    )
+                                (
+                                    response,
+                                    awaiting_approval,
+                                    harness_metadata,
+                                    harness_result,
+                                ) = execute_turn_with_harness(
+                                    agent,
+                                    prompt,
+                                    pending_request["turn_id"],
+                                    request_conversation_id,
+                                    agent_context,
+                                    attachments,
+                                    file_paths,
+                                    get_profile_store(),
+                                    get_knowledge_store(),
+                                    get_artifact_coordinator(),
+                                    knowledge_rule_extractor=extract_knowledge_rule,
+                                    workflow_coordinator=get_workflow_coordinator(),
+                                    workflow_formatter=format_workflow_result,
+                                    response_handler=respond_from_public_agent_api,
                                 )
                                 # Merge harness metadata into workflow_metadata
                                 workflow_metadata.update(harness_metadata)
@@ -401,6 +999,52 @@ def chat_page():
                             workflow_metadata,
                             pending_request["turn_id"],
                         )
+                        if pending_request.get("voice_input"):
+                            turn_succeeded = not (
+                                harness_result is not None
+                                and not getattr(harness_result, "success", True)
+                            )
+                            if awaiting_approval:
+                                _set_voice_callback(
+                                    "approval",
+                                    request_conversation_id,
+                                    turn_id=pending_request["turn_id"],
+                                    detail="请在上方确认后继续",
+                                )
+                            elif response and turn_succeeded:
+                                _set_voice_callback(
+                                    "synthesizing",
+                                    request_conversation_id,
+                                    turn_id=pending_request["turn_id"],
+                                )
+                                voice_provider = _cache_voice_reply(
+                                    pending_request["turn_id"],
+                                    response,
+                                )
+                                if voice_provider:
+                                    workflow_metadata["voice_output_provider"] = (
+                                        voice_provider
+                                    )
+                                    _set_voice_callback(
+                                        "playing",
+                                        request_conversation_id,
+                                        turn_id=pending_request["turn_id"],
+                                        provider=voice_provider,
+                                    )
+                                else:
+                                    _set_voice_callback(
+                                        "fallback",
+                                        request_conversation_id,
+                                        turn_id=pending_request["turn_id"],
+                                        detail="文字回复已保留",
+                                    )
+                            else:
+                                _set_voice_callback(
+                                    "error",
+                                    request_conversation_id,
+                                    turn_id=pending_request["turn_id"],
+                                    detail="请查看上方提示",
+                                )
                         if (
                             store is not None
                             and request_conversation_id
@@ -422,54 +1066,108 @@ def chat_page():
                                 status="error" if is_error else "complete",
                                 metadata={
                                     **workflow_metadata,
-                                    **(
-                                        {"retry_prompt": prompt}
-                                        if is_error
-                                        else {}
-                                    ),
+                                    **({"retry_prompt": prompt} if is_error else {}),
                                 },
                             )
                             load_active_messages()
                         elif store is None and not awaiting_approval:
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "content": response,
-                                "time": format_cn_date(datetime.now(), include_time=True),
-                            })
+                            st.session_state.messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": response,
+                                    "time": format_cn_date(
+                                        datetime.now(), include_time=True
+                                    ),
+                                }
+                            )
                     except Exception as error:
                         logger.exception("对话处理失败")
+                        if pending_request.get("voice_input"):
+                            _set_voice_callback(
+                                "error",
+                                request_conversation_id,
+                                turn_id=pending_request["turn_id"],
+                                detail="文字错误提示已保留",
+                            )
                         error_message = _chat_error_message(
                             error,
                             _current_model_id(agent),
                         )
-                        st.error(error_message)
-                        if store is not None and request_conversation_id:
-                            store.add_message(
-                                request_conversation_id,
-                                "assistant",
-                                error_message,
-                                status="error",
-                                turn_id=pending_request["turn_id"],
-                                model_id=_current_model_id(agent),
-                                metadata={
-                                    "retry_prompt": prompt,
-                                    "attachments": attachments,
-                                },
+                        invalid_attachments = isinstance(error, FileNotFoundError)
+                        error_info = (
+                            build_attachment_error_info(error)
+                            if invalid_attachments
+                            else build_error_info(
+                                error,
+                                context={"model_id": _current_model_id(agent)},
                             )
-                            load_active_messages()
+                        )
+                        if not invalid_attachments:
+                            error_info["message"] = str(error_message).split("\n", 1)[0]
+                        error_metadata = {
+                            "retry_prompt": prompt,
+                            "attachments": attachments,
+                            "error_info": error_info,
+                            "invalid_attachments": invalid_attachments,
+                        }
+                        if store is not None and request_conversation_id:
+                            try:
+                                store.add_message(
+                                    request_conversation_id,
+                                    "assistant",
+                                    error_message,
+                                    status="error",
+                                    turn_id=pending_request["turn_id"],
+                                    model_id=_current_model_id(agent),
+                                    metadata=error_metadata,
+                                )
+                                load_active_messages()
+                            except Exception as persist_error:  # noqa: BLE001
+                                logger.exception(
+                                    "Failed to persist chat error",
+                                    exc_info=persist_error,
+                                )
+                                st.session_state.messages.append(
+                                    {
+                                        "role": "assistant",
+                                        "content": error_message,
+                                        "time": format_cn_date(
+                                            datetime.now(), include_time=True
+                                        ),
+                                        "status": "error",
+                                        "retry_prompt": prompt,
+                                        "metadata": {
+                                            **error_metadata,
+                                            "persistence_failed": True,
+                                        },
+                                    }
+                                )
                         else:
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "content": error_message,
-                                "time": format_cn_date(datetime.now(), include_time=True),
-                                "status": "error",
-                                "retry_prompt": prompt,
-                                "metadata": {"attachments": attachments},
-                            })
+                            st.session_state.messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": error_message,
+                                    "time": format_cn_date(
+                                        datetime.now(), include_time=True
+                                    ),
+                                    "status": "error",
+                                    "retry_prompt": prompt,
+                                    "metadata": error_metadata,
+                                }
+                            )
             else:
                 error_message = "Agent 未初始化，请检查设置中的模型配置并重启服务。"
                 with st.chat_message("assistant", avatar=":material/neurology:"):
-                    st.error(error_message)
+                    render_error_callback(
+                        {
+                            "message": error_message,
+                            "suggestions": ["检查模型配置", "保存设置后刷新页面"],
+                            "severity": "error",
+                            "error_id": "agent-not-initialized",
+                        },
+                        key=f"agent_not_initialized_{pending_request['turn_id']}",
+                        retry=False,
+                    )
                 if store is not None and request_conversation_id:
                     store.add_message(
                         request_conversation_id,
@@ -484,74 +1182,202 @@ def chat_page():
                     )
                     load_active_messages()
                 else:
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": error_message,
-                        "time": format_cn_date(datetime.now(), include_time=True),
-                        "status": "error",
-                        "retry_prompt": prompt,
-                        "metadata": {
-                            "attachments": pending_request.get("attachments", [])
-                        },
-                    })
+                    st.session_state.messages.append(
+                        {
+                            "role": "assistant",
+                            "content": error_message,
+                            "time": format_cn_date(datetime.now(), include_time=True),
+                            "status": "error",
+                            "retry_prompt": prompt,
+                            "metadata": {
+                                "attachments": pending_request.get("attachments", [])
+                            },
+                        }
+                    )
             st.session_state.pop("pending_prompt", None)
             st.rerun()
 
-    user_submission = st.chat_input(
-        "输入消息或添加附件",
-        key="chat_input",
-        max_chars=4000,
-        accept_file="multiple",
-        file_type=[
-            "xlsx",
-            "xls",
-            "csv",
-            "json",
-            "txt",
-            "md",
-            "pdf",
-            "docx",
-            "png",
-            "jpg",
-            "jpeg",
-            "webp",
-        ],
-        disabled=not AVAILABLE or bool(pending_request),
-    )
+    agent_ready = AVAILABLE and st.session_state.get("agent") is not None
+    permission_pending = has_pending_permission_requests(active_id)
+    voice_input_enabled = _voice_recording_ready()
+    with st.bottom:
+        with st.container(key="chat_composer_shell"):
+            _render_chat_access_control(
+                active_id,
+                mode_change_disabled=bool(pending_request) or permission_pending,
+            )
+            user_submission = st.chat_input(
+                (
+                    "请先处理上方权限请求（允许一次或拒绝）"
+                    if permission_pending
+                    else "输入消息或添加附件"
+                ),
+                key="chat_input",
+                max_chars=4000,
+                max_upload_size=DEFAULT_MAX_FILE_SIZE // (1024 * 1024),
+                accept_file="multiple",
+                accept_audio=voice_input_enabled,
+                audio_sample_rate=16000,
+                file_type=sorted(
+                    {
+                        "xlsx",
+                        "xls",
+                        "csv",
+                        "json",
+                        "txt",
+                        "md",
+                        "pdf",
+                        "docx",
+                        "png",
+                        "jpg",
+                        "jpeg",
+                        "webp",
+                    }
+                    | {suffix.lstrip(".") for suffix in MINERU_SUPPORTED_SUFFIXES}
+                ),
+                disabled=(
+                    not agent_ready or bool(pending_request) or permission_pending
+                ),
+                height=96,
+            )
+            prompt_text, uploaded_files = normalize_chat_submission(user_submission)
+            recorded_audio = chat_submission_audio(user_submission)
+            voice_input = recorded_audio is not None
+            if voice_input:
+                _set_voice_callback(
+                    "transcribing",
+                    active_id,
+                    detail="正在处理刚才的录音",
+                )
+            elif prompt_text or uploaded_files:
+                _clear_voice_callback(active_id)
+            with st.container(key="chat_voice_callback"):
+                voice_callback_slot = st.empty()
+            _render_voice_callback(active_id, target=voice_callback_slot)
 
-    prompt_text, uploaded_files = normalize_chat_submission(user_submission)
+    if voice_input:
+        try:
+            status_factory = getattr(st, "status", None)
+            if callable(status_factory):
+                try:
+                    progress = status_factory(
+                        "正在转写语音", expanded=False, type="compact"
+                    )
+                except TypeError:
+                    progress = status_factory("正在转写语音", expanded=False)
+            else:
+                progress = st.spinner("正在转写语音")
+            with progress:
+                transcript = _voice_audio_service().transcribe_wav(
+                    _recording_bytes(recorded_audio)
+                )
+            prompt_text = " ".join(
+                part for part in (prompt_text, transcript.text) if part
+            ).strip()
+            st.session_state.last_voice_transcript = {
+                "provider": transcript.provider,
+                "language": transcript.language,
+            }
+            _set_voice_callback(
+                "thinking",
+                active_id,
+                provider=transcript.provider,
+            )
+            _render_voice_callback(active_id, target=voice_callback_slot)
+        except (VoiceError, OSError, TypeError, ValueError) as error:
+            _set_voice_callback(
+                "error",
+                active_id,
+                detail="请查看语音错误提示",
+            )
+            _render_voice_callback(active_id, target=voice_callback_slot)
+            error_info = _voice_error_info(error)
+            render_error_callback(
+                error_info,
+                key=f"voice_input_error_{error_info['error_id']}",
+                retry=False,
+            )
+            return
     if prompt_text or uploaded_files:
         attachments = []
+        attachment_store = None
         if uploaded_files:
             attachment_store = get_chat_attachment_store()
             if attachment_store is None or not active_id:
-                st.error("附件存储未就绪，请刷新页面后重试。")
+                error_id = f"attachment-store-{uuid4().hex[:8]}"
+                render_error_callback(
+                    {
+                        "message": "附件存储未就绪，请刷新页面后重试。",
+                        "suggestions": ["刷新页面后重试", "确认当前会话仍然有效"],
+                        "severity": "error",
+                        "error_id": error_id,
+                    },
+                    key=f"attachment_store_unavailable_{error_id}",
+                    retry=False,
+                )
                 return
             try:
                 attachments = attachment_store.save_files(active_id, uploaded_files)
             except (OSError, TypeError, ValueError) as error:
                 logger.warning("保存会话附件失败: %s", error)
-                st.error(f"附件未能保存：{error}")
+                error_info = build_attachment_error_info(
+                    error,
+                    max_files=attachment_store.max_files,
+                    max_file_size_mb=attachment_store.max_file_size // (1024 * 1024),
+                    max_total_size_mb=attachment_store.max_total_size // (1024 * 1024),
+                )
+                render_error_callback(
+                    error_info,
+                    key=(f"attachment_save_error_{active_id}_{error_info['error_id']}"),
+                    retry=False,
+                )
                 return
 
         prompt = prompt_text or "请分析这些附件，并给出关键结论和下一步建议。"
         turn_id = uuid4().hex
         message_metadata = {"attachments": attachments} if attachments else {}
-        if store is not None and active_id:
-            user_message = store.add_message(
-                active_id,
-                "user",
-                prompt,
-                turn_id=turn_id,
-                metadata=message_metadata,
+        if voice_input:
+            voice_metadata = st.session_state.pop("last_voice_transcript", {})
+            message_metadata.update(
+                {
+                    "input_mode": "voice",
+                    "voice": voice_metadata,
+                }
             )
-            if (
-                active_conversation
-                and active_conversation["title"]
-                == getattr(ConversationStore, "DEFAULT_TITLE", "新对话")
+        if store is not None and active_id:
+            try:
+                user_message = store.add_message(
+                    active_id,
+                    "user",
+                    prompt,
+                    turn_id=turn_id,
+                    metadata=message_metadata,
+                )
+            except Exception as error:  # noqa: BLE001 - compensate saved files
+                logger.exception("保存用户消息失败")
+                if attachment_store is not None and attachments:
+                    try:
+                        attachment_store.remove_files(attachments)
+                    except Exception:  # noqa: BLE001 - original failure wins
+                        logger.exception("回滚未绑定的会话附件失败")
+                error_info = build_error_info(
+                    error,
+                    context={"operation": "message_persistence"},
+                )
+                render_error_callback(
+                    error_info,
+                    key=f"message_save_error_{active_id}_{error_info['error_id']}",
+                    retry=False,
+                )
+                return
+            if active_conversation and active_conversation["title"] == getattr(
+                ConversationStore, "DEFAULT_TITLE", "新对话"
             ):
                 new_title = _conversation_title_from_prompt(prompt)
-                store.rename_conversation(active_id, new_title)
+                try:
+                    store.rename_conversation(active_id, new_title)
+                except Exception:  # noqa: BLE001 - message itself is already durable
+                    logger.exception("自动更新会话标题失败")
             load_active_messages()
         else:
             user_message = {
@@ -568,11 +1394,34 @@ def chat_page():
             "user_message_id": user_message.get("id"),
             "turn_id": turn_id,
             "attachments": attachments,
+            "voice_input": voice_input,
+            "voice": voice_metadata if voice_input else {},
+            "permission_grant": _conversation_permission_grant(active_id),
         }
         st.rerun()
 
     if not AVAILABLE:
-        st.error("Agent 模块加载失败，请查看服务日志并修复依赖后重试。")
+        render_error_callback(
+            {
+                "message": "Agent 模块加载失败，请查看服务日志并修复依赖后重试。",
+                "suggestions": ["检查依赖安装", "查看服务日志后重启项目"],
+                "severity": "error",
+                "error_id": "agent-module-unavailable",
+            },
+            key="agent_module_unavailable",
+            retry=False,
+        )
+    elif not agent_ready:
+        render_error_callback(
+            {
+                "message": "Agent 尚未就绪，请检查模型配置后刷新页面。",
+                "suggestions": ["检查模型配置", "保存配置后刷新页面"],
+                "severity": "warning",
+                "error_id": "agent-not-ready",
+            },
+            key="agent_not_ready",
+            retry=False,
+        )
 
 
 def _preceding_user_prompt(index: int) -> str:
@@ -583,6 +1432,10 @@ def _preceding_user_prompt(index: int) -> str:
         if m and m.get("role") == "user":
             return str(m.get("content") or m.get("text") or "")
     return ""
+
+
+def _feedback_was_saved(result) -> bool:
+    return isinstance(result, dict) and bool(result.get("feedback_id"))
 
 
 def _render_turn_feedback(msg: dict, index: int, active_id) -> None:
@@ -607,18 +1460,21 @@ def _render_turn_feedback(msg: dict, index: int, active_id) -> None:
 
     user_prompt = _preceding_user_prompt(index)
 
-    up_col, down_col = st.columns([0.1, 0.1])
+    up_col, down_col, _ = st.columns([1, 1, 8], gap="small")
     with up_col:
         if st.button("👍", key=f"fb_up_{message_id}", help="这个回答有帮助"):
-            record_turn_feedback(
+            feedback_result = record_turn_feedback(
                 turn_id,
                 True,
                 user_prompt=user_prompt,
                 assistant_content=str(msg.get("content", "")),
             )
-            st.session_state.setdefault("feedback_given", {})[message_id] = "up"
-            st.toast("👍 已记录，我会延续这个方向")
-            st.rerun()
+            if _feedback_was_saved(feedback_result):
+                st.session_state.setdefault("feedback_given", {})[message_id] = "up"
+                st.toast("👍 已记录，我会延续这个方向")
+                st.rerun()
+            else:
+                st.error("反馈未能保存，请稍后重试。")
     with down_col:
         if st.button("👎", key=f"fb_down_{message_id}", help="这个回答有问题"):
             st.session_state.setdefault("feedback_pending", {})[message_id] = True
@@ -657,7 +1513,7 @@ def _render_turn_feedback(msg: dict, index: int, active_id) -> None:
                     type="primary",
                     width="stretch",
                 ):
-                    record_turn_feedback(
+                    feedback_result = record_turn_feedback(
                         turn_id,
                         False,
                         user_prompt=user_prompt,
@@ -665,14 +1521,19 @@ def _render_turn_feedback(msg: dict, index: int, active_id) -> None:
                         correction=reason,
                         category=category,
                     )
-                    st.session_state.setdefault("feedback_given", {})[message_id] = "down"
-                    st.session_state.get("feedback_pending", {}).pop(message_id, None)
-                    st.toast("👎 已记录，下次我会注意")
-                    st.rerun()
+                    if _feedback_was_saved(feedback_result):
+                        st.session_state.setdefault("feedback_given", {})[
+                            message_id
+                        ] = "down"
+                        st.session_state.get("feedback_pending", {}).pop(
+                            message_id, None
+                        )
+                        st.toast("👎 已记录，下次我会注意")
+                        st.rerun()
+                    else:
+                        st.error("反馈未能保存，请稍后重试。")
             with c2:
-                if st.button(
-                    "取消", key=f"fb_cancel_{message_id}", width="stretch"
-                ):
+                if st.button("取消", key=f"fb_cancel_{message_id}", width="stretch"):
                     st.session_state.get("feedback_pending", {}).pop(message_id, None)
                     st.rerun()
 
@@ -700,7 +1561,9 @@ def _render_edit_mode():
         st.title("智能编辑")
         st.caption("上传 Excel 或 Word，用一句话修改，预览后生成新版本。")
     with head_right:
-        if st.button("退出", key="exit_edit_mode", icon=":material/close:", width="stretch"):
+        if st.button(
+            "退出", key="exit_edit_mode", icon=":material/close:", width="stretch"
+        ):
             st.session_state.edit_mode = False
             st.rerun()
 
@@ -711,9 +1574,10 @@ def _render_edit_mode():
         key="edit_uploader",
     )
     if uploaded is not None:
-        if st.session_state.get("edit_doc") is None or st.session_state.get(
-            "edit_uploaded_name"
-        ) != uploaded.name:
+        if (
+            st.session_state.get("edit_doc") is None
+            or st.session_state.get("edit_uploaded_name") != uploaded.name
+        ):
             suffix = Path(uploaded.name).suffix
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
             tmp.write(uploaded.getbuffer())
@@ -727,7 +1591,11 @@ def _render_edit_mode():
                 st.session_state.edit_sheet = st.session_state.edit_doc.active_sheet
                 st.rerun()
             except Exception as exc:  # noqa: BLE001
-                st.error(f"文件解析失败：{exc}")
+                render_error_callback(
+                    build_error_info(exc, context={"operation": "document_parse"}),
+                    key="document_parse_error",
+                    retry=False,
+                )
 
     doc = st.session_state.get("edit_doc")
     if doc is None:
@@ -742,7 +1610,10 @@ def _render_edit_mode():
         sheets = doc.sheet_names()
         if len(sheets) > 1:
             st.session_state.edit_sheet = st.selectbox(
-                "工作表", sheets, index=sheets.index(doc.active_sheet), key="edit_sheet_sel"
+                "工作表",
+                sheets,
+                index=sheets.index(doc.active_sheet),
+                key="edit_sheet_sel",
             )
             doc.active_sheet = st.session_state.edit_sheet
         df = doc.active_df
@@ -786,19 +1657,29 @@ def _render_edit_mode():
             if instruction.strip():
                 st.session_state.edit_undo_stack.append(copy.deepcopy(doc))
                 result = run_edit_instruction(
-                    doc, instruction, feedback_store=feedback_store,
-                    llm_callable=llm_callable, rule_store=distiller,
+                    doc,
+                    instruction,
+                    feedback_store=feedback_store,
+                    llm_callable=llm_callable,
+                    rule_store=distiller,
                 )
                 st.session_state.edit_last_result = result
                 if result["errors"]:
                     st.error("；".join(result["errors"]))
                 elif not result["ops"]:
-                    st.warning(result["warnings"][0] if result["warnings"] else "未理解指令")
+                    st.warning(
+                        result["warnings"][0] if result["warnings"] else "未理解指令"
+                    )
                 st.rerun()
             else:
                 st.warning("请输入指令")
     with undo_col:
-        if st.button("撤销", key="edit_undo", width="stretch", disabled=not st.session_state.get("edit_undo_stack")):
+        if st.button(
+            "撤销",
+            key="edit_undo",
+            width="stretch",
+            disabled=not st.session_state.get("edit_undo_stack"),
+        ):
             if st.session_state.edit_undo_stack:
                 st.session_state.edit_doc = st.session_state.edit_undo_stack.pop()
                 st.session_state.edit_last_result = None
@@ -816,7 +1697,10 @@ def _render_edit_mode():
                         else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     )
                     out = gen.store_versioned_bytes(
-                        doc.original_name, doc.to_bytes(), fmt, mime,
+                        doc.original_name,
+                        doc.to_bytes(),
+                        fmt,
+                        mime,
                         {"source": "smart_edit", "edited_from": doc.original_name},
                     )
                     st.success(f"已生成新版本：{out['name']}（v{out['version']}）")
@@ -828,7 +1712,13 @@ def _render_edit_mode():
                         key="edit_download",
                     )
                 except Exception as exc:  # noqa: BLE001
-                    st.error(f"生成失败：{exc}")
+                    render_error_callback(
+                        build_error_info(
+                            exc, context={"operation": "artifact_generate"}
+                        ),
+                        key="artifact_generate_error",
+                        retry=False,
+                    )
 
     # ---- diff 预览 ----
     last = st.session_state.get("edit_last_result")
@@ -850,9 +1740,11 @@ def _render_edit_mode():
     with fb_col1:
         if st.button("这次改得对", key="edit_fb_good", width="stretch"):
             feedback_store.record(
-                doc_type=doc.kind, instruction=instruction,
+                doc_type=doc.kind,
+                instruction=instruction,
                 plan=last.get("plan", {"ops": []}) if last else {"ops": []},
-                accepted=True, doc_name=doc.original_name,
+                accepted=True,
+                doc_name=doc.original_name,
             )
             st.toast("已记录这次正确编辑")
     with fb_col2:
@@ -861,8 +1753,10 @@ def _render_edit_mode():
     with fb_col3:
         if st.button("我手动改了", key="edit_fb_manual", width="stretch"):
             feedback_store.record(
-                doc_type=doc.kind, instruction=instruction,
-                plan={"ops": []}, accepted=False,
+                doc_type=doc.kind,
+                instruction=instruction,
+                plan={"ops": []},
+                accepted=False,
                 correction="用户手动修改了文档（未通过指令）",
                 doc_name=doc.original_name,
             )
@@ -871,12 +1765,17 @@ def _render_edit_mode():
     if st.session_state.get("edit_fb_show"):
         with st.container(border=True):
             st.markdown("**请描述正确做法**（用于优化编辑理解）")
-            corr = st.text_area("例如：应该是把『角色A』那行的『单价』列改成 5200，而不是整列替换", key="edit_corr")
+            corr = st.text_area(
+                "例如：应该是把『角色A』那行的『单价』列改成 5200，而不是整列替换",
+                key="edit_corr",
+            )
             if st.button("提交纠正", key="edit_corr_submit"):
                 feedback_store.record(
-                    doc_type=doc.kind, instruction=instruction,
+                    doc_type=doc.kind,
+                    instruction=instruction,
                     plan=last.get("plan", {"ops": []}) if last else {"ops": []},
-                    accepted=False, correction=corr or "（未填写具体说明）",
+                    accepted=False,
+                    correction=corr or "（未填写具体说明）",
                     doc_name=doc.original_name,
                 )
                 st.session_state.edit_fb_show = False
@@ -904,7 +1803,13 @@ def _render_edit_mode():
                     else:
                         st.info("暂无可蒸馏的新规则（纠正样本不足，或已学习完毕）。")
                 except Exception as exc:  # noqa: BLE001
-                    st.error(f"学习失败：{exc}")
+                    render_error_callback(
+                        build_error_info(
+                            exc, context={"operation": "feedback_distill"}
+                        ),
+                        key="feedback_distill_error",
+                        retry=False,
+                    )
         with clear_col:
             if st.button("清空已学规则", key="edit_clear_rules", width="stretch"):
                 distiller.clear()
@@ -913,7 +1818,7 @@ def _render_edit_mode():
 
         rep = reflect(feedback_store, learned_rule_count=distiller.count())
         rate = rep["accept_rate"]
-        rate_txt = f"{rate*100:.0f}%" if rate is not None else "—"
+        rate_txt = f"{rate * 100:.0f}%" if rate is not None else "—"
         st.markdown(
             f"样本数：**{rep['total']}** ｜ 接受率：**{rate_txt}** ｜ "
             f"已学免费规则：**{rep['learned_rules']}** 条"
@@ -941,34 +1846,107 @@ def _render_edit_mode():
 def _render_welcome_suggestions():
     """渲染欢迎页快捷建议芯片。"""
     suggestions = [
-        {"icon": ":material/analytics:", "text": "分析利润率", "prompt": "帮我分析当前项目的利润率和成本结构"},
-        {"icon": ":material/request_quote:", "text": "创建报价", "prompt": "帮我创建一个新的项目报价，包含客户、报价金额和工期"},
-        {"icon": ":material/query_stats:", "text": "项目概览", "prompt": "查看所有项目的整体经营概览和统计数据"},
-        {"icon": ":material/rule:", "text": "评估需求", "prompt": "我有一个新的产品需求，帮我评估技术可行性和成本"},
-        {"icon": ":material/summarize:", "text": "生成周报", "prompt": "根据近期项目数据，生成一份本周工作总结报告"},
-        {"icon": ":material/tune:", "text": "优化流程", "prompt": "根据现有工作流，给出优化项目管理的具体建议"},
+        {
+            "icon": ":material/analytics:",
+            "text": "分析利润率",
+            "prompt": "帮我分析当前项目的利润率和成本结构",
+        },
+        {
+            "icon": ":material/request_quote:",
+            "text": "创建报价",
+            "prompt": "帮我创建一个新的项目报价，包含客户、报价金额和工期",
+        },
+        {
+            "icon": ":material/query_stats:",
+            "text": "项目概览",
+            "prompt": "查看所有项目的整体经营概览和统计数据",
+        },
+        {
+            "icon": ":material/rule:",
+            "text": "评估需求",
+            "prompt": "我有一个新的产品需求，帮我评估技术可行性和成本",
+        },
+        {
+            "icon": ":material/summarize:",
+            "text": "生成周报",
+            "prompt": "根据近期项目数据，生成一份本周工作总结报告",
+        },
+        {
+            "icon": ":material/tune:",
+            "text": "优化流程",
+            "prompt": "根据现有工作流，给出优化项目管理的具体建议",
+        },
+        {"icon": ":material/edit_document:", "text": "智能编辑文件", "mode": "edit"},
     ]
 
-    # 用容器包裹 + CSS 类，让建议按钮区域独立
-    st.markdown('<div class="welcome-suggestions">', unsafe_allow_html=True)
-    for row_idx in range(0, len(suggestions), 3):
-        row = suggestions[row_idx : row_idx + 3]
-        cols = st.columns(len(row), gap="small")
-        for col_idx, s in enumerate(row):
-            with cols[col_idx]:
-                if st.button(
-                    s["text"],
-                    key=f"suggest_{row_idx}_{col_idx}",
-                    icon=s["icon"],
-                    help=f"点击发送：{s['prompt']}",
-                    width="stretch",
-                ):
-                    st.session_state.pending_prompt = {
-                        "prompt": s["prompt"],
-                        "conversation_id": st.session_state.get("active_conversation_id"),
-                        "user_message_id": None,
-                        "turn_id": uuid4().hex,
-                        "attachments": [],
-                    }
-                    st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
+    # A keyed Streamlit container is a real parent for the widgets. Raw HTML
+    # opened before a widget and closed after it is not guaranteed to survive
+    # Streamlit's delta rendering, which made the chip CSS intermittently miss.
+    with st.container(key="welcome_suggestions", border=False):
+        for row_idx in range(0, len(suggestions), 3):
+            row = suggestions[row_idx : row_idx + 3]
+            cols = st.columns(len(row), gap="small")
+            for col_idx, suggestion in enumerate(row):
+                with cols[col_idx]:
+                    if st.button(
+                        suggestion["text"],
+                        key=f"suggest_{row_idx}_{col_idx}",
+                        icon=suggestion["icon"],
+                        help=(
+                            "上传 Excel 或 Word，并用一句话生成编辑版本"
+                            if suggestion.get("mode") == "edit"
+                            else f"点击发送：{suggestion['prompt']}"
+                        ),
+                        width="stretch",
+                    ):
+                        if suggestion.get("mode") == "edit":
+                            st.session_state.edit_mode = True
+                            st.session_state.pop("edit_doc", None)
+                            st.session_state.pop("edit_last_result", None)
+                        else:
+                            _queue_suggested_prompt(suggestion["prompt"])
+                        st.rerun()
+
+
+def _queue_suggested_prompt(prompt: str) -> None:
+    """Persist a welcome suggestion exactly like a typed chat submission."""
+    store = get_conversation_store()
+    active_id = st.session_state.get("active_conversation_id")
+    turn_id = uuid4().hex
+    metadata = {}
+    if store is not None and active_id:
+        user_message = store.add_message(
+            active_id,
+            "user",
+            prompt,
+            turn_id=turn_id,
+            metadata=metadata,
+        )
+        conversation = store.get_conversation(active_id)
+        if conversation and conversation.get("title") == getattr(
+            ConversationStore, "DEFAULT_TITLE", "新对话"
+        ):
+            store.rename_conversation(
+                active_id, _conversation_title_from_prompt(prompt)
+            )
+        load_active_messages()
+        user_message_id = user_message.get("id")
+    else:
+        user_message_id = None
+        st.session_state.messages.append(
+            {
+                "role": "user",
+                "content": prompt,
+                "time": format_cn_date(datetime.now(), include_time=True),
+                "turn_id": turn_id,
+                "metadata": metadata,
+            }
+        )
+    st.session_state["pending_prompt"] = {
+        "prompt": prompt,
+        "conversation_id": active_id,
+        "user_message_id": user_message_id,
+        "turn_id": turn_id,
+        "attachments": [],
+        "permission_grant": _conversation_permission_grant(active_id),
+    }

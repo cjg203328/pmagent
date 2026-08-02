@@ -6,7 +6,7 @@
 
 import os
 import streamlit as st
-from typing import List, Optional, Tuple, Any
+from typing import List, Optional, Any
 
 from artpm_agent.utils import get_logger
 

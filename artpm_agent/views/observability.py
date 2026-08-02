@@ -8,7 +8,7 @@
 """
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 # 确保项目根目录在 Python 路径中（Streamlit 多页面方式加载本文件时也能找到包）
 _project_root = Path(__file__).resolve().parent.parent.parent
@@ -17,8 +17,8 @@ if str(_project_root) not in sys.path:
 
 import streamlit as st
 import pandas as pd
-
 from artpm_agent.ui_helpers import render_page_header, get_logger  # noqa: F401
+from artpm_agent.ui_feedback import build_error_info, render_error_callback
 from artpm_agent.runtime.telemetry import AgentTelemetry, default_telemetry_db_path
 from artpm_agent.runtime.telemetry_dashboard import collect_dashboard
 
@@ -65,10 +65,10 @@ def _fmt_money(v: Any) -> str:
     except (TypeError, ValueError):
         return "—"
     if v <= 0:
-        return "¥0.00"
+        return "$0.00"
     if v < 0.01:
-        return f"¥{v:.4f}"
-    return f"¥{v:,.4f}"
+        return f"${v:.4f}"
+    return f"${v:,.4f}"
 
 
 def _fmt_pct(x: Any) -> str:
@@ -115,6 +115,7 @@ _HEALTH_STRIP_STYLE = """
 .obs-health-pill .dot{width:8px;height:8px;border-radius:50%;display:inline-block;}
 .obs-health-pill.ok .dot{background:var(--pm-success);}
 .obs-health-pill.bad .dot{background:var(--pm-warning);}
+.obs-health-pill.unknown .dot{background:var(--pm-muted);}
 </style>
 """
 
@@ -131,21 +132,30 @@ def _load_dashboard(db_path: str, window: int) -> Dict[str, Any]:
 
 
 def _health_strip(
-    token_ok: bool, conn_ok: bool, ev_ok: bool, ev_errors: int
+    token_ok: bool | None,
+    conn_ok: bool | None,
+    ev_ok: bool,
+    ev_errors: int,
 ) -> None:
     """顶部系统健康条：三支柱一目了然，故障无需滚动即可见。"""
     st.markdown(_HEALTH_STRIP_STYLE, unsafe_allow_html=True)
     pills = [
-        ("Token", token_ok, "ok"),
-        ("连接", conn_ok, "ok"),
-        ("进化闭环", ev_ok, "ok" if ev_ok else "bad"),
+        ("Token", token_ok, ""),
+        ("连接", conn_ok, ""),
+        ("进化闭环", ev_ok, f"{ev_errors} 异常" if not ev_ok else ""),
     ]
     parts = []
-    for name, ok, state in pills:
-        extra = "" if ok else f" {ev_errors} 异常"
+    for name, ok, detail in pills:
+        if ok is None:
+            state, label = "unknown", "暂无数据"
+        elif ok:
+            state, label = "ok", "正常"
+        else:
+            state, label = "bad", "异常"
+        extra = f" {detail}" if detail else ""
         parts.append(
             f'<span class="obs-health-pill {state}">'
-            f'<span class="dot"></span>{name} {"正常" if ok else "异常"}{extra}</span>'
+            f'<span class="dot"></span>{name} {label}{extra}</span>'
         )
     html = (
         '<div class="obs-health-strip">'
@@ -186,7 +196,7 @@ def _evolution_section(summary: Dict[str, Any], events: List[Dict[str, Any]]) ->
     _section("进化闭环", "回合结果 / 自动复盘 / 自动知识炼化 的运行健康")
 
     if total == 0:
-        st.success("进化闭环运行正常 🎉 窗口内暂无事件记录。")
+        st.info("窗口内暂无进化事件，暂时无法判断闭环健康状态。")
         return
 
     _metric_rail(
@@ -220,7 +230,7 @@ def _evolution_section(summary: Dict[str, Any], events: List[Dict[str, Any]]) ->
     if rows:
         st.dataframe(
             rows,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=min(360, 38 + max(len(rows), 1) * 36),
             column_config={
@@ -250,7 +260,7 @@ def _model_rows(by_model: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "输出 Token": int(agg.get("completion_tokens", 0)),
                 "总 Token": int(agg.get("total_tokens", 0)),
                 "成本 (USD)": round(float(agg.get("cost_usd", 0.0)), 4),
-                "缓存命中率": _fmt_pct(agg.get("cache_hit_rate", 0)),
+                "响应缓存命中率": _fmt_pct(agg.get("cache_hit_rate", 0)),
                 "失败率": _fmt_pct(agg.get("failure_rate", 0)),
             }
         )
@@ -307,6 +317,10 @@ def _health_rows(health: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # ───────────────────────────────────────────────────────────────
 def observability_page() -> None:
     """可观测系统面板：Token 消耗 + 连接 / 链接情况。"""
+    # Keep Plotly out of the chat/settings import path. The dashboard is the
+    # only surface that needs it.
+    import plotly.express as px
+
     render_page_header(
         "可观测系统",
         "Token 消耗与连接链路",
@@ -325,7 +339,7 @@ def observability_page() -> None:
         )
     with col_refresh:
         st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
-        if st.button("刷新数据", key="observability_refresh", use_container_width=True):
+        if st.button("刷新数据", key="observability_refresh", width="stretch"):
             _load_dashboard.clear()
             st.rerun()
 
@@ -334,7 +348,16 @@ def observability_page() -> None:
         dash = _load_dashboard(db_path, window)
     except Exception as error:  # noqa: BLE001
         logger.warning("可观测系统数据加载失败: %s", error)
-        st.error(f"加载遥测数据失败：{error}")
+        render_error_callback(
+            build_error_info(error, context={"operation": "telemetry_load"}),
+            key="telemetry_load_error",
+            retry=False,
+        )
+        return
+
+    if not isinstance(dash, dict):
+        logger.warning("可观测系统数据格式异常: %r", type(dash).__name__)
+        st.error("遥测数据暂不可用，请稍后刷新。")
         return
 
     token_summary: Dict[str, Any] = dash.get("token_summary", {"samples": 0})
@@ -355,22 +378,32 @@ def observability_page() -> None:
         return
 
     # 顶部系统健康条：三支柱一目了然，故障无需滚动即可见
-    _health_strip(has_token, has_conn, ev_errors == 0, ev_errors)
+    token_ok = True if has_token else None
+    conn_ok = None
+    if has_conn:
+        conn_ok = int(conn_summary.get("failed", 0)) == 0
+    ev_ok = None if ev_total == 0 else ev_errors == 0
+    _health_strip(token_ok, conn_ok, ev_ok, ev_errors)
 
     # 端点健康：尽量带上 gateway 熔断器冷却状态（gateway 为实时对象，不进缓存）
     health = dash.get("endpoint_health", []) or []
     agent = st.session_state.get("agent")
     gateway = getattr(agent, "model_gateway", None) if agent is not None else None
+    cache_stats: Dict[str, Any] = {}
     if gateway is not None and hasattr(gateway, "is_model_available"):
         try:
             live_tel = AgentTelemetry(db_path=db_path, enabled=True)
             health = live_tel.endpoint_health(window, gateway=gateway)
         except Exception:  # noqa: BLE001
             logger.debug("端点健康叠加熔断器状态失败，沿用连接事件统计")
+        try:
+            cache_stats = gateway.response_cache_stats()
+        except Exception:  # noqa: BLE001
+            cache_stats = {}
 
     # ════════════ Token 消耗 ════════════
     if has_token:
-        _section("Token 消耗", "输入 / 输出 / 缓存命中 与估算成本")
+        _section("Token 消耗", "输入 / 输出 / 缓存节省 与估算成本")
         cached = int(token_summary.get("cached_tokens", 0))
         total = int(token_summary.get("total_tokens", 0))
         cache_save = (cached / total) if total > 0 else 0.0
@@ -389,10 +422,10 @@ def observability_page() -> None:
                     "note": "按公开价目表估算",
                 },
                 {
-                    "label": "缓存命中 Token",
+                    "label": "缓存节省 Token",
                     "value": _fmt_int(cached),
                     "tone": "amber",
-                    "note": f"占总 Token {_fmt_pct(cache_save)}",
+                    "note": f"响应缓存与上游缓存 · 占比 {_fmt_pct(cache_save)}",
                 },
                 {
                     "label": "样本回合",
@@ -401,6 +434,16 @@ def observability_page() -> None:
                 },
             ]
         )
+        if cache_stats:
+            if cache_stats.get("enabled"):
+                st.caption(
+                    "响应缓存已启用 · 本进程命中 "
+                    f"{_fmt_int(cache_stats.get('hits', 0))} / "
+                    f"{_fmt_int(cache_stats.get('lookups', 0))} · "
+                    f"L1 条目 {_fmt_int(cache_stats.get('size', 0))}"
+                )
+            else:
+                st.caption("响应缓存未启用")
 
         # 按模型 / 按 Provider 明细
         by_model = _model_rows(dash.get("by_model", {}) or {})
@@ -412,7 +455,7 @@ def observability_page() -> None:
                 if by_model:
                     st.dataframe(
                         by_model,
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                         height=min(360, 38 + max(len(by_model), 1) * 36),
                     )
@@ -423,7 +466,7 @@ def observability_page() -> None:
                 if by_provider:
                     st.dataframe(
                         by_provider,
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                         height=min(360, 38 + max(len(by_provider), 1) * 36),
                     )
@@ -440,7 +483,29 @@ def observability_page() -> None:
         if token_points:
             _section("Token 趋势", "逐条请求的累计 Token")
             df = pd.DataFrame(token_points)
-            st.line_chart(df.set_index("时间")["总Token"], use_container_width=True)
+            df["时间"] = pd.to_datetime(df["时间"], errors="coerce")
+            df = df.dropna(subset=["时间"])
+            if not df.empty:
+                fig = px.line(
+                    df,
+                    x="时间",
+                    y="总Token",
+                    markers=True,
+                    color_discrete_sequence=["#B94335"],
+                )
+                fig.update_layout(
+                    height=260,
+                    margin=dict(l=8, r=8, t=12, b=8),
+                    showlegend=False,
+                    hovermode="x unified",
+                )
+                st.plotly_chart(
+                    fig,
+                    width="stretch",
+                    config={"displayModeBar": False},
+                )
+            else:
+                st.caption("暂无有效的 Token 趋势时间点")
     else:
         _section("Token 消耗", "暂无记录")
         st.caption("尚未采集到任何成功回合的 Token 数据。")
@@ -485,7 +550,22 @@ def observability_page() -> None:
                 err_df = pd.DataFrame(
                     [{"错误类型": k, "次数": v} for k, v in sorted(errors.items(), key=lambda kv: -kv[1])]
                 )
-                st.bar_chart(err_df.set_index("错误类型")["次数"], use_container_width=True)
+                fig = px.bar(
+                    err_df,
+                    x="错误类型",
+                    y="次数",
+                    color_discrete_sequence=["#E57C3A"],
+                )
+                fig.update_layout(
+                    height=260,
+                    margin=dict(l=8, r=8, t=12, b=8),
+                    showlegend=False,
+                )
+                st.plotly_chart(
+                    fig,
+                    width="stretch",
+                    config={"displayModeBar": False},
+                )
             else:
                 st.caption("窗口内无失败连接 🎉")
         with t_col:
@@ -502,7 +582,30 @@ def observability_page() -> None:
                         if isinstance(r, dict)
                     ]
                 )
-                st.line_chart(ct_df.set_index("时间")["成功"], use_container_width=True)
+                ct_df["时间"] = pd.to_datetime(ct_df["时间"], errors="coerce")
+                ct_df = ct_df.dropna(subset=["时间"])
+                if not ct_df.empty:
+                    fig = px.line(
+                        ct_df,
+                        x="时间",
+                        y="成功",
+                        markers=True,
+                        color_discrete_sequence=["#2A9D8F"],
+                    )
+                    fig.update_yaxes(range=[-0.05, 1.05], tickvals=[0, 1])
+                    fig.update_layout(
+                        height=260,
+                        margin=dict(l=8, r=8, t=12, b=8),
+                        showlegend=False,
+                        hovermode="x unified",
+                    )
+                    st.plotly_chart(
+                        fig,
+                        width="stretch",
+                        config={"displayModeBar": False},
+                    )
+                else:
+                    st.caption("暂无有效的连接趋势时间点")
             else:
                 st.caption("暂无连接趋势数据")
 
@@ -512,7 +615,7 @@ def observability_page() -> None:
         if health_rows:
             st.dataframe(
                 health_rows,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 height=min(360, 38 + max(len(health_rows), 1) * 36),
                 column_config={
