@@ -5,6 +5,7 @@ MCP (Model Context Protocol) Client - 增强诊断版
 import json
 import logging
 import os
+import time
 
 import requests
 from typing import Dict, Any, List, Optional
@@ -26,11 +27,12 @@ class MCPClient:
         """
         self.api_key = api_key or os.getenv("SKILLS_FORGE_KEY")
         self.base_url = os.getenv("SKILLS_FORGE_URL", "").rstrip("/")
-        self.enabled = (
+        self._configured = (
             os.getenv("MCP_ENABLED", "false").lower() == "true"
             and is_valid_api_key(self.api_key)
             and bool(self.base_url)
         )
+        self.enabled = self._configured
         self.available_skills: List[Dict[str, Any]] = []
         # 分类诊断信息，供 UI 展示具体原因
         self.last_error: Optional[str] = None
@@ -119,38 +121,76 @@ class MCPClient:
         self.last_error_category = "unknown"
         return str(exc)
 
-    def _fetch_available_skills(self):
+    @staticmethod
+    def _is_retryable_status(status: int) -> bool:
+        return status in {429, 502, 503, 504}
+
+    def _get_skills_response(self, timeout: float = 10.0):
+        """Fetch the read-only catalog with bounded transient retries.
+
+        POST skill execution is deliberately not retried because some older
+        Skills Forge deployments expose side effects behind that endpoint.
+        """
+        last_error = None
+        for attempt in range(3):
+            try:
+                response = requests.get(
+                    f"{self.base_url}/skills",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    timeout=timeout,
+                )
+                if self._is_retryable_status(response.status_code) and attempt < 2:
+                    time.sleep(0.15 * (attempt + 1))
+                    continue
+                return response
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as error:
+                last_error = error
+                if attempt >= 2:
+                    raise
+                time.sleep(0.15 * (attempt + 1))
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Skills Forge request did not return a response")
+
+    def _parse_skills_response(self, response) -> List[Dict[str, Any]]:
+        response.raise_for_status()
+        # 先校验 content-type，避免对 HTML 做 .json()
+        ct = response.headers.get("content-type", "")
+        if "json" not in ct and "html" in ct.lower():
+            raise ValueError(self._classify_error(response=response))
+        payload = response.json()
+        skills = payload.get("skills", payload) if isinstance(payload, dict) else payload
+        if not isinstance(skills, list):
+            raise ValueError("Skills endpoint did not return a list")
+        normalized = [
+            item
+            for item in skills
+            if isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and item["name"].strip()
+        ]
+        if len(normalized) != len(skills):
+            raise ValueError("Skills endpoint returned malformed skill entries")
+        return normalized
+
+    def _fetch_available_skills(self) -> bool:
         """获取可用技能列表（带分类诊断）。"""
         try:
-            response = requests.get(
-                f"{self.base_url}/skills",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                timeout=10,
-            )
-            response.raise_for_status()
-
-            # 先校验 content-type，避免对 HTML 做 .json()
-            ct = response.headers.get("content-type", "")
-            if "json" not in ct and "html" in ct.lower():
-                self.last_error = self._classify_error(response=response)
-                self.enabled = False
-                logger.warning("[MCP] %s", self.last_error)
-                return
-
-            payload = response.json()
-            skills = payload.get("skills", payload) if isinstance(payload, dict) else payload
-            if not isinstance(skills, list):
-                raise ValueError("Skills endpoint did not return a list")
+            response = self._get_skills_response()
+            skills = self._parse_skills_response(response)
             self.available_skills = skills
+            self.enabled = True
             self.last_error = None
             self.last_error_category = None
             logger.info("[MCP] Loaded %d skills from %s", len(self.available_skills), self.base_url)
+            return True
 
         except Exception as e:
             self.last_error = self._classify_error(response=locals().get("response"), exc=e)
             self.enabled = False
             logger.warning("[MCP] Failed to fetch skills [%s]: %s",
                            self.last_error_category, self.last_error, exc_info=True)
+            return False
 
     def ping(self) -> tuple[bool, str]:
         """
@@ -161,33 +201,33 @@ class MCPClient:
         """
         if not self.base_url:
             return False, "URL 未配置"
-        try:
-            resp = requests.get(
-                f"{self.base_url}/skills",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                timeout=8,
-            )
-            resp.raise_for_status()
-            ct = resp.headers.get("content-type", "")
-            if "json" not in ct and "html" in ct.lower():
-                return False, self._classify_error(response=resp)
-            data = resp.json()
-            count = len(data.get("skills", data)) if isinstance(data, dict) else len(data) if isinstance(data, list) else "?"
-            return True, f"连接正常，{count} 个技能可用"
-        except Exception as e:
-            return False, self._classify_error(response=locals().get("resp"), exc=e)
+        if not self._configured:
+            return False, self.last_error or "MCP 配置无效"
+        if not self._fetch_available_skills():
+            return False, self.last_error or "Skills Forge 不可用"
+        return True, f"连接正常，{len(self.available_skills)} 个技能可用"
 
-    async def call_skill(self, skill_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def call_skill(
+        self,
+        skill_name: str,
+        params: Dict[str, Any],
+        force: bool = False,
+    ) -> Dict[str, Any]:
         """
         调用 MCP 技能
 
         Args:
             skill_name: 技能名称
             params: 参数
+            force: 与 stdio 接口保持兼容；HTTP 执行端不使用目录缓存
 
         Returns:
             执行结果
         """
+        if not self.enabled and self._configured:
+            # A transient startup failure must not permanently disable the
+            # client. A direct call gets one bounded health refresh first.
+            self._fetch_available_skills()
         if not self.enabled:
             return {
                 "success": False,
@@ -213,11 +253,13 @@ class MCPClient:
             return result if isinstance(result, dict) else {"success": True, "data": result}
 
         except requests.RequestException as e:
+            self.last_error = self._classify_error(exc=e)
             return {
                 "success": False,
                 "error": f"MCP request failed: {e}"
             }
         except (TypeError, ValueError) as e:
+            self.last_error = self._classify_error(exc=e)
             return {
                 "success": False,
                 "error": f"Invalid MCP response: {e}"
@@ -243,9 +285,18 @@ class MCPClient:
             技能详情
         """
         for skill in self.available_skills:
-            if skill["name"] == skill_name:
+            if skill.get("name") == skill_name:
                 return skill
         return None
+
+    def close(self) -> None:
+        """Idempotent hook for the unified lifecycle manager.
+
+        The HTTP implementation uses short-lived requests, so there is no
+        socket-owning background worker to stop. Keeping this method explicit
+        lets callers release either HTTP or stdio transports uniformly.
+        """
+        self.enabled = False
 
     def is_enabled(self) -> bool:
         """检查 MCP 是否启用"""

@@ -3,11 +3,9 @@
 execute_command must stay disabled by default, and when enabled it must honor an
 executable basename allowlist so the agent cannot spawn arbitrary binaries.
 """
-import asyncio
 import sys
 from pathlib import Path
 
-import pytest
 
 from artpm_agent.core.mcp_client_enhanced import EnhancedMCPClient
 

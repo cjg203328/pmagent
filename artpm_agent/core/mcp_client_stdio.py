@@ -27,6 +27,7 @@ HTTP REST 的 ``MCPClient``。
 """
 import atexit
 import asyncio
+from concurrent.futures import TimeoutError as FutureTimeoutError
 import json
 import logging
 import os
@@ -52,6 +53,12 @@ _STDIO_ARGS = ["-y", "@skills-forge/mcp-server@latest"]
 _CONNECT_TIMEOUT = 180
 # 单次工具调用的超时
 _CALL_TIMEOUT = 60
+try:
+    _HEARTBEAT_INTERVAL = max(
+        0.0, float(os.getenv("MCP_HEARTBEAT_INTERVAL", "30") or "30")
+    )
+except ValueError:
+    _HEARTBEAT_INTERVAL = 30.0
 
 # Skills Forge also exposes specification/workflow mutation tools. ArtPM only
 # needs task-to-skill discovery, so the remote boundary fails closed to this
@@ -109,6 +116,9 @@ class StdioMCPClient:
 
         # ── 常驻 session 状态 ──
         self._lock = threading.Lock()          # 保护连接生命周期（thread / loop / 启停）
+        # Lifecycle operations may wait for the worker, but the state lock
+        # must remain available to the worker while it is exiting.
+        self._lifecycle_lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._session = None                    # mcp ClientSession，仅在后台 loop 线程内读写
@@ -116,6 +126,8 @@ class StdioMCPClient:
         self._shutdown = threading.Event()      # 请求关闭后台线程
         self._broken = False                    # 连接已失效，需重建
         self._connect_error: Optional[str] = None
+        self._generation = 0                    # 成功连接代次，隔离过期调用失败
+        self._atexit_callback = None
 
         if not self.enabled:
             reasons = []
@@ -129,7 +141,8 @@ class StdioMCPClient:
             logger.info("[StdioMCP] disabled: %s", self.last_error or "未知原因")
         else:
             # 进程退出时兜底关闭，避免遗留 npx 孤儿进程
-            atexit.register(self.close)
+            self._atexit_callback = self.close
+            atexit.register(self._atexit_callback)
             # 启动即从磁盘恢复市场技能缓存（TTL 内则首次调用 0s 云端开销）
             self._load_disk_cache()
 
@@ -156,8 +169,30 @@ class StdioMCPClient:
         except Exception:  # pragma: no cover - 兜底，避免线程静默崩溃
             logger.exception("[StdioMCP] background loop unexpected error")
         finally:
+            # ``run_coroutine_threadsafe`` callers can leave pending tasks
+            # behind after a transport failure. Cancel and drain them before
+            # closing the loop so Streamlit reruns do not accumulate warnings
+            # or references to an already-dead subprocess.
+            try:
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:  # pragma: no cover - cleanup must be best effort
+                logger.debug("[StdioMCP] event loop cleanup failed", exc_info=True)
+            finally:
+                loop.close()
             with self._lock:
-                self._loop = None
+                # An old worker must not clear state belonging to a later
+                # connection if a stop timed out.
+                if self._loop is loop:
+                    self._loop = None
+                if self._thread is threading.current_thread():
+                    self._thread = None
 
     async def _keep_alive(self) -> None:
         """
@@ -172,20 +207,40 @@ class StdioMCPClient:
             async with stdio_client(self._build_params()) as (read, write):
                 async with ClientSession(read, write) as session:
                     await asyncio.wait_for(session.initialize(), timeout=_CONNECT_TIMEOUT)
-                    self._session = session
-                    self._ready.set()
-                    self._broken = False
-                    self.last_error = None
-                    self.last_error_category = None
+                    with self._lock:
+                        self._session = session
+                        self._generation += 1
+                        self._broken = False
+                        self.last_error = None
+                        self.last_error_category = None
+                        self._ready.set()
                     logger.info("[StdioMCP] persistent session established")
 
-                    # 保持 loop 存活，直到请求关闭
+                    # Keep the transport alive and detect a dead pipe even
+                    # when no user request is in flight. ``list_tools`` is
+                    # read-only and does not mutate the remote service.
+                    heartbeat_at = time.monotonic()
                     while not self._shutdown.is_set():
                         await asyncio.sleep(0.5)
+                        if (
+                            _HEARTBEAT_INTERVAL > 0
+                            and time.monotonic() - heartbeat_at >= _HEARTBEAT_INTERVAL
+                        ):
+                            heartbeat_at = time.monotonic()
+                            list_tools = getattr(session, "list_tools", None)
+                            if callable(list_tools) and not self._shutdown.is_set():
+                                await asyncio.wait_for(
+                                    list_tools(),
+                                    timeout=min(
+                                        _CALL_TIMEOUT,
+                                        max(1.0, _HEARTBEAT_INTERVAL),
+                                    ),
+                                )
 
                     self._session = None
-                    logger.info("[StdioMCP] session closed by shutdown signal")
         except Exception as e:
+            if self._shutdown.is_set():
+                return
             self._connect_error = self._classify_error(e)
             self._broken = True
             self.last_error = self._connect_error
@@ -213,57 +268,120 @@ class StdioMCPClient:
         if not force and self._ready.is_set() and not self._broken:
             return True
 
-        # 仅用锁保护“判断是否需启动 + 启动线程”的临界区
-        with self._lock:
-            # 双重检查，避免并发重复启动
-            if not force and self._ready.is_set() and not self._broken:
+        # Serialize stop/join/start as one lifecycle operation. The worker
+        # only takes ``_lock``, so joining while this lock is held is unsafe.
+        with self._lifecycle_lock:
+            thread_to_join = None
+            with self._lock:
+                # 双重检查，避免并发重复启动
+                if not force and self._ready.is_set() and not self._broken:
+                    return True
+                if force:
+                    thread_to_join = self._stop_background_locked()
+
+            # The worker takes ``_lock`` during cleanup; join only after the
+            # state lock has been released.
+            if force and not self._join_background(thread_to_join):
+                with self._lock:
+                    self._broken = True
+                return False
+
+            with self._lock:
+                if force:
+                    self._shutdown.clear()
+                    self._ready.clear()
+                    if (
+                        thread_to_join is not None
+                        and self._thread is thread_to_join
+                        and not thread_to_join.is_alive()
+                    ):
+                        self._thread = None
+                need_start = self._thread is None or not self._thread.is_alive()
+                if need_start:
+                    self._broken = False
+                    self._connect_error = None
+                    self._thread = threading.Thread(target=self._background_main, daemon=True)
+                    self._thread.start()
+
+        # 在锁外等待连接就绪（后台线程取得锁后才会 set _ready）。轮询
+        # 线程状态，避免连接线程已经失败时仍然阻塞完整的 180 秒。
+        deadline = time.monotonic() + _CONNECT_TIMEOUT
+        while time.monotonic() < deadline:
+            if self._ready.wait(
+                timeout=min(0.25, max(0.0, deadline - time.monotonic()))
+            ):
                 return True
-            if force:
-                self._stop_background_locked()
-            need_start = self._thread is None or not self._thread.is_alive()
-            if need_start:
-                self._broken = False
-                self._connect_error = None
-                self._shutdown.clear()
-                self._ready.clear()
-                self._thread = threading.Thread(target=self._background_main, daemon=True)
-                self._thread.start()
+            with self._lock:
+                thread = self._thread
+                connect_error = self._connect_error
+                broken = self._broken
+            if connect_error and (thread is None or not thread.is_alive()):
+                return False
+            if broken and (thread is None or not thread.is_alive()):
+                return False
 
-        # 在锁外等待连接就绪（后台线程取得锁后才会 set _ready）
-        if not self._ready.wait(timeout=_CONNECT_TIMEOUT):
-            self._broken = True
-            logger.warning("[StdioMCP] connect timed out after %ss", _CONNECT_TIMEOUT)
-            return False
-        return self._ready.is_set()
+        self._broken = True
+        self._connect_error = (
+            f"stdio MCP connection timed out after {_CONNECT_TIMEOUT}s"
+        )
+        self.last_error = self._connect_error
+        self.last_error_category = "network"
+        logger.warning("[StdioMCP] connect timed out after %ss", _CONNECT_TIMEOUT)
+        return False
 
-    def _stop_background_locked(self) -> None:
-        """在持锁状态下停止后台线程并等待其退出（仅从 _ensure_connected 调用）。"""
+    def _stop_background_locked(self) -> Optional[threading.Thread]:
+        """Request worker shutdown while ``_lock`` is held.
+
+        The caller must release ``_lock`` before joining the returned thread;
+        the worker takes that lock during its ``finally`` cleanup.
+        """
         self._shutdown.set()
         t = self._thread
-        if t is not None and t.is_alive():
-            t.join(timeout=10)
         self._session = None
         self._loop = None
-        self._thread = None
+        self._ready.clear()
+        return t
+
+    @staticmethod
+    def _join_background(thread: Optional[threading.Thread]) -> bool:
+        """Join a stopped worker without holding the state lock."""
+        if thread is None or thread is threading.current_thread():
+            return True
+        if not thread.is_alive():
+            return True
+        thread.join(timeout=10)
+        if thread.is_alive():
+            logger.warning("[StdioMCP] background thread did not stop before timeout")
+            return False
+        return True
 
     def close(self) -> None:
         """优雅关闭：终止后台线程与 npx 子进程。幂等，可安全重复调用。"""
-        with self._lock:
-            if self._thread is None and not self._ready.is_set():
-                return
-            self._shutdown.set()
-            t = self._thread
-            if t is not None and t.is_alive():
-                t.join(timeout=10)
-            self._session = None
-            self._loop = None
-            self._thread = None
-            self._ready.clear()
+        with self._lifecycle_lock:
+            with self._lock:
+                t = self._stop_background_locked()
+            self._join_background(t)
+            with self._lock:
+                # Keep a still-running worker visible so a later idempotent
+                # close can retry the join; otherwise clear all references.
+                if t is None or not t.is_alive():
+                    if t is None or self._thread is t:
+                        self._session = None
+                        self._loop = None
+                        self._thread = None
+                        self._ready.clear()
         # 缓存与连接无关，但关闭后一并清空，避免下次连接误用旧数据
         with self._market_cache_lock:
             self._market_cache = None
             self._market_cache_ts = 0.0
             self.last_market_cache_hit = None
+        callback = self._atexit_callback
+        if callback is not None:
+            self._atexit_callback = None
+            try:
+                atexit.unregister(callback)
+            except Exception:  # pragma: no cover - interpreter shutdown guard
+                pass
 
     # ──────────────────────────────────────────────
     # 跨线程调用投递
@@ -272,17 +390,48 @@ class StdioMCPClient:
         """从同步上下文把协程投递到后台 loop 并阻塞等待结果。"""
         loop = self._loop
         if loop is None:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
             raise RuntimeError("stdio loop not started")
-        fut = asyncio.run_coroutine_threadsafe(coro, loop)
-        return fut.result(timeout=timeout)
+        try:
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+        except Exception:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            raise
+        try:
+            return fut.result(timeout=timeout)
+        except (FutureTimeoutError, asyncio.CancelledError):
+            # A timed-out request must not keep running against a session that
+            # may immediately be torn down for reconnect.
+            fut.cancel()
+            raise
+        except BaseException:
+            fut.cancel()
+            raise
 
     async def _submit_async(self, coro, timeout: int):
         """从异步上下文把协程投递到后台 loop 并 await 结果（不阻塞调用方 loop）。"""
         loop = self._loop
         if loop is None:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
             raise RuntimeError("stdio loop not started")
-        fut = asyncio.run_coroutine_threadsafe(coro, loop)
-        return await asyncio.wait_for(asyncio.wrap_future(fut), timeout=timeout)
+        try:
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+        except Exception:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            raise
+        try:
+            return await asyncio.wait_for(asyncio.wrap_future(fut), timeout=timeout)
+        except BaseException:
+            fut.cancel()
+            raise
 
     # ──────────────────────────────────────────────
     # 协议层协程（运行在后台 loop 线程内）
@@ -295,11 +444,12 @@ class StdioMCPClient:
         tools = getattr(result, "tools", result) or []
         skills: List[Dict[str, Any]] = []
         for t in tools:
-            if t.name not in SKILLS_FORGE_ALLOWED_TOOLS:
+            name = getattr(t, "name", None)
+            if name not in SKILLS_FORGE_ALLOWED_TOOLS:
                 continue
             skills.append(
                 {
-                    "name": t.name,
+                    "name": name,
                     "description": getattr(t, "description", "") or "",
                     "input_schema": getattr(t, "inputSchema", None),
                 }
@@ -391,15 +541,25 @@ class StdioMCPClient:
         return result
 
     async def _acall(self, skill_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        if not self._ensure_connected():
+        if not await asyncio.to_thread(self._ensure_connected):
             raise RuntimeError(self._connect_error or "stdio connect failed")
+        with self._lock:
+            generation = self._generation
         try:
             return await self._submit_async(self._a_call_tool(skill_name, params), _CALL_TIMEOUT)
         except Exception:
-            # 会话可能已失效，重建并重试一次
-            self._broken = True
-            self._session = None
-            if self._ensure_connected(force=True):
+            # 会话可能已失效，重建并重试一次。若另一个并发调用已经
+            # 建立了更新代次，则直接复用，不能拆掉刚恢复的新会话。
+            with self._lock:
+                force_reconnect = self._generation == generation
+                if force_reconnect:
+                    self._broken = True
+                    self._session = None
+            connected = await asyncio.to_thread(
+                self._ensure_connected,
+                force_reconnect,
+            )
+            if connected:
                 return await self._submit_async(self._a_call_tool(skill_name, params), _CALL_TIMEOUT)
             raise
 
@@ -408,7 +568,8 @@ class StdioMCPClient:
             return []
         try:
             skills = self._list_sync()
-        except Exception:
+        except Exception as error:
+            self.last_error = self._classify_error(error)
             return self._tools_cache or []
         self._tools_cache = skills
         self.last_error = None
@@ -418,13 +579,18 @@ class StdioMCPClient:
     def _list_sync(self) -> List[Dict[str, Any]]:
         if not self._ensure_connected():
             raise RuntimeError(self._connect_error or "stdio connect failed")
+        with self._lock:
+            generation = self._generation
         try:
             return self._submit_sync(self._a_list_tools(), _CALL_TIMEOUT)
         except Exception:
-            # 会话可能已失效，重建并重试一次
-            self._broken = True
-            self._session = None
-            if self._ensure_connected(force=True):
+            # 与异步路径相同：过期代次的失败不得重置更新会话。
+            with self._lock:
+                force_reconnect = self._generation == generation
+                if force_reconnect:
+                    self._broken = True
+                    self._session = None
+            if self._ensure_connected(force=force_reconnect):
                 return self._submit_sync(self._a_list_tools(), _CALL_TIMEOUT)
             raise
 
@@ -453,10 +619,17 @@ class StdioMCPClient:
         if not self.enabled:
             return False, self.last_error or "未启用"
         try:
-            tools = self.list_skills()
+            # Do not use ``list_skills`` here: it intentionally falls back to
+            # stale cache for normal callers, which would turn a dead session
+            # into a false-positive health check.
+            tools = self._list_sync()
+            self._tools_cache = tools
+            self.last_error = None
+            self.last_error_category = None
             return True, f"Skills Forge (stdio) 已连接，{len(tools)} 个技能可用"
         except Exception as e:
-            return False, self.last_error or str(e)
+            self.last_error = self._classify_error(e)
+            return False, self.last_error
 
     # ──────────────────────────────────────────────
     # 市场技能列表（list_skills 工具返回，TTL 缓存）

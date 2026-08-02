@@ -23,6 +23,8 @@
 旧代码（含未提交的 WIP agent.py）无需改动即可继续工作。
 """
 import os
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from pathlib import Path
@@ -39,41 +41,59 @@ class UnifiedMCPClient:
         self._enhanced: Optional[Any] = None
         self._remote: Optional[Any] = None
         self._remote_failed = False
+        self._remote_error: Optional[str] = None
+        self._remote_retry_at = 0.0
+        self._backend_lock = threading.RLock()
 
     # ──────────────────────────────────────────────
     # 后端惰性加载（避免无谓的 import / 网络请求）
     # ──────────────────────────────────────────────
 
     def _get_enhanced(self):
-        if self._enhanced is None:
-            from artpm_agent.core.mcp_client_enhanced import EnhancedMCPClient
+        with self._backend_lock:
+            if self._enhanced is None:
+                from artpm_agent.core.mcp_client_enhanced import (
+                    get_enhanced_mcp_client,
+                )
 
-            self._enhanced = EnhancedMCPClient(self._workspace_path)
-        return self._enhanced
+                self._enhanced = get_enhanced_mcp_client(self._workspace_path)
+            return self._enhanced
 
     def _get_remote(self):
-        if self._remote is not None or self._remote_failed:
+        with self._backend_lock:
+            if self._remote is not None:
+                return self._remote
+            # 远程后端默认关闭，避免未配置时产生 import / 网络开销。
+            if os.getenv("MCP_ENABLED", "false").lower() != "true":
+                self._remote_failed = True
+                self._remote_error = "Skills Forge 未启用（开关关闭）"
+                return None
+            # Import/constructor failures are retried after a short cooldown;
+            # a single transient npm/import error must not create a fake
+            # permanently-disabled entry in the settings page.
+            now = time.monotonic()
+            if self._remote_failed and now < self._remote_retry_at:
+                return None
+            transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
+            try:
+                if transport == "stdio":
+                    from artpm_agent.core.mcp_client_stdio import StdioMCPClient
+
+                    self._remote = StdioMCPClient(self._api_key)
+                elif transport == "http":
+                    from artpm_agent.core.mcp_client import MCPClient
+
+                    self._remote = MCPClient(self._api_key)
+                else:
+                    raise ValueError(f"Unsupported MCP_TRANSPORT: {transport}")
+                self._remote_failed = False
+                self._remote_error = None
+            except Exception as error:
+                self._remote = None
+                self._remote_failed = True
+                self._remote_retry_at = now + 5.0
+                self._remote_error = f"MCP 后端初始化失败: {error}"
             return self._remote
-        # 远程后端默认关闭，避免未配置时产生 import / 网络开销。
-        if os.getenv("MCP_ENABLED", "false").lower() != "true":
-            self._remote_failed = True
-            return None
-        transport = os.getenv("MCP_TRANSPORT", "http").lower()
-        try:
-            if transport == "stdio":
-                # 真正的 MCP 协议后端：npx 拉起 @skills-forge/mcp-server
-                from artpm_agent.core.mcp_client_stdio import StdioMCPClient
-
-                self._remote = StdioMCPClient(self._api_key)
-            else:
-                # 旧版自定义 HTTP REST 后端（部分 Skills Forge 部署兼容）
-                from artpm_agent.core.mcp_client import MCPClient
-
-                self._remote = MCPClient(self._api_key)
-        except Exception:
-            self._remote = None
-            self._remote_failed = True
-        return self._remote
 
     # ──────────────────────────────────────────────
     # 统一对外接口
@@ -89,7 +109,11 @@ class UnifiedMCPClient:
         except Exception:
             pass
         remote = self._get_remote()
-        return bool(remote is not None and remote.is_enabled())
+        try:
+            return bool(remote is not None and remote.is_enabled())
+        except Exception as error:
+            self._remote_error = f"MCP 后端状态检查失败: {error}"
+            return False
 
     # ── 诊断属性：透传远程后端的分类错误信息 ─────────
 
@@ -99,7 +123,7 @@ class UnifiedMCPClient:
         remote = self._get_remote()
         if remote is not None:
             return getattr(remote, "last_error", None)
-        return None
+        return self._remote_error
 
     @property
     def last_error_category(self) -> Optional[str]:
@@ -113,18 +137,31 @@ class UnifiedMCPClient:
         """轻量连通性测试：先测远程，失败则返回原因；本地工具始终可用。"""
         remote = self._get_remote()
         if remote is not None:
-            ok, msg = remote.ping() if hasattr(remote, "ping") else (remote.is_enabled(), "")
-            if not ok:
-                return False, msg
-            return True, msg or f"Skills Forge 已连接 ({len(remote.list_skills())} skills)"
+            try:
+                ok, msg = (
+                    remote.ping()
+                    if hasattr(remote, "ping")
+                    else (remote.is_enabled(), "")
+                )
+                if not ok or not remote.is_enabled():
+                    return False, msg or getattr(remote, "last_error", None) or "Skills Forge 不可用"
+                # ping() is a connectivity probe. Counting skills here forced
+                # settings_page() to perform the same remote list call twice.
+                return True, msg or "Skills Forge 已连接"
+            except Exception as error:
+                self._remote_error = f"MCP 健康检查失败: {error}"
+                return False, self._remote_error
         # 无远程后端时检查是否因配置缺失而未加载
         if os.getenv("MCP_ENABLED", "false").lower() != "true":
             return False, "Skills Forge 未启用（开关关闭）"
-        if not os.getenv("SKILLS_FORGE_URL"):
-            return False, "Skills Forge URL 未配置"
         if not os.getenv("SKILLS_FORGE_KEY"):
             return False, "Skills Forge API Key 未配置"
-        return False, "Skills Forge 远程后端初始化失败"
+        if (
+            os.getenv("MCP_TRANSPORT", "stdio").lower() == "http"
+            and not os.getenv("SKILLS_FORGE_URL")
+        ):
+            return False, "Skills Forge URL 未配置"
+        return False, self._remote_error or "Skills Forge 远程后端初始化失败"
 
     def list_skills(self) -> List[Dict[str, Any]]:
         """聚合两个后端的技能/工具清单。"""
@@ -136,12 +173,15 @@ class UnifiedMCPClient:
         except Exception:
             pass
         remote = self._get_remote()
-        if remote is not None and remote.is_enabled():
-            result.extend(
-                skill
-                for skill in remote.list_skills()
-                if skill.get("name") in SKILLS_FORGE_ALLOWED_TOOLS
-            )
+        try:
+            if remote is not None and remote.is_enabled():
+                result.extend(
+                    skill
+                    for skill in remote.list_skills()
+                    if skill.get("name") in SKILLS_FORGE_ALLOWED_TOOLS
+                )
+        except Exception as error:
+            self._remote_error = f"MCP 工具列表读取失败: {error}"
         return result
 
     def list_tools(self) -> List[Dict[str, Any]]:
@@ -180,7 +220,15 @@ class UnifiedMCPClient:
 
         # 远程技能
         remote = self._get_remote()
-        if remote is not None and remote.is_enabled():
+        remote_available = False
+        if remote is not None:
+            try:
+                remote_available = bool(remote.is_enabled())
+                if not remote_available and hasattr(remote, "ping"):
+                    remote_available = bool(remote.ping()[0])
+            except Exception as error:
+                self._remote_error = f"MCP 后端恢复失败: {error}"
+        if remote is not None and remote_available:
             if skill_name not in SKILLS_FORGE_ALLOWED_TOOLS:
                 return {
                     "success": False,
@@ -198,9 +246,12 @@ class UnifiedMCPClient:
     async def list_market_skills(self, force: bool = False) -> List[Dict[str, Any]]:
         """拉取 Skills Forge 市场技能清单（远程后端，带 TTL 缓存）。"""
         remote = self._get_remote()
-        if remote is not None and remote.is_enabled():
-            if hasattr(remote, "list_market_skills"):
-                return await remote.list_market_skills(force=force)
+        try:
+            if remote is not None and remote.is_enabled():
+                if hasattr(remote, "list_market_skills"):
+                    return await remote.list_market_skills(force=force)
+        except Exception as error:
+            self._remote_error = f"Skills Forge 市场列表读取失败: {error}"
         return []
 
     def call_tool(self, tool_name: str, params: Dict[str, Any]) -> Any:
@@ -210,19 +261,46 @@ class UnifiedMCPClient:
             return {"success": False, "error": "Local MCP tools are not available"}
         import asyncio
 
-        return asyncio.run(self.call_skill(tool_name, params))
+        awaitable = self.call_skill(tool_name, params)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(awaitable)
+
+        result = []
+        errors = []
+
+        def runner() -> None:
+            try:
+                result.append(asyncio.run(awaitable))
+            except BaseException as error:
+                errors.append(error)
+
+        worker = threading.Thread(
+            target=runner,
+            name="mcp-sync-bridge",
+            daemon=True,
+        )
+        worker.start()
+        worker.join()
+        if errors:
+            raise errors[0]
+        return result[0]
 
     def close(self) -> None:
         """关闭所有后端持有的长连接（stdio 后台线程 / npx 子进程）。幂等。"""
-        remote = self._remote
+        with self._backend_lock:
+            remote = self._remote
+            self._remote = None
+            self._remote_failed = False
+            self._remote_error = None
+            self._remote_retry_at = 0.0
+            self._enhanced = None
         if remote is not None and hasattr(remote, "close"):
             try:
                 remote.close()
             except Exception:  # pragma: no cover - 防御性兜底
                 pass
-        self._remote = None
-        self._remote_failed = False
-        self._enhanced = None
 
     def get_skills_summary(self) -> str:
         """生成提示词可用的技能摘要（聚合两个后端）。"""
@@ -236,20 +314,23 @@ class UnifiedMCPClient:
         except Exception:
             pass
         remote = self._get_remote()
-        if remote is not None and remote.is_enabled():
-            skills = [
-                skill
-                for skill in remote.list_skills()
-                if skill.get("name") in SKILLS_FORGE_ALLOWED_TOOLS
-            ]
-            if skills:
-                lines.append(
-                    "可用的远程 MCP 技能:\n"
-                    + "\n".join(
-                        f"  • {skill['name']}: {skill.get('description', '')}"
-                        for skill in skills
+        try:
+            if remote is not None and remote.is_enabled():
+                skills = [
+                    skill
+                    for skill in remote.list_skills()
+                    if skill.get("name") in SKILLS_FORGE_ALLOWED_TOOLS
+                ]
+                if skills:
+                    lines.append(
+                        "可用的远程 MCP 技能:\n"
+                        + "\n".join(
+                            f"  • {skill['name']}: {skill.get('description', '')}"
+                            for skill in skills
+                        )
                     )
-                )
+        except Exception as error:
+            self._remote_error = f"MCP 技能摘要读取失败: {error}"
         return "\n".join(lines)
 
 
@@ -258,6 +339,7 @@ class UnifiedMCPClient:
 # ═══════════════════════════════════════════════════════════
 
 _unified_mcp_client: Optional[UnifiedMCPClient] = None
+_unified_mcp_lock = threading.RLock()
 
 
 def get_unified_mcp_client(
@@ -265,26 +347,34 @@ def get_unified_mcp_client(
 ) -> UnifiedMCPClient:
     """获取统一 MCP 客户端单例。"""
     global _unified_mcp_client
-    if workspace_path:
-        requested = Path(workspace_path).resolve()
-        current = (
-            Path(_unified_mcp_client._workspace_path).resolve()
-            if _unified_mcp_client is not None
-            and _unified_mcp_client._workspace_path
-            else None
-        )
-        if current != requested:
+    old = None
+    with _unified_mcp_lock:
+        needs_new = _unified_mcp_client is None
+        if not needs_new and workspace_path:
+            requested = Path(workspace_path).resolve()
+            current = (
+                Path(_unified_mcp_client._workspace_path).resolve()
+                if _unified_mcp_client._workspace_path
+                else None
+            )
+            needs_new = current != requested
+        if not needs_new and api_key is not None:
+            needs_new = api_key != _unified_mcp_client._api_key
+        if needs_new:
+            old = _unified_mcp_client
             _unified_mcp_client = UnifiedMCPClient(workspace_path, api_key)
-    elif _unified_mcp_client is None:
-        _unified_mcp_client = UnifiedMCPClient(workspace_path, api_key)
-    return _unified_mcp_client
+        client = _unified_mcp_client
+    if old is not None and old is not client:
+        old.close()
+    return client
 
 
 def reset_unified_mcp_client() -> None:
     """清除统一客户端全局单例，下次 get_unified_mcp_client() 会重新初始化（读取最新环境变量）。"""
     global _unified_mcp_client
-    old = _unified_mcp_client
-    _unified_mcp_client = None
+    with _unified_mcp_lock:
+        old = _unified_mcp_client
+        _unified_mcp_client = None
     if old is not None:
         try:
             old.close()

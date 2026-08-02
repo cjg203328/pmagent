@@ -3,12 +3,14 @@ Enhanced MCP Client - 连接Claude Code能力
 利用Claude Code的工具能力(Read, Write, Glob, Grep, Bash, Agent)
 """
 from copy import deepcopy
+import logging
 import os
 import shlex
 from typing import Dict, Any, List
 from pathlib import Path
 
 
+logger = logging.getLogger(__name__)
 MAX_TOOL_FILE_BYTES = 10 * 1024 * 1024
 MAX_TOOL_OUTPUT_CHARS = 32 * 1024
 _SENSITIVE_FILE_NAMES = frozenset(
@@ -173,7 +175,7 @@ class EnhancedMCPClient:
             }
         }
 
-        print(f"[EnhancedMCP] Initialized with {len(self.available_tools)} tools")
+        logger.debug("Initialized with %d local tools", len(self.available_tools))
 
     def _resolve_path(self, value: str = None) -> Path:
         """Resolve a user path and keep it inside the configured workspace."""
@@ -639,7 +641,7 @@ class EnhancedMCPClient:
             return {"success": False, "error": f"Tool '{tool_name}' not found"}
 
         try:
-            print(f"[EnhancedMCP] Calling tool: {tool_name}")
+            logger.info("Calling local tool: %s", tool_name)
             result = await tool["execute"](**params)
             return result
         except Exception as e:
