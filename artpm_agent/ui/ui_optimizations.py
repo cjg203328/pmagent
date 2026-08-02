@@ -12,7 +12,7 @@ import asyncio
 import functools
 import hashlib
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 import streamlit as st
 

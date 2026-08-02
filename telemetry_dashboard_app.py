@@ -15,11 +15,17 @@ _project_root = Path(__file__).resolve().parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-import streamlit as st
+import streamlit as st  # noqa: E402 - path bootstrap must run first
 
-from artpm_agent.runtime.telemetry import AgentTelemetry, default_telemetry_db_path
-from artpm_agent.runtime.telemetry_dashboard import collect_dashboard, render_html
-from artpm_agent.utils.logger import get_logger
+from artpm_agent.runtime.telemetry import (  # noqa: E402 - path bootstrap must run first
+    AgentTelemetry,
+    default_telemetry_db_path,
+)
+from artpm_agent.runtime.telemetry_dashboard import (  # noqa: E402 - path bootstrap must run first
+    collect_dashboard,
+    render_html,
+)
+from artpm_agent.utils.logger import get_logger  # noqa: E402 - path bootstrap must run first
 
 logger = get_logger(__name__)
 

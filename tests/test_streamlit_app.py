@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+import time
 
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -8,10 +9,15 @@ from artpm_agent.memory import SessionStore
 from artpm_agent.views.chat import _compact_legacy_assistant_copy
 from artpm_agent.profiles import AgentProfilePatch, QuotePolicyPatch
 from artpm_agent.ui_style import STYLE_CSS
+from artpm_agent.utils.chat_attachments import (
+    DEFAULT_ALLOWED_EXTENSIONS,
+    DEFAULT_MAX_FILE_SIZE,
+)
 
 # Resolve the app entrypoint from this file's location so AppTest.from_file
 # works regardless of the current working directory.
 APP_FILE = str(Path(__file__).resolve().parent.parent / "artpm_agent" / "app.py")
+LEGACY_APP_FILE = str(Path(__file__).resolve().parent.parent / "app.py")
 
 
 class StubAgent:
@@ -46,6 +52,22 @@ class BusyStubAgent(TimeoutStubAgent):
             raise RuntimeError("ResourceExhausted: Worker local total request limit")
         except RuntimeError as error:
             raise RuntimeError("模型请求失败") from error
+
+
+class RetryAgent:
+    def __init__(self):
+        self.calls = 0
+        self.config = SimpleNamespace(
+            get=lambda key, default=None: (
+                "deepseek-v4-flash" if key == "llm.model" else default
+            )
+        )
+
+    def chat(self, message, context=None):
+        self.calls += 1
+        if self.calls == 1:
+            raise TimeoutError("provider timed out")
+        return "重试成功"
 
 
 class RecordingAgent:
@@ -104,6 +126,50 @@ def message_contents(app):
     return [message["content"] for message in app.session_state["messages"]]
 
 
+def test_legacy_root_entrypoint_renders_the_application():
+    app = AppTest.from_file(LEGACY_APP_FILE).run(timeout=30)
+
+    assert not app.exception
+    assert app.chat_input(key="chat_input") is not None
+
+
+def test_chat_composer_upload_contract_matches_backend_limits():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+
+    composer = app.chat_input(key="chat_input")
+
+    assert composer.proto.accept_file
+    assert not composer.proto.accept_audio
+    assert composer.proto.audio_sample_rate == 16000
+    assert composer.proto.max_upload_size_mb == DEFAULT_MAX_FILE_SIZE // (1024 * 1024)
+    assert set(composer.proto.file_type) == {
+        f".{extension}" for extension in DEFAULT_ALLOWED_EXTENSIONS
+    }
+
+
+def test_voice_callback_renders_for_the_active_conversation_only():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+    conversation_id = app.session_state["active_conversation_id"]
+    app.session_state["voice_callback"] = {
+        "state": "playing",
+        "conversation_id": conversation_id,
+        "turn_id": "turn-voice",
+        "provider": "minimax",
+        "detail": "",
+        "updated_at": time.time(),
+    }
+
+    app.run(timeout=30)
+
+    callbacks = [
+        item.value for item in app.markdown if 'class="pm-voice-callback ' in item.value
+    ]
+    assert len(callbacks) == 1
+    assert "正在播放语音回复" in callbacks[0]
+    assert "MiniMax" in callbacks[0]
+    assert 'aria-live="polite"' in callbacks[0]
+
+
 def test_legacy_model_copy_is_compacted_for_display():
     old_runtime_copy = (
         "当前配置的生成模型 ID 是 **`deepseek-v4-flash`**，通过"
@@ -120,16 +186,15 @@ def test_legacy_model_copy_is_compacted_for_display():
         "当前模型：`deepseek-v4-flash`。状态：已配置。"
     )
     assert _compact_legacy_assistant_copy(old_fallback_copy) == (
-        "已切换备用模型：`deepseek-v4-pro`。\n\n"
-        "色彩空间是用于定义和表示色彩的系统。"
+        "已切换备用模型：`deepseek-v4-pro`。\n\n色彩空间是用于定义和表示色彩的系统。"
     )
 
 
 def test_sidebar_restore_control_is_not_hidden_with_header():
-    hidden_block = STYLE_CSS.split("[data-testid=\"stSidebarNav\"]", 1)[0]
+    hidden_block = STYLE_CSS.split('[data-testid="stSidebarNav"]', 1)[0]
 
     assert "footer, header" not in hidden_block
-    assert "[data-testid=\"stHeader\"]" in STYLE_CSS
+    assert '[data-testid="stHeader"]' in STYLE_CSS
     assert "background: transparent" in STYLE_CSS
 
 
@@ -140,10 +205,24 @@ def test_sidebar_pills_expose_exactly_the_three_views():
     assert set(nav.options) == {"对话", "设置", "可观测"}
 
     # legacy multi-section button nav must be gone
-    legacy_keys = {
-        button.key for button in app.button if button.key.startswith("nav_")
-    }
+    legacy_keys = {button.key for button in app.button if button.key.startswith("nav_")}
     assert legacy_keys == set()
+
+
+def test_empty_chat_renders_all_welcome_actions():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+
+    welcome_labels = {
+        "分析利润率",
+        "创建报价",
+        "项目概览",
+        "评估需求",
+        "生成周报",
+        "优化流程",
+        "智能编辑文件",
+    }
+
+    assert welcome_labels.issubset({button.label for button in app.button})
 
 
 def test_sidebar_pills_switch_between_all_views():
@@ -161,6 +240,42 @@ def test_sidebar_pills_switch_between_all_views():
     assert not app.exception
     assert app.session_state["view"] == "对话"
     assert app.chat_input(key="chat_input") is not None
+
+
+@pytest.mark.parametrize("stale_view", ["设置", "可观测"])
+def test_stale_sidebar_state_cannot_hijack_chat_submission(stale_view):
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+    agent = RecordingAgent()
+    app.session_state["agent"] = agent
+    composer = app.chat_input(key="chat_input")
+
+    # A browser tab can retain an older keyed widget value across reconnects.
+    app.session_state["view"] = "对话"
+    app.session_state["_last_nav_selection"] = "对话"
+    app.session_state["sidebar_nav_pills"] = stale_view
+    composer.set_value("导航状态不应抢走这条消息").run(timeout=30)
+
+    assert not app.exception
+    assert app.session_state["view"] == "对话"
+    assert app.session_state["sidebar_nav_pills"] == "对话"
+    assert app.chat_input(key="chat_input") is not None
+    assert agent.calls[-1]["message"] == "导航状态不应抢走这条消息"
+
+
+def test_conversation_switch_from_settings_keeps_next_submission_on_chat():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+    agent = RecordingAgent()
+    app.session_state["agent"] = agent
+    conversation_id = app.session_state["active_conversation_id"]
+
+    app.pills(key="sidebar_nav_pills").set_value("设置").run(timeout=30)
+    app.button(key=f"conversation_{conversation_id}").click().run(timeout=30)
+
+    assert app.session_state["view"] == "对话"
+    assert app.session_state["sidebar_nav_pills"] == "对话"
+    app.chat_input(key="chat_input").set_value("从设置返回后的消息").run(timeout=30)
+    assert app.session_state["view"] == "对话"
+    assert agent.calls[-1]["message"] == "从设置返回后的消息"
 
 
 def test_no_floating_global_nav_overlays_content():
@@ -222,6 +337,16 @@ def test_settings_does_not_expose_volatile_quote_policy_controls():
     assert "OCR" not in tab_labels
 
 
+def test_environment_managed_data_root_has_no_fake_save_actions():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+    app.pills(key="sidebar_nav_pills").set_value("设置").run(timeout=30)
+
+    assert app.text_input(key="storage_data_root_input").disabled is True
+    assert app.button(key="storage_save").disabled is True
+    assert app.button(key="storage_reset").disabled is True
+    assert any("DATA_ROOT 管理" in caption.value for caption in app.caption)
+
+
 def test_settings_can_disable_and_restore_a_workflow():
     app = AppTest.from_file(APP_FILE).run(timeout=30)
     app.pills(key="sidebar_nav_pills").set_value("设置").run(timeout=30)
@@ -243,7 +368,9 @@ def test_settings_can_disable_and_restore_a_workflow():
 def test_streamlit_offline_quote_workflow():
     app = AppTest.from_file(APP_FILE).run(timeout=30)
     app.session_state["agent"] = StubAgent()
-    app.chat_input(key="chat_input").set_value("报价10万成本6万帮我算利润").run(timeout=30)
+    app.chat_input(key="chat_input").set_value("报价10万成本6万帮我算利润").run(
+        timeout=30
+    )
     assert not app.exception
     assert len(app.session_state["messages"]) == 2
     assert any("利润分析结果" in item.value for item in app.markdown)
@@ -252,9 +379,9 @@ def test_streamlit_offline_quote_workflow():
 def test_streamlit_real_quote_request_persists_workflow_metadata():
     app = AppTest.from_file(APP_FILE).run(timeout=30)
 
-    app.chat_input(key="chat_input").set_value(
-        "报价10万成本6万，帮我评估利润"
-    ).run(timeout=30)
+    app.chat_input(key="chat_input").set_value("报价10万成本6万，帮我评估利润").run(
+        timeout=30
+    )
 
     assert not app.exception
     messages = app.session_state["messages"]
@@ -281,9 +408,7 @@ def test_streamlit_reminder_waits_for_persisted_approval_and_can_be_cancelled():
     assert len(waiting) == 1
     run = waiting[0]
     assert len(app.session_state["messages"]) == 1
-    assert app.button(
-        key=f"approve_workflow_{run.id}_{run.current_step}"
-    ) is not None
+    assert app.button(key=f"approve_workflow_{run.id}_{run.current_step}") is not None
 
     app.button(key=f"reject_workflow_{run.id}_{run.current_step}").click().run(
         timeout=30
@@ -319,9 +444,7 @@ def test_streamlit_capability_question_skips_knowledge_lookup_and_returns_fast_a
         lambda prompt: (_ for _ in ()).throw(AssertionError("unexpected lookup")),
     )
 
-    app.chat_input(key="chat_input").set_value("你可以帮我做什么？").run(
-        timeout=30
-    )
+    app.chat_input(key="chat_input").set_value("你可以帮我做什么？").run(timeout=30)
 
     assert not app.exception
     assert agent.calls[-1]["context"]["knowledge_context"] == ""
@@ -338,6 +461,29 @@ def test_streamlit_ordinary_text_uses_streaming_agent_response():
     assert not app.exception
     assert app.session_state["messages"][-1]["content"] == "流式回答"
     assert [call["message"] for call in agent.calls] == ["解释一下色彩空间"]
+
+
+def test_streamlit_passes_harness_injected_feedback_to_response_agent():
+    """The response adapter must consume run_turn's enriched context."""
+    from artpm_agent.memory.feedback_store import get_default_feedback_store
+
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+    agent = RecordingAgent()
+    app.session_state["agent"] = agent
+    feedback_store = get_default_feedback_store()
+    assert feedback_store is not None
+    marker = "后续回答先给结论，再给核验步骤"
+    feedback_id = feedback_store.add("correction", marker, scope="chat")
+
+    try:
+        app.chat_input(key="chat_input").set_value("分析这个需求的风险").run(timeout=30)
+
+        assert not app.exception
+        injected = agent.calls[-1]["context"]["knowledge_context"]
+        assert "【用户偏好与纠正】" in injected
+        assert marker in injected
+    finally:
+        feedback_store.deactivate(feedback_id)
 
 
 def test_streamlit_persists_the_model_that_actually_answered():
@@ -362,9 +508,9 @@ def test_streamlit_profile_change_requires_conversation_confirmation():
     before = profile_store.get_effective_profile()
     target_percent = 23 if before.quote_policy.overhead_rate != 0.23 else 24
 
-    app.chat_input(key="chat_input").set_value(
-        f"把管理费改成{target_percent}%"
-    ).run(timeout=30)
+    app.chat_input(key="chat_input").set_value(f"把管理费改成{target_percent}%").run(
+        timeout=30
+    )
 
     assert not app.exception
     pending = profile_store.list_pending(conversation_id=conversation_id)
@@ -412,9 +558,7 @@ def test_streamlit_knowledge_rule_is_inert_until_accepted():
     conversation_id = app.session_state["active_conversation_id"]
     statement = "所有交付物默认附带版本号"
 
-    app.chat_input(key="chat_input").set_value(
-        f"请记住：{statement}"
-    ).run(timeout=30)
+    app.chat_input(key="chat_input").set_value(f"请记住：{statement}").run(timeout=30)
 
     proposed = [
         rule
@@ -481,18 +625,16 @@ def test_streamlit_generates_new_xlsx_and_exposes_download_metadata():
     app.button(key="new_conversation").click().run(timeout=30)
     app.session_state["agent"] = ArtifactAgent()
 
-    app.chat_input(key="chat_input").set_value(
-        "生成一个 Excel 项目清单"
-    ).run(timeout=30)
+    app.chat_input(key="chat_input").set_value("生成一个 Excel 项目清单").run(
+        timeout=30
+    )
 
     assert not app.exception
     response = app.session_state["messages"][-1]
     artifact = response["metadata"]["artifacts"][0]
     assert artifact["format"] == "xlsx"
     assert artifact["name"].startswith("项目清单")
-    path = (
-        app.session_state["artifact_generator"].root / artifact["stored_path"]
-    )
+    path = app.session_state["artifact_generator"].root / artifact["stored_path"]
     assert Path(path).is_file()
     Path(path).unlink()
 
@@ -558,6 +700,29 @@ def test_streamlit_busy_model_names_capacity_issue_and_is_retryable():
     assert "deepseek-v4-flash 当前服务繁忙" in response["content"]
 
 
+def test_streamlit_error_callback_retry_replays_the_original_prompt():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+    agent = RetryAgent()
+    app.session_state["agent"] = agent
+    app.chat_input(key="chat_input").set_value("需要重试的问题").run(timeout=30)
+
+    error = app.session_state["messages"][-1]
+    callback_key = (
+        f"error_callback_{app.session_state['active_conversation_id']}_"
+        f"{error['id']}_retry"
+    )
+    assert app.button(key=callback_key) is not None
+
+    app.button(key=callback_key).click().run(timeout=30)
+
+    assert not app.exception
+    assert agent.calls == 2
+    assert app.session_state["messages"][-1]["content"] == "重试成功"
+    assert not any(
+        item.get("status") == "error" for item in app.session_state["messages"]
+    )
+
+
 def test_streamlit_conversation_history_excludes_current_user_message():
     app = AppTest.from_file(APP_FILE).run(timeout=30)
     agent = RecordingAgent()
@@ -571,9 +736,9 @@ def test_streamlit_conversation_history_excludes_current_user_message():
     assert agent.calls[0]["context"]["conversation_history"] == []
 
     second_context = agent.calls[1]["context"]
-    assert second_context["conversation_id"] == app.session_state[
-        "active_conversation_id"
-    ]
+    assert (
+        second_context["conversation_id"] == app.session_state["active_conversation_id"]
+    )
     assert [
         (message["role"], message["content"])
         for message in second_context["conversation_history"]
@@ -613,8 +778,7 @@ def test_streamlit_multiple_conversations_are_isolated_and_restorable():
     final_call = agent.calls[-1]
     assert final_call["context"]["conversation_id"] == conversation_a
     assert [
-        message["content"]
-        for message in final_call["context"]["conversation_history"]
+        message["content"] for message in final_call["context"]["conversation_history"]
     ] == ["A 会话问题", "回答：A 会话问题"]
     assert all(
         "B 会话" not in message["content"]
@@ -635,20 +799,55 @@ def test_streamlit_messages_survive_a_new_app_session():
     assert message_contents(second_app) == ["持久化问题", "回答：持久化问题"]
 
 
-def test_sidebar_conversation_list_is_read_only_and_compact():
+def test_sidebar_conversation_list_exposes_quick_delete():
     app = AppTest.from_file(APP_FILE).run(timeout=30)
     conversation_id = app.session_state["active_conversation_id"]
     button_keys = {button.key for button in app.button}
-    text_input_keys = {text_input.key for text_input in app.text_input}
-    checkbox_keys = {checkbox.key for checkbox in app.checkbox}
 
     assert not app.exception
     assert f"conversation_{conversation_id}" in button_keys
-    assert f"quick_delete_conversation_{conversation_id}" not in button_keys
+    assert f"quick_delete_conversation_{conversation_id}" in button_keys
     assert f"confirm_quick_delete_{conversation_id}" not in button_keys
     assert f"cancel_quick_delete_{conversation_id}" not in button_keys
-    assert f"rename_conversation_{conversation_id}" not in button_keys
-    assert f"delete_conversation_{conversation_id}" not in button_keys
-    assert f"rename_input_{conversation_id}" not in text_input_keys
-    assert f"confirm_delete_conversation_{conversation_id}" not in checkbox_keys
+    assert "pending_conversation_delete" not in app.session_state
+
+
+def test_sidebar_quick_delete_requires_confirmation_and_switches_active_thread():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+    conversation_id = app.session_state["active_conversation_id"]
+    tenant = app.session_state["tenant_context"]
+    app.session_state["conversation_permission_grants"] = {
+        conversation_id: {
+            "mode": "full_access",
+            "tenant_id": tenant.tenant_id,
+            "workspace_id": tenant.workspace_id,
+            "principal_id": tenant.principal_id,
+            "conversation_id": conversation_id,
+            "issued_at": time.time(),
+            "expires_at": time.time() + 3600,
+        }
+    }
+
+    app.button(key=f"quick_delete_conversation_{conversation_id}").click().run(
+        timeout=30
+    )
+    assert app.session_state["pending_conversation_delete"] == conversation_id
+    assert f"confirm_quick_delete_{conversation_id}" in {
+        button.key for button in app.button
+    }
+
+    app.button(key=f"cancel_quick_delete_{conversation_id}").click().run(timeout=30)
+    assert "pending_conversation_delete" not in app.session_state
+
+    app.button(key=f"quick_delete_conversation_{conversation_id}").click().run(
+        timeout=30
+    )
+    app.button(key=f"confirm_quick_delete_{conversation_id}").click().run(timeout=30)
+
+    assert app.session_state["active_conversation_id"] != conversation_id
+    assert (
+        app.session_state["conversation_store"].get_conversation(conversation_id)
+        is None
+    )
+    assert conversation_id not in app.session_state["conversation_permission_grants"]
     assert "pending_conversation_delete" not in app.session_state

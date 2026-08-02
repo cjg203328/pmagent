@@ -4,23 +4,33 @@ STYLE_CSS = """
     :root {
         /* ── 色板 ── */
         --pm-paper:        #ffffff;
-        --pm-canvas:       #fafafa;
-        --pm-surface:      #f7f8fa;
-        --pm-sidebar-bg:   #f5f6f7;
-        --pm-sidebar-hover:#eceef1;
-        --pm-ink:          #1a1a2e;
-        --pm-ink-secondary:#3d3d54;
-        --pm-muted:        #8b8fa3;
-        --pm-line:         #e8eaf0;
-        --pm-line-light:   #f0f1f5;
+        --pm-canvas:       #fbfbfa;
+        --pm-surface:      #f3f3f1;
+        --pm-sidebar-bg:   #f5f5f3;
+        --pm-sidebar-hover:#ebebe8;
+        --pm-sidebar-active:#e7e7e4;
+        --pm-ink:          #202124;
+        --pm-ink-secondary:#41454b;
+        --pm-muted:        #646a73;
+        --pm-line:         #dededb;
+        --pm-line-light:   #ecece9;
 
-        /* 主色 — 柔和版：从 #4a6cf7 降到更淡的薰衣草蓝 */
-        --pm-accent:       #7c8aff;
-        --pm-accent-hover: #6677dd;
-        --pm-accent-soft:  #f4f3ff;
-        --pm-accent-glow:  rgba(124, 138, 255, 0.07);
-        --pm-accent-warm:  #f8f6fc;   /* 助手消息暖调底色 */
-        --pm-accent-pale:  #edeafc;   /* 悬浮/交互态 */
+        /* Codex-like focus color: neutral reading surfaces, blue actions. */
+        --pm-accent:       #2563eb;
+        --pm-accent-hover: #1d4ed8;
+        --pm-accent-soft:  #eff6ff;
+        --pm-accent-glow:  rgba(37, 99, 235, 0.12);
+        --pm-accent-warm:  #f7f7f5;
+        --pm-accent-pale:  #dbeafe;
+        --pm-focus:        #1d4ed8;
+
+        /* Chat surfaces stay quiet; the accent is reserved for actions. */
+        --pm-chat-user-bg:     #f0f0ee;
+        --pm-chat-user-fg:     #202124;
+        --pm-chat-assistant-bg:transparent;
+        --pm-chat-assistant-fg:#41454b;
+        --pm-chat-border:      #e3e3df;
+        --pm-chat-code-bg:     #f3f3f1;
 
         /* 语义色 */
         --pm-success:      #22c55e;
@@ -31,10 +41,10 @@ STYLE_CSS = """
         --pm-danger-soft:  #fef2f2;
 
         /* 圆角 */
-        --pm-radius-sm:    8px;
-        --pm-radius:       12px;
-        --pm-radius-lg:    16px;
-        --pm-radius-xl:    20px;
+        --pm-radius-sm:    6px;
+        --pm-radius:       8px;
+        --pm-radius-lg:    10px;
+        --pm-radius-xl:    12px;
 
         /* 间距令牌 */
         --pm-space-1: 4px;
@@ -49,18 +59,29 @@ STYLE_CSS = """
 
         /* 布局 */
         --pm-chat-shell-width:   860px;
-        --pm-chat-thread-width:  780px;
+        --pm-chat-thread-width:  820px;
         --pm-sidebar-width:      280px;
+        --pm-composer-reserve:   136px;
+        --pm-page-gutter:        clamp(20px, 3.5vw, 44px);
 
         /* 阴影系统 */
-        --pm-shadow-sm:  0 1px 2px rgba(26,26,46,0.04);
-        --pm-shadow-md:  0 4px 16px rgba(26,26,46,0.06);
-        --pm-shadow-lg:  0 8px 32px rgba(26,26,46,0.10);
-        --pm-shadow-input:0 4px 24px rgba(26,26,46,0.08);
-        --pm-shadow-card: 0 2px 12px rgba(26,26,46,0.05);
+        --pm-shadow-sm:  0 1px 2px rgba(32,33,36,0.04);
+        --pm-shadow-md:  0 4px 14px rgba(32,33,36,0.06);
+        --pm-shadow-lg:  0 10px 28px rgba(32,33,36,0.08);
+        --pm-shadow-input:0 1px 3px rgba(32,33,36,0.06);
+        --pm-shadow-card: 0 1px 4px rgba(32,33,36,0.04);
 
-        /* 过渡 */
-        --pm-transition: all 200ms cubic-bezier(.4,0,.2,1);
+        /* Explicit, interruptible properties; avoid catch-all transitions. */
+        --pm-ease-out: cubic-bezier(.23, 1, .32, 1);
+        --pm-ease-in-out: cubic-bezier(.77, 0, .175, 1);
+        --pm-duration-press: 140ms;
+        --pm-duration-ui: 200ms;
+        --pm-transition: color var(--pm-duration-ui) var(--pm-ease-out),
+                          background-color var(--pm-duration-ui) var(--pm-ease-out),
+                          border-color var(--pm-duration-ui) var(--pm-ease-out),
+                          box-shadow var(--pm-duration-ui) var(--pm-ease-out),
+                          transform var(--pm-duration-ui) var(--pm-ease-out),
+                          opacity var(--pm-duration-ui) var(--pm-ease-out);
     }
 
     *, *::before, *::after {
@@ -102,18 +123,23 @@ STYLE_CSS = """
     [data-testid="stMainBlockContainer"] {
         width: 100%;
         max-width: 1280px;
-        padding: 32px 44px 56px;
+        padding: 28px var(--pm-page-gutter) 44px;
     }
 
     [data-testid="stMainBlockContainer"]:has(.chat-page-marker) {
         max-width: calc(var(--pm-chat-shell-width) + 44px);
+        padding-bottom: var(--pm-composer-reserve);
         padding-left: 28px;
         padding-right: 28px;
     }
 
+    [data-testid="stAppScrollToBottomContainer"]:has(.chat-page-marker) {
+        scroll-padding-bottom: var(--pm-composer-reserve);
+    }
+
     /* ── 欢迎/空状态居中 ── */
     [data-testid="stMainBlockContainer"]:has(.chat-empty-marker) {
-        padding-top: clamp(160px, 22vh, 240px);
+        padding-top: clamp(112px, 15vh, 176px);
         text-align: center;
         display: flex;
         flex-direction: column;
@@ -148,7 +174,7 @@ STYLE_CSS = """
 
     p, li, label, [data-testid="stMarkdownContainer"] {
         font-size: 14px;
-        line-height: 1.7;
+        line-height: 1.6;
         color: var(--pm-ink-secondary);
     }
 
@@ -168,7 +194,7 @@ STYLE_CSS = """
     .page-meta {
         color: var(--pm-muted);
         font-size: 14px;
-        margin: 0 0 28px;
+        margin: 0 0 24px;
     }
 
     /* ── 分区标题（带底部装饰线）── */
@@ -177,13 +203,13 @@ STYLE_CSS = """
         border-bottom: 1px solid var(--pm-line-light);
         display: flex;
         justify-content: space-between;
-        margin: 28px 0 16px;
-        padding-bottom: 10px;
+        margin: 24px 0 12px;
+        padding-bottom: 8px;
         position: relative;
     }
 
     .section-heading::after {
-        background: linear-gradient(90deg, var(--pm-accent), transparent);
+        background: var(--pm-accent);
         bottom: -1px;
         content: "";
         height: 2px;
@@ -232,13 +258,13 @@ STYLE_CSS = """
     }
 
     .brand-mark {
-        background: linear-gradient(135deg, var(--pm-accent), #a78bfa);
+        background: var(--pm-ink);
         display: block;
         height: 15px;
         transform: rotate(45deg);
         width: 15px;
         border-radius: 2px;
-        box-shadow: 0 2px 8px rgba(124,138,255,0.22);
+        box-shadow: none;
     }
 
     .brand-name {
@@ -288,11 +314,16 @@ STYLE_CSS = """
     }
 
     [data-testid="stSidebar"] .stButton button[kind="primary"] {
-        background: var(--pm-accent-soft);
+        background: var(--pm-sidebar-active);
         border-color: transparent;
-        box-shadow: inset 3px 0 0 var(--pm-accent) !important;
-        color: var(--pm-accent);
+        box-shadow: inset 2px 0 0 var(--pm-accent) !important;
+        color: var(--pm-ink);
         font-weight: 600;
+    }
+
+    [data-testid="stSidebar"] .stButton button[kind="primary"]:disabled {
+        cursor: default !important;
+        opacity: 1 !important;
     }
 
     /* ── 会话面板 ── */
@@ -312,6 +343,23 @@ STYLE_CSS = """
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+    }
+    .st-key-conversation_list [data-testid="stHorizontalBlock"] {
+        align-items: center;
+        gap: 4px !important;
+    }
+    .st-key-conversation_list [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:last-child .stButton button {
+        min-width: 32px !important;
+        padding: 0 !important;
+        color: var(--pm-muted) !important;
+        background: transparent !important;
+        border-color: transparent !important;
+        box-shadow: none !important;
+    }
+    .st-key-conversation_list [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:last-child .stButton button:hover:not(:disabled) {
+        color: var(--pm-danger) !important;
+        background: var(--pm-danger-soft) !important;
+        border-color: var(--pm-danger-soft) !important;
     }
     .st-key-new_conversation button {
         justify-content: center !important;
@@ -333,6 +381,23 @@ STYLE_CSS = """
         min-width: 0 !important;
         justify-content: center !important;
         font-size: 13px !important;
+    }
+
+    .st-key-sidebar_nav_pills button[role="radio"] {
+        background: transparent !important;
+        border: 1px solid var(--pm-line) !important;
+        color: var(--pm-ink-secondary) !important;
+        box-shadow: none !important;
+    }
+
+    .st-key-sidebar_nav_pills button[role="radio"][aria-checked="true"] {
+        background: var(--pm-accent-soft) !important;
+        border-color: var(--pm-accent) !important;
+        color: var(--pm-accent) !important;
+    }
+
+    .st-key-sidebar_nav_pills button[role="radio"]:hover {
+        background: var(--pm-sidebar-hover) !important;
     }
 
     /* ── 侧边栏底部统计 ── */
@@ -376,15 +441,9 @@ STYLE_CSS = """
         border-radius: 50%;
         height: 7px;
         width: 7px;
-        animation: pulse-dot 2s ease-in-out infinite;
     }
 
-    .state-dot.offline { background: var(--pm-danger); animation: none; }
-
-    @keyframes pulse-dot {
-        0%, 100% { opacity: 1; transform: scale(1); }
-        50%      { opacity: 0.55; transform: scale(0.85); }
-    }
+    .state-dot.offline { background: var(--pm-danger); }
 
     /* ══════════════════════════════════════
        主区域控件 — 统一按钮 / 输入 / 表单
@@ -418,7 +477,7 @@ STYLE_CSS = """
     input:focus-visible,
     textarea:focus-visible,
     [role="tab"]:focus-visible {
-        outline: 3px solid rgba(124, 138, 255, 0.18) !important;
+        outline: 2px solid var(--pm-focus) !important;
         outline-offset: 2px !important;
     }
 
@@ -495,19 +554,19 @@ STYLE_CSS = """
         border-radius: var(--pm-radius);
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
-        margin: 20px 0 0;
+        margin: 16px 0 0;
         overflow: hidden;
         box-shadow: var(--pm-shadow-card);
     }
 
     .metric-item {
         min-width: 0;
-        padding: 20px 22px;
+        padding: 16px 18px;
     }
 
-    .metric-item.tone-blue   { background: var(--pm-accent-soft); border-left: 3px solid var(--pm-accent); }
-    .metric-item.tone-amber { background: var(--pm-warning-soft); border-left: 3px solid var(--pm-warning); }
-    .metric-item.tone-teal  { background: var(--pm-success-soft); border-left: 3px solid var(--pm-success); }
+    .metric-item.tone-blue,
+    .metric-item.tone-amber,
+    .metric-item.tone-teal { background: var(--pm-paper); }
 
     .metric-item.tone-blue   .metric-label { color: var(--pm-accent); }
     .metric-item.tone-amber .metric-label { color: var(--pm-warning); }
@@ -610,17 +669,17 @@ STYLE_CSS = """
     }
 
     /* ── 快捷建议芯片（Suggestion Chips）── */
-    .welcome-suggestions {
+    .st-key-welcome_suggestions {
         display: flex;
         flex-wrap: wrap;
         justify-content: center;
-        gap: 10px;
+        gap: 8px;
         max-width: 680px;
-        margin: 36px auto 0;
+        margin: 26px auto 0;
     }
 
     /* ── 欢迎区内的按钮自动获得芯片外观（Streamlit button → chip）── */
-    .welcome-suggestions [data-testid="stVerticalBlock"]
+    .st-key-welcome_suggestions [data-testid="stVerticalBlock"]
         [data-testid="stButton"] button {
         background: var(--pm-paper) !important;
         border: 1.5px solid var(--pm-line) !important;
@@ -638,7 +697,7 @@ STYLE_CSS = """
         text-overflow: ellipsis !important;
     }
 
-    .welcome-suggestions [data-testid="stVerticalBlock"]
+    .st-key-welcome_suggestions [data-testid="stVerticalBlock"]
         [data-testid="stButton"] button:hover {
         border-color: var(--pm-accent) !important;
         background: var(--pm-accent-soft) !important;
@@ -647,7 +706,7 @@ STYLE_CSS = """
         box-shadow: var(--pm-shadow-md) !important;
     }
 
-    .welcome-suggestions [data-testid="stVerticalBlock"]
+    .st-key-welcome_suggestions [data-testid="stVerticalBlock"]
         [data-testid="stButton"] button p {
         font-size: 13.5px !important;
         font-weight: 500 !important;
@@ -661,12 +720,13 @@ STYLE_CSS = """
         background: transparent;
         border-bottom: 0;
         border-radius: 0;
-        gap: 14px;
-        padding: 10px 0;
+        gap: 12px;
+        padding: 8px 0;
         width: 100%;
     }
 
     .st-key-chat_thread {
+        gap: 12px !important;
         margin-left: auto;
         margin-right: auto;
         max-width: var(--pm-chat-thread-width);
@@ -678,7 +738,7 @@ STYLE_CSS = """
         display: none;
     }
 
-    /* 用户消息 — 右对齐气泡 */
+    /* User message: Codex-like neutral bubble, aligned to the right. */
     [data-testid="stChatMessage"]:has(.chat-role-user) {
         background: transparent;
         border-radius: 0;
@@ -694,25 +754,26 @@ STYLE_CSS = """
 
     [data-testid="stChatMessage"]:has(.chat-role-user)
     [data-testid="stChatMessageContent"] {
-        background: var(--pm-accent);
-        border-radius: var(--pm-radius-lg) var(--pm-radius-lg) 4px var(--pm-radius-lg);
-        color: #fff;
+        background: var(--pm-chat-user-bg);
+        border: 1px solid var(--pm-chat-border);
+        border-radius: 16px 16px 6px 16px;
+        color: var(--pm-chat-user-fg);
         flex: 0 1 auto;
         margin: 0;
-        max-width: 72%;
+        max-width: 78%;
         min-height: 36px;
         min-width: 0;
         overflow-wrap: anywhere;
-        padding: 10px 16px;
+        padding: 8px 14px;
         width: fit-content;
-        box-shadow: 0 1px 6px rgba(124,138,255,0.18);
+        box-shadow: none;
     }
 
     [data-testid="stChatMessage"]:has(.chat-role-user)
     [data-testid="stChatMessageContent"] p,
     [data-testid="stChatMessage"]:has(.chat-role-user)
     [data-testid="stChatMessageContent"] li {
-        color: #fff !important;
+        color: var(--pm-chat-user-fg) !important;
         font-size: 14px !important;
         line-height: 1.55 !important;
     }
@@ -740,35 +801,35 @@ STYLE_CSS = """
     [data-testid="stChatMessage"]:has(.chat-role-user)
     [data-testid="stMarkdownContainer"] pre {
         max-width: 100%; overflow-x: auto;
-        background: rgba(255,255,255,0.12) !important;
+        background: var(--pm-paper) !important;
+        border: 1px solid var(--pm-chat-border);
         border-radius: var(--pm-radius-sm);
     }
 
-    /* 助手消息 — 柔和暖调容器 */
+    /* Assistant message: an unframed reading surface, like Codex. */
     [data-testid="stChatMessage"]:has(.chat-role-assistant) {
-        margin-bottom: 10px;
+        margin-bottom: 8px;
     }
 
-    /* 助手消息内容：极淡的薰衣草暖调底色 + 微妙左强调线 */
     [data-testid="stChatMessage"]:has(.chat-role-assistant)
     [data-testid="stChatMessageContent"] {
-        background: var(--pm-accent-warm, #f8f6fc);
-        border-radius: var(--pm-radius-lg);
-        border-left: 3px solid var(--pm-accent-pale, #edeafc);
-        box-shadow: 0 1px 4px rgba(124,138,255,0.04);
-        flex: 0 1 auto;
-        margin: 2px 0;
-        max-width: 85%;
+        background: var(--pm-chat-assistant-bg);
+        border: 0;
+        border-radius: 0;
+        box-shadow: none;
+        flex: 1 1 auto;
+        margin: 0;
+        max-width: calc(100% - 48px);
         min-height: 36px;
         overflow-wrap: anywhere;
-        padding: 14px 18px;
-        width: fit-content;
-        transition: box-shadow 180ms ease;
+        padding: 3px 0 6px;
+        width: auto;
+        transition: color var(--pm-duration-ui) var(--pm-ease-out);
     }
 
     [data-testid="stChatMessage"]:has(.chat-role-assistant)
     [data-testid="stChatMessageContent"]:hover {
-        box-shadow: 0 2px 10px rgba(124,138,255,0.08);
+        box-shadow: none;
     }
 
     /* 助手消息内文字：更舒适的行高与间距 */
@@ -777,8 +838,8 @@ STYLE_CSS = """
     [data-testid="stChatMessage"]:has(.chat-role-assistant)
     [data-testid="stChatMessageContent"] li {
         font-size: 14.5px !important;
-        line-height: 1.75 !important;
-        color: var(--pm-ink-secondary) !important;
+        line-height: 1.65 !important;
+        color: var(--pm-chat-assistant-fg) !important;
         margin-bottom: 4px;
     }
 
@@ -810,12 +871,35 @@ STYLE_CSS = """
     [data-testid="stChatMessage"] [data-testid="stChatMessageAvatarAssistant"] {
         border: 1.5px solid var(--pm-line);
         border-radius: 50%;
-        height: 34px;
-        width: 34px;
-        box-shadow: var(--pm-shadow-sm);
+        height: 32px;
+        width: 32px;
+        box-shadow: none;
     }
 
     [data-testid="stChatMessageContent"] p:last-child { margin-bottom: 0 !important; }
+
+    /* Feedback is one compact action group. Streamlit normally stacks every
+       column on narrow screens, which separated these two icon buttons. */
+    [data-testid="stHorizontalBlock"]:has([class*="st-key-fb_up_"]):has([class*="st-key-fb_down_"]) {
+        align-items: center;
+        flex-wrap: nowrap !important;
+        gap: 4px !important;
+        margin-top: 2px;
+    }
+    [data-testid="stHorizontalBlock"]:has([class*="st-key-fb_up_"])
+        > [data-testid="stColumn"]:has([class*="st-key-fb_up_"]),
+    [data-testid="stHorizontalBlock"]:has([class*="st-key-fb_down_"])
+        > [data-testid="stColumn"]:has([class*="st-key-fb_down_"]) {
+        flex: 0 0 40px !important;
+        min-width: 40px !important;
+        width: 40px !important;
+    }
+    [data-testid="stHorizontalBlock"]:has([class*="st-key-fb_up_"]):has([class*="st-key-fb_down_"])
+        > [data-testid="stColumn"]:last-child {
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+        width: auto !important;
+    }
 
     /* ── 附件显示 ── */
     .chat-attachments {
@@ -841,10 +925,258 @@ STYLE_CSS = """
     /* ══════════════════════════════════════
        输入框
     ══════════════════════════════════════ */
+    /* Persistent permission gate: compact, explicit and decision focused. */
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.pm-permission-anchor) {
+        background: var(--pm-paper);
+        border: 1px solid var(--pm-line) !important;
+        border-left: 3px solid var(--pm-warning) !important;
+        border-radius: var(--pm-radius) !important;
+        box-shadow: var(--pm-shadow-card);
+        margin: 12px 0;
+        max-width: 100%;
+        scroll-margin-bottom: var(--pm-composer-reserve);
+    }
+
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.pm-permission-anchor)
+    > [data-testid="stVerticalBlock"] {
+        gap: 10px;
+        padding: 16px 18px;
+    }
+
+    .pm-permission-anchor,
+    [data-testid="stElementContainer"]:has(.pm-permission-anchor) {
+        display: none;
+    }
+
+    .pm-permission-heading {
+        align-items: flex-start;
+        display: flex;
+        gap: 10px;
+        justify-content: space-between;
+    }
+
+    .pm-permission-title {
+        min-width: 0;
+    }
+
+    .pm-permission-title h3 {
+        color: var(--pm-ink);
+        font-size: 15px;
+        font-weight: 700;
+        line-height: 1.35;
+        margin: 0 !important;
+    }
+
+    .pm-permission-title p {
+        color: var(--pm-muted);
+        font-size: 12px;
+        line-height: 1.45;
+        margin: 2px 0 0;
+        overflow-wrap: anywhere;
+    }
+
+    .pm-risk {
+        border: 1px solid var(--pm-line);
+        border-radius: 999px;
+        color: var(--pm-muted);
+        flex: 0 0 auto;
+        font-size: 11px;
+        font-weight: 650;
+        line-height: 22px;
+        padding: 0 8px;
+    }
+
+    .pm-risk-medium,
+    .pm-risk-high {
+        background: var(--pm-warning-soft);
+        border-color: #f3d28f;
+        color: #8a5600;
+    }
+
+    .pm-risk-critical,
+    .pm-risk-untrusted {
+        background: var(--pm-danger-soft);
+        border-color: #efb5b5;
+        color: #a32929;
+    }
+
+    .pm-permission-action {
+        color: var(--pm-ink);
+        font-size: 14.5px;
+        font-weight: 700;
+        line-height: 1.45;
+        margin-top: 2px;
+        overflow-wrap: anywhere;
+    }
+
+    .pm-permission-facts {
+        border-bottom: 1px solid var(--pm-line-light);
+        display: grid;
+        gap: 8px;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        padding-bottom: 8px;
+    }
+
+    .pm-permission-fact {
+        background: transparent;
+        border: 0;
+        border-radius: 0;
+        min-width: 0;
+        padding: 4px 0;
+    }
+
+    .pm-permission-fact + .pm-permission-fact {
+        border-left: 1px solid var(--pm-line-light);
+        padding-left: 12px;
+    }
+
+    .pm-permission-fact span,
+    .pm-permission-params > span {
+        color: var(--pm-muted);
+        display: block;
+        font-size: 11px;
+        font-weight: 650;
+        line-height: 1.35;
+        margin-bottom: 3px;
+    }
+
+    .pm-permission-fact strong {
+        color: var(--pm-ink-secondary);
+        display: block;
+        font-size: 12px;
+        font-weight: 550;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+    }
+
+    .pm-permission-params {
+        border-top: 1px solid var(--pm-line-light);
+        padding-top: 9px;
+    }
+
+    .pm-permission-params code {
+        background: transparent;
+        color: var(--pm-ink-secondary);
+        display: block;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 11.5px;
+        line-height: 1.5;
+        max-width: 100%;
+        overflow-wrap: anywhere;
+        padding: 0;
+        white-space: normal;
+    }
+
+    [class*="st-key-permission_actions_"] [data-testid="stHorizontalBlock"] {
+        gap: 10px;
+    }
+
+    [class*="st-key-permission_actions_"] button {
+        min-height: 44px !important;
+        width: 100%;
+    }
+
+    [data-testid="stChatInput"]:has(textarea:disabled) {
+        background: var(--pm-paper);
+        border-color: var(--pm-line);
+        box-shadow: none;
+    }
+
+    [data-testid="stChatInput"] textarea:disabled {
+        color: var(--pm-muted) !important;
+        opacity: 1 !important;
+        -webkit-text-fill-color: var(--pm-muted);
+    }
+
+    /* Visual workflow editor: a readable graph preview backed by the
+       structured data editor, with stable node dimensions for narrow screens. */
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.workflow-designer-marker) {
+        background: var(--pm-paper);
+        border: 1px solid var(--pm-line) !important;
+        border-radius: var(--pm-radius) !important;
+        margin: 8px 0 16px;
+        overflow: hidden;
+    }
+
+    .workflow-designer-marker,
+    [data-testid="stElementContainer"]:has(.workflow-designer-marker) {
+        display: none;
+    }
+
+    .pm-workflow-canvas {
+        align-items: stretch;
+        display: flex;
+        gap: 8px;
+        margin: 8px 0 16px;
+        max-width: 100%;
+        overflow-x: auto;
+        padding: 4px 2px 10px;
+    }
+
+    .pm-workflow-node {
+        background: var(--pm-paper);
+        border: 1px solid var(--pm-line);
+        border-radius: var(--pm-radius);
+        display: flex;
+        flex: 0 0 156px;
+        flex-direction: column;
+        gap: 4px;
+        min-height: 92px;
+        padding: 10px;
+    }
+
+    .pm-workflow-node strong,
+    .pm-workflow-node span,
+    .pm-workflow-node small {
+        overflow-wrap: anywhere;
+    }
+
+    .pm-workflow-node strong {
+        color: var(--pm-ink);
+        font-size: 13px;
+    }
+
+    .pm-workflow-node span:not(.pm-workflow-node-index) {
+        color: var(--pm-ink);
+        font-size: 12px;
+    }
+
+    .pm-workflow-node small {
+        color: var(--pm-muted);
+        font-size: 11px;
+        line-height: 1.35;
+    }
+
+    .pm-workflow-node-index {
+        align-items: center;
+        background: var(--pm-ink);
+        border-radius: 999px;
+        color: var(--pm-paper);
+        display: inline-flex;
+        font-size: 10px;
+        height: 20px;
+        justify-content: center;
+        width: 20px;
+    }
+
+    .pm-workflow-edge {
+        align-self: center;
+        color: var(--pm-muted);
+        flex: 0 0 auto;
+        font-size: 18px;
+    }
+
+    .pm-workflow-empty {
+        border: 1px dashed var(--pm-line);
+        color: var(--pm-muted);
+        padding: 16px;
+        width: 100%;
+    }
+
     [data-testid="stChatInput"] {
         background: var(--pm-paper);
-        border: 1.5px solid var(--pm-line);
-        border-radius: var(--pm-radius-xl);
+        border: 1px solid var(--pm-line);
+        border-radius: 16px;
         box-shadow: var(--pm-shadow-input);
         transition: var(--pm-transition);
         overflow: hidden;
@@ -852,7 +1184,7 @@ STYLE_CSS = """
 
     [data-testid="stChatInput"]:focus-within {
         border-color: var(--pm-accent);
-        box-shadow: var(--pm-shadow-input), 0 0 0 4px var(--pm-accent-glow);
+        box-shadow: var(--pm-shadow-input), 0 0 0 2px var(--pm-accent-glow);
     }
 
     [data-testid="stChatInput"] textarea {
@@ -860,7 +1192,7 @@ STYLE_CSS = """
         font-size: 14.5px;
         line-height: 1.6;
         min-height: 48px;
-        padding: 4px 0 !important;
+        padding: 12px 16px 4px !important;
     }
 
     [data-testid="stChatInput"] textarea:focus {
@@ -872,16 +1204,309 @@ STYLE_CSS = """
         color: var(--pm-muted) !important;
     }
 
+    /* The access mode is a real Streamlit popover layered into the composer,
+       immediately after the native attachment button. */
+    .st-key-chat_composer_shell {
+        position: relative;
+        width: 100%;
+    }
+
+    .st-key-chat_composer_shell > [data-testid="stVerticalBlock"] {
+        gap: 0 !important;
+    }
+
+    .st-key-chat_voice_callback {
+        bottom: calc(100% + 10px);
+        left: 0;
+        pointer-events: none;
+        position: absolute !important;
+        width: 100% !important;
+        z-index: 8;
+    }
+
+    .st-key-chat_voice_callback > [data-testid="stVerticalBlock"] {
+        gap: 0 !important;
+    }
+
+    .pm-voice-callback {
+        align-items: center;
+        background: var(--pm-paper);
+        border: 1px solid var(--pm-line);
+        border-radius: 8px;
+        box-shadow: var(--pm-shadow-md);
+        display: flex;
+        gap: 10px;
+        margin-left: 8px;
+        max-width: min(460px, calc(100vw - 48px));
+        min-height: 44px;
+        padding: 8px 12px;
+        width: max-content;
+    }
+
+    .pm-voice-callback-icon {
+        align-items: center;
+        background: var(--pm-surface);
+        border-radius: 50%;
+        color: var(--pm-focus);
+        display: inline-flex;
+        flex: 0 0 28px;
+        font-size: 17px;
+        height: 28px;
+        justify-content: center;
+        width: 28px;
+    }
+
+    .pm-voice-callback-copy {
+        display: grid;
+        gap: 1px;
+        min-width: 0;
+    }
+
+    .pm-voice-callback-label {
+        color: var(--pm-ink-secondary);
+        font-size: 13.5px;
+        font-weight: 600;
+        line-height: 1.35;
+    }
+
+    .pm-voice-callback-detail {
+        color: var(--pm-muted);
+        font-size: 12px;
+        line-height: 1.35;
+        overflow-wrap: anywhere;
+    }
+
+    .pm-voice-callback--success .pm-voice-callback-icon {
+        background: var(--pm-success-soft);
+        color: var(--pm-success);
+    }
+
+    .pm-voice-callback--warning .pm-voice-callback-icon {
+        background: var(--pm-warning-soft);
+        color: var(--pm-warning);
+    }
+
+    .pm-voice-callback--danger .pm-voice-callback-icon {
+        background: var(--pm-danger-soft);
+        color: var(--pm-danger);
+    }
+
+    .st-key-chat_composer_shell:has(
+        [data-testid="stChatInputMicButton"] button[aria-label="Stop recording"]
+    )::before,
+    .st-key-chat_composer_shell:has(
+        [data-testid="stChatInputMicButton"] button[aria-label="Pause recording"]
+    )::before {
+        background: var(--pm-danger-soft);
+        border: 1px solid var(--pm-danger);
+        border-radius: 8px;
+        color: var(--pm-danger);
+        content: "正在录音";
+        font-size: 12.5px;
+        font-weight: 600;
+        padding: 6px 10px;
+        position: absolute;
+        right: 8px;
+        top: -40px;
+        z-index: 9;
+    }
+
+    [data-testid="stChatInput"]:has(
+        [data-testid="stChatInputMicButton"] button[aria-label="Stop recording"]
+    ),
+    [data-testid="stChatInput"]:has(
+        [data-testid="stChatInputMicButton"] button[aria-label="Pause recording"]
+    ) {
+        border-color: var(--pm-danger) !important;
+        box-shadow: var(--pm-shadow-input), 0 0 0 2px var(--pm-danger-soft) !important;
+    }
+
+    .st-key-chat_access_popover {
+        bottom: 10px;
+        left: 96px;
+        position: absolute !important;
+        width: max-content !important;
+        z-index: 6;
+    }
+
+    .st-key-chat_access_popover button {
+        background: transparent !important;
+        border: 0 !important;
+        box-shadow: none !important;
+        color: var(--pm-warning) !important;
+        font-size: 13.5px !important;
+        font-weight: 500 !important;
+        height: 36px !important;
+        min-height: 36px !important;
+        padding: 0 8px !important;
+        white-space: nowrap;
+    }
+
+    .st-key-chat_access_popover button:hover {
+        background: var(--pm-warning-soft) !important;
+        color: #b45309 !important;
+    }
+
+    .st-key-chat_access_popover button:focus-visible {
+        outline: 2px solid var(--pm-focus) !important;
+        outline-offset: 1px !important;
+    }
+
+    .pm-access-panel-anchor,
+    [data-testid="stElementContainer"]:has(.pm-access-panel-anchor) {
+        display: none !important;
+    }
+
+    [data-testid="stPopoverBody"]:has(.pm-access-panel-anchor) {
+        background: var(--pm-paper) !important;
+        border: 1px solid var(--pm-line) !important;
+        border-radius: 14px !important;
+        box-shadow: var(--pm-shadow-lg) !important;
+        max-width: calc(100vw - 32px) !important;
+        padding: 20px !important;
+        width: min(460px, calc(100vw - 32px)) !important;
+    }
+
+    [data-testid="stPopoverBody"]:has(.pm-access-panel-anchor)
+    > [data-testid="stVerticalBlock"] {
+        gap: 14px !important;
+    }
+
+    .pm-access-panel-copy {
+        display: grid;
+        gap: 8px;
+    }
+
+    .pm-access-panel-title {
+        color: var(--pm-ink);
+        font-size: 16px;
+        font-weight: 700;
+        line-height: 1.35;
+    }
+
+    .pm-access-panel-description,
+    .pm-access-panel-footnote {
+        color: var(--pm-muted);
+        font-size: 13px;
+        line-height: 1.55;
+        overflow-wrap: anywhere;
+    }
+
+    [data-testid="stPopoverBody"]:has(.pm-access-panel-anchor)
+    [data-testid="stButton"] button {
+        background: var(--pm-paper) !important;
+        border: 1px solid var(--pm-line) !important;
+        border-radius: var(--pm-radius-sm) !important;
+        box-shadow: none !important;
+        color: var(--pm-ink-secondary) !important;
+        font-size: 14px !important;
+        font-weight: 500 !important;
+        min-height: 48px !important;
+        width: 100% !important;
+    }
+
+    [data-testid="stPopoverBody"]:has(.pm-access-panel-anchor)
+    [data-testid="stButton"] button:hover:not(:disabled) {
+        background: var(--pm-surface) !important;
+        border-color: var(--pm-focus) !important;
+    }
+
+    [class*="st-key-confirm_full_access_"] button {
+        background: var(--pm-ink) !important;
+        border-color: var(--pm-ink) !important;
+        color: var(--pm-paper) !important;
+        box-shadow: none !important;
+    }
+
+    [class*="st-key-confirm_full_access_"] button:hover:not(:disabled) {
+        background: var(--pm-ink-secondary) !important;
+        border-color: var(--pm-ink-secondary) !important;
+    }
+
+    [class*="st-key-confirm_full_access_"] button:disabled {
+        background: var(--pm-surface) !important;
+        border-color: var(--pm-line) !important;
+        color: var(--pm-muted) !important;
+    }
+
+    .st-key-chat_composer_shell [data-testid="stChatInput"] textarea {
+        padding-left: 16px !important;
+        padding-right: 16px !important;
+    }
+
     [data-testid="stChatInput"] button {
-        color: var(--pm-accent);
-        min-height: 46px;
-        min-width: 46px;
+        color: var(--pm-ink-secondary);
+        min-height: 36px;
+        min-width: 36px;
         transition: var(--pm-transition);
         border-radius: var(--pm-radius) !important;
     }
 
     [data-testid="stChatInput"] button:hover {
-        background: var(--pm-accent-soft) !important;
+        background: var(--pm-surface) !important;
+        color: var(--pm-ink) !important;
+    }
+
+    [data-testid="stChatInputFileUploadButton"] {
+        align-items: center;
+        display: flex;
+        flex: 0 0 36px;
+        justify-content: center;
+    }
+
+    [data-testid="stChatInputFileUploadButton"] button,
+    [data-testid="stChatInputFileUploadButton"] button[aria-label="Upload files"] {
+        background: transparent !important;
+        border: 0 !important;
+        height: 36px !important;
+        padding: 0 !important;
+        width: 36px !important;
+    }
+
+    [data-testid="stChatInputFileUploadButton"] button:focus-visible,
+    [data-testid="stChatInputFileUploadButton"] button[aria-label="Upload files"]:focus-visible {
+        outline: 2px solid var(--pm-focus) !important;
+        outline-offset: 1px !important;
+    }
+
+    [data-testid="stChatInputMicButton"] {
+        align-items: center;
+        display: flex;
+        flex: 0 0 36px;
+        justify-content: center;
+    }
+
+    [data-testid="stChatInputMicButton"] button {
+        background: transparent !important;
+        border: 0 !important;
+        height: 36px !important;
+        padding: 0 !important;
+        width: 36px !important;
+    }
+
+    [data-testid="stChatInputMicButton"] button:focus-visible {
+        outline: 2px solid var(--pm-focus) !important;
+        outline-offset: 1px !important;
+    }
+
+    [data-testid="stChatInputSubmitButton"] {
+        background: var(--pm-ink) !important;
+        color: var(--pm-paper) !important;
+        height: 36px !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        width: 36px !important;
+    }
+
+    [data-testid="stChatInputSubmitButton"]:hover:not(:disabled) {
+        background: var(--pm-ink-secondary) !important;
+        color: var(--pm-paper) !important;
+    }
+
+    [data-testid="stChatInputSubmitButton"]:disabled {
+        background: var(--pm-surface) !important;
+        color: var(--pm-muted) !important;
+        opacity: 0.72;
     }
 
     /* ── 清空按钮 ── */
@@ -915,6 +1540,12 @@ STYLE_CSS = """
     }
 
     /* ── 底部输入容器 ── */
+    [data-testid="stBottomBlockContainer"] {
+        background: var(--pm-canvas) !important;
+        padding-bottom: max(14px, env(safe-area-inset-bottom));
+        padding-top: 12px;
+    }
+
     [data-testid="stBottomBlockContainer"] [data-testid="stVerticalBlock"] {
         margin-left: auto;
         margin-right: auto;
@@ -926,26 +1557,13 @@ STYLE_CSS = """
     /* 空状态下输入框更大 */
     [data-testid="stAppScrollToBottomContainer"]:has(.chat-empty-marker)
     [data-testid="stChatInput"] textarea {
-        min-height: 64px;
-        padding-top: 16px;
+        min-height: 48px;
+        padding-top: 12px;
     }
 
     /* ── 加载动画 ── */
     .stSpinner > div {
         border-top-color: var(--pm-accent) !important;
-    }
-
-    /* ══════════════════════════════════════
-       容器卡片通用样式（用于审批等）
-    ══════════════════════════════════════ */
-    [data-testid="stVerticalBlock"] > [data-testid="stContainer"],
-    [data-testid="column"] > [data-testid="stContainer"] {
-        border: 1px solid var(--pm-line-light) !important;
-        border-radius: var(--pm-radius) !important;
-        box-shadow: var(--pm-shadow-card) !important;
-        background: var(--pm-paper) !important;
-        padding: 18px 20px !important;
-        margin-bottom: 4px !important;
     }
 
     /* ══════════════════════════════════════
@@ -996,59 +1614,57 @@ STYLE_CSS = """
         color: var(--pm-accent);
     }
 
-    /* ── 消息内容微交互 ── */
-    [data-testid="stChatMessageContent"] { transition: box-shadow 200ms ease; }
+    /* Reading surfaces stay still; only explicit controls transition. */
+    [data-testid="stChatMessageContent"] {
+        transition: color var(--pm-duration-ui) var(--pm-ease-out);
+    }
 
     /* ══════════════════════════════════════
-       聊天消息内按钮柔和化（复制文本 / 反馈 等）
-       覆盖默认 primary 硬蓝，改用柔和次级风格
+       Quiet ghost controls for copy and feedback actions.
     ══════════════════════════════════════ */
     [data-testid="stChatMessage"] button,
     [data-testid="stChatMessageContent"] button {
-        background: var(--pm-accent-soft) !important;
-        border: 1px solid var(--pm-accent-pale) !important;
+        background: transparent !important;
+        border: 1px solid transparent !important;
         border-radius: var(--pm-radius-sm) !important;
         box-shadow: none !important;
-        color: var(--pm-accent) !important;
+        color: var(--pm-muted) !important;
         font-size: 12.5px !important;
         font-weight: 600 !important;
         min-height: 32px !important;
-        padding: 4px 12px !important;
-        transition: all 180ms ease !important;
+        min-width: 32px !important;
+        padding: 4px 8px !important;
+        transition: background-color var(--pm-duration-ui) var(--pm-ease-out),
+                    border-color var(--pm-duration-ui) var(--pm-ease-out),
+                    color var(--pm-duration-ui) var(--pm-ease-out),
+                    transform var(--pm-duration-press) var(--pm-ease-out) !important;
     }
 
     [data-testid="stChatMessage"] button:hover,
     [data-testid="stChatMessageContent"] button:hover {
-        background: var(--pm-accent-pale) !important;
-        border-color: var(--pm-accent) !important;
-        transform: translateY(-1px);
-        box-shadow: 0 2px 8px rgba(124,138,255,0.10) !important;
+        background: var(--pm-surface) !important;
+        border-color: var(--pm-line) !important;
+        transform: none;
+        box-shadow: none !important;
     }
 
-    /* 用户消息气泡内按钮保持白字（因为底色是 accent）*/
+    /* User-bubble controls keep the same quiet treatment. */
     [data-testid="stChatMessage"]:has(.chat-role-user)
     [data-testid="stChatMessageContent"] button {
-        background: rgba(255,255,255,0.20) !important;
-        border-color: rgba(255,255,255,0.30) !important;
-        color: #fff !important;
+        background: transparent !important;
+        border-color: transparent !important;
+        color: var(--pm-muted) !important;
     }
     [data-testid="stChatMessage"]:has(.chat-role-user)
     [data-testid="stChatMessageContent"] button:hover {
-        background: rgba(255,255,255,0.32) !important;
-        border-color: rgba(255,255,255,0.45) !important;
+        background: var(--pm-paper) !important;
+        border-color: var(--pm-line) !important;
     }
 
     /* ── 图片在消息中自适应 ── */
     [data-testid="stChatMessageContent"] img {
         max-width: 100%;
         border-radius: var(--pm-radius);
-    }
-
-    /* ── 容器卡片悬浮微抬升 ── */
-    [data-testid="stVerticalBlock"] > [data-testid="stContainer"]:hover,
-    [data-testid="column"] > [data-testid="stContainer"]:hover {
-        box-shadow: var(--pm-shadow-md) !important;
-        transform: translateY(-1px);
     }
 
     /* ── 加载/思考指示器 ── */
@@ -1069,6 +1685,77 @@ STYLE_CSS = """
     [data-testid="stAlert"][kind="warning"] { border-left-color: var(--pm-warning) !important; }
     [data-testid="stAlert"] [data-testid="stMarkdownContainer"] { font-size: 14px; }
 
+    /* Structured callback windows keep failures actionable without exposing
+       raw provider traces in the reading surface. */
+    [class*="st-key-error_callback_"] {
+        background: var(--pm-paper);
+        border: 1px solid var(--pm-line);
+        border-left: 3px solid var(--pm-danger);
+        border-radius: var(--pm-radius);
+        margin: 10px 0;
+        padding: 10px 12px;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.pm-error-callback-anchor),
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.pm-action-callback-anchor) {
+        background: var(--pm-paper);
+        border: 1px solid var(--pm-line) !important;
+        border-radius: var(--pm-radius) !important;
+        box-shadow: none !important;
+        margin: 10px 0;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.pm-error-callback-anchor) {
+        border-left: 3px solid var(--pm-danger) !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.pm-action-callback-anchor) {
+        border-left: 3px solid var(--pm-success) !important;
+    }
+    .pm-error-callback-anchor,
+    .pm-action-callback-anchor,
+    [data-testid="stElementContainer"]:has(.pm-error-callback-anchor),
+    [data-testid="stElementContainer"]:has(.pm-action-callback-anchor) {
+        display: none !important;
+    }
+    [class*="st-key-error_callback_"] [data-testid="stAlert"] {
+        border: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    [class*="st-key-backend_link_status"] {
+        margin-top: 10px;
+        padding: 0 6px;
+    }
+
+    /* ── Design-engineering interaction rules ──
+       Feedback starts on press, while decorative movement stays out of the
+       high-frequency reading surfaces. */
+    [data-testid="stMain"] button:active,
+    [data-testid="stSidebar"] button:active,
+    [data-testid="stChatInput"] button:active,
+    [data-testid="stChatMessage"] button:active,
+    [data-testid="stDownloadButton"] button:active,
+    [data-testid="stFormSubmitButton"] button:active {
+        transform: scale(0.97) !important;
+        transition-duration: var(--pm-duration-press) !important;
+    }
+
+    /* Message bodies and data containers are for reading, not hover theatre. */
+    [data-testid="stChatMessageContent"]:hover {
+        transform: none !important;
+    }
+
+    /* Hover is a fine-pointer affordance; touch devices should not get sticky
+       hover transforms after a tap. */
+    @media (hover: none), (pointer: coarse) {
+        [data-testid="stMain"] button:hover,
+        [data-testid="stSidebar"] button:hover,
+        [data-testid="stChatInput"] button:hover,
+        [data-testid="stChatMessage"] button:hover,
+        [data-testid="stDownloadButton"] button:hover,
+        [data-testid="stFormSubmitButton"] button:hover {
+            transform: none !important;
+        }
+    }
+
     /* ── 禁用态更克制 ── */
     button:disabled,
     [data-testid="stChatInput"] button:disabled {
@@ -1077,22 +1764,15 @@ STYLE_CSS = """
         box-shadow: none !important;
     }
 
-    /* ── 对话线程进场淡入（每次导航一次，避免逐条重播）── */
-    @keyframes pm-fade-in {
-        from { opacity: 0; }
-        to   { opacity: 1; }
-    }
-    .st-key-chat_thread { animation: pm-fade-in 260ms ease both; }
+    /* Chat history is a high-frequency surface; reruns stay visually stable. */
+    .st-key-chat_thread { animation: none !important; }
 
-    /* ── 欢迎页底部柔光 ── */
+    /* Give the empty state a quiet surface without a decorative gradient. */
     [data-testid="stMainBlockContainer"]:has(.chat-empty-marker)::before {
-        background: radial-gradient(
-            60% 50% at 50% 0%,
-            var(--pm-accent-glow),
-            transparent 70%
-        );
+        background: var(--pm-accent-soft);
+        border-radius: 0 0 var(--pm-radius-xl) var(--pm-radius-xl);
         content: "";
-        height: 240px;
+        height: 192px;
         left: 0;
         pointer-events: none;
         position: absolute;
@@ -1271,19 +1951,45 @@ STYLE_CSS = """
     @media (prefers-reduced-motion: reduce) {
         *, *::before, *::after {
             scroll-behavior: auto !important;
-            transition-duration: 0.01ms !important;
+            transition-property: color, background-color, border-color, box-shadow, opacity !important;
+            transition-duration: 160ms !important;
             animation: none !important;
+        }
+
+        [data-testid="stMain"] button:hover,
+        [data-testid="stSidebar"] button:hover,
+        [data-testid="stChatMessage"] button:hover,
+        [data-testid="stChatMessageContent"]:hover {
+            transform: none !important;
+        }
+    }
+
+    @media (prefers-reduced-transparency: reduce) {
+        [data-testid="stSidebar"],
+        [data-testid="stChatInput"] {
+            background: var(--pm-paper) !important;
+            backdrop-filter: none !important;
+        }
+    }
+
+    @media (prefers-contrast: more) {
+        [data-testid="stSidebar"],
+        [data-testid="stChatInput"],
+        [data-testid="stChatMessageContent"] {
+            border-color: var(--pm-ink-secondary) !important;
         }
     }
 
     @media (max-width: 760px) {
+        :root { --pm-composer-reserve: 164px; }
+
         [data-testid="stSidebar"] {
             min-width: min(88vw, 300px) !important;
             width: min(88vw, 300px) !important;
         }
 
         [data-testid="stMainBlockContainer"] {
-            padding: 20px 18px 36px;
+            padding: 18px 18px 32px;
         }
 
         [data-testid="stMainBlockContainer"]:has(.chat-page-marker) {
@@ -1292,14 +1998,89 @@ STYLE_CSS = """
         }
 
         [data-testid="stMainBlockContainer"]:has(.chat-empty-marker) {
-            padding-top: 120px;
+            padding-top: 96px;
         }
 
         [data-testid="stBottomBlockContainer"] [data-testid="stVerticalBlock"] {
             max-width: calc(100vw - 32px);
         }
 
-        .st-key-chat_thread { max-width: 100%; }
+        .st-key-chat_access_popover {
+            left: 56px;
+        }
+
+        .st-key-chat_voice_callback {
+            bottom: calc(100% + 8px);
+        }
+
+        .pm-voice-callback {
+            margin-left: 0;
+            max-width: 100%;
+            min-height: 42px;
+        }
+
+        .st-key-chat_access_popover button {
+            font-size: 13px !important;
+            padding-left: 6px !important;
+            padding-right: 6px !important;
+        }
+
+        .st-key-chat_composer_shell [data-testid="stChatInput"] textarea {
+            padding-left: 14px !important;
+            padding-right: 14px !important;
+        }
+
+        [data-testid="stPopoverBody"]:has(.pm-access-panel-anchor) {
+            border-radius: 12px !important;
+            padding: 16px !important;
+            width: calc(100vw - 24px) !important;
+        }
+
+        .st-key-chat_thread {
+            gap: 8px !important;
+            max-width: 100%;
+        }
+
+        [class*="st-key-permission_actions_"] [data-testid="stHorizontalBlock"] {
+            flex-direction: column;
+        }
+
+        [class*="st-key-permission_actions_"] [data-testid="stColumn"] {
+            flex: 1 1 auto !important;
+            min-width: 0 !important;
+            width: 100% !important;
+        }
+
+        [data-testid="stVerticalBlockBorderWrapper"]:has(.pm-permission-anchor)
+        > [data-testid="stVerticalBlock"] {
+            padding: 14px;
+        }
+
+        .pm-permission-facts { grid-template-columns: 1fr; }
+
+        .pm-permission-fact + .pm-permission-fact {
+            border-left: 0;
+            border-top: 1px solid var(--pm-line-light);
+            padding-left: 0;
+            padding-top: 8px;
+        }
+
+        .pm-workflow-canvas {
+            align-items: stretch;
+            flex-direction: column;
+            overflow-x: hidden;
+        }
+
+        .pm-workflow-node {
+            flex-basis: auto;
+            min-height: 80px;
+            width: 100%;
+        }
+
+        .pm-workflow-edge {
+            align-self: center;
+            transform: rotate(90deg);
+        }
 
         [data-testid="stChatMessage"]:has(.chat-role-user)
         [data-testid="stChatMessageContent"] { max-width: 88%; }
@@ -1310,9 +2091,9 @@ STYLE_CSS = """
             font-size: 28px !important;
         }
 
-        .welcome-suggestions {
+        .st-key-welcome_suggestions {
             gap: 8px;
-            margin-top: 24px;
+            margin-top: 20px;
         }
 
         .metric-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
