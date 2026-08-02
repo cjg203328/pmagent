@@ -2,6 +2,7 @@
   "llm": {
     "provider": "anthropic",
     "model": "claude-3-5-sonnet-20241022",
+    "framework": "langchain",
     "vision_model": "",
     "available_models": [],
     "models_synced_at": null,
@@ -9,15 +10,26 @@
     "max_tokens": 1200,
     "retry_max_attempts": 1,
     "retry_backoff_factor": 2,
+    "failover_max_attempts": 2,
+    "failover_request_timeout_seconds": 8,
     "request_timeout_seconds": 12,
     "history_max_messages": 8,
     "history_max_chars": 4000,
+    "response_cache_enabled": true,
+    "response_cache_ttl": 1800,
+    "response_cache_max_size": 512,
+    "response_cache_redis_enabled": true,
     "intent_classification_enabled": false
   },
   "agent_runtime": {
     "model_tool_calls_enabled": false,
     "max_turns": 8,
-    "max_tool_calls_per_turn": 16
+    "max_tool_calls_per_turn": 16,
+    "orchestration_framework": "langgraph",
+    "langgraph_enabled": true,
+    "langgraph_max_parallelism": 4,
+    "langgraph_max_retries": 2,
+    "memory_context_max_tokens": 1200
   },
   "unlimited_ocr": {
     "enabled": true,
@@ -42,6 +54,35 @@
       "state_dir": "./temp/unlimited_ocr",
       "log_path": "./logs/unlimited-ocr-runtime.log"
     }
+  },
+  "mineru": {
+    "enabled": true,
+    "mode": "auto",
+    "command": "mineru",
+    "api_url": "",
+    "api_key": "",
+    "api_key_header": "Authorization",
+    "api_key_prefix": "Bearer",
+    "api_path": "/file_parse",
+    "health_path": "/health",
+    "allow_insecure_http": false,
+    "backend": "pipeline",
+    "parse_method": "auto",
+    "effort": "medium",
+    "language": "ch",
+    "formula_enable": true,
+    "table_enable": true,
+    "image_analysis": true,
+    "timeout_seconds": 600,
+    "connect_timeout_seconds": 10,
+    "output_dir": "./data/mineru",
+    "max_output_bytes": 134217728,
+    "max_text_chars": 262144,
+    "max_structured_bytes": 393216,
+    "max_blocks": 5000,
+    "max_archive_members": 10000,
+    "cache_enabled": true,
+    "cache_max_entries": 64
   },
   "database": {
     "db_path": "./data/artpm.db",
@@ -86,7 +127,7 @@
   },
   "file_processing": {
     "max_file_size_mb": 50,
-    "supported_formats": ["xlsx", "xls", "et", "csv", "png", "jpg", "jpeg", "pdf", "txt", "md"],
+    "supported_formats": ["xlsx", "xls", "csv", "json", "txt", "md", "pdf", "docx", "pptx", "png", "jpg", "jpeg", "webp", "bmp", "gif", "jp2", "tif", "tiff"],
     "ocr_language": "ch"
   },
   "task_allocation": {

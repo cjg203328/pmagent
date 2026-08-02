@@ -10,9 +10,11 @@ from dotenv import load_dotenv
 
 from artpm_agent.config_data import load_default_config
 
-# Project-local configuration is authoritative for this application.
+# Load project defaults without overwriting deployment-level environment values.
+# This keeps local development convenient while allowing cloud/container secrets
+# and feature flags to remain authoritative.
 PROJECT_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(dotenv_path=PROJECT_ENV_PATH, override=True)
+load_dotenv(dotenv_path=PROJECT_ENV_PATH, override=False)
 
 # User-chosen data root override (project-local, no secrets). The settings page
 # writes this file so the knowledge base and all caches can be relocated without
@@ -66,12 +68,28 @@ class Config:
             self.config["llm"]["provider"] = os.getenv("LLM_PROVIDER")
         if os.getenv("LLM_MODEL"):
             self.config["llm"]["model"] = os.getenv("LLM_MODEL")
+        if os.getenv("LLM_FRAMEWORK"):
+            self.config["llm"]["framework"] = os.getenv("LLM_FRAMEWORK")
         if os.getenv("LLM_VISION_MODEL"):
             self.config["llm"]["vision_model"] = os.getenv("LLM_VISION_MODEL")
         if os.getenv("LLM_REQUEST_TIMEOUT_SECONDS"):
             try:
                 self.config["llm"]["request_timeout_seconds"] = float(
                     os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "")
+                )
+            except ValueError:
+                pass
+        if os.getenv("LLM_FAILOVER_MAX_ATTEMPTS"):
+            try:
+                self.config["llm"]["failover_max_attempts"] = int(
+                    os.getenv("LLM_FAILOVER_MAX_ATTEMPTS", "")
+                )
+            except ValueError:
+                pass
+        if os.getenv("LLM_FAILOVER_REQUEST_TIMEOUT_SECONDS"):
+            try:
+                self.config["llm"]["failover_request_timeout_seconds"] = float(
+                    os.getenv("LLM_FAILOVER_REQUEST_TIMEOUT_SECONDS", "")
                 )
             except ValueError:
                 pass
@@ -96,6 +114,28 @@ class Config:
                 )
             except ValueError:
                 pass
+        if os.getenv("ARTPM_RESPONSE_CACHE"):
+            self.config["llm"]["response_cache_enabled"] = os.getenv(
+                "ARTPM_RESPONSE_CACHE", ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+        if os.getenv("ARTPM_RESPONSE_CACHE_TTL"):
+            try:
+                self.config["llm"]["response_cache_ttl"] = int(
+                    os.getenv("ARTPM_RESPONSE_CACHE_TTL", "")
+                )
+            except ValueError:
+                pass
+        if os.getenv("ARTPM_RESPONSE_CACHE_MAX_SIZE"):
+            try:
+                self.config["llm"]["response_cache_max_size"] = int(
+                    os.getenv("ARTPM_RESPONSE_CACHE_MAX_SIZE", "")
+                )
+            except ValueError:
+                pass
+        if os.getenv("ARTPM_RESPONSE_CACHE_REDIS"):
+            self.config["llm"]["response_cache_redis_enabled"] = os.getenv(
+                "ARTPM_RESPONSE_CACHE_REDIS", ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
         if os.getenv("LLM_AVAILABLE_MODELS"):
             try:
                 models = json.loads(os.getenv("LLM_AVAILABLE_MODELS", "[]"))
@@ -130,6 +170,34 @@ class Config:
                 "model_tool_calls_enabled"
             ] = model_tool_calls.strip().lower() in {"1", "true", "yes", "on"}
 
+        # Task collaboration is opt-in at the call site, but the runtime
+        # defaults to the LangGraph orchestration boundary for new flows.
+        agent_runtime = self.config.setdefault("agent_runtime", {})
+        orchestration_framework = os.getenv("AGENT_ORCHESTRATION_FRAMEWORK")
+        if orchestration_framework:
+            normalized = orchestration_framework.strip().lower()
+            if normalized in {"langgraph", "linear", "workflow"}:
+                agent_runtime["orchestration_framework"] = normalized
+        langgraph_enabled = os.getenv("LANGGRAPH_ENABLED")
+        if langgraph_enabled is not None:
+            agent_runtime["langgraph_enabled"] = (
+                langgraph_enabled.strip().lower() in {"1", "true", "yes", "on"}
+            )
+        for env_name, config_key in (
+            ("LANGGRAPH_MAX_PARALLELISM", "langgraph_max_parallelism"),
+            ("LANGGRAPH_MAX_RETRIES", "langgraph_max_retries"),
+            ("MEMORY_CONTEXT_MAX_TOKENS", "memory_context_max_tokens"),
+        ):
+            value = os.getenv(env_name)
+            if not value:
+                continue
+            try:
+                parsed = int(value)
+            except ValueError:
+                continue
+            if parsed >= 0:
+                agent_runtime[config_key] = parsed
+
         # Hidden OCR skill configuration. The deployment bundle owns the runtime,
         # model weights, and environment; the end-user settings page never does.
         unlimited_ocr = self.config.setdefault("unlimited_ocr", {})
@@ -163,6 +231,59 @@ class Config:
                 unlimited_ocr[config_key] = converter(value)
             except (TypeError, ValueError):
                 # The adapter applies final bounds and reports invalid URLs safely.
+                continue
+
+        # MinerU is an optional, deployment-owned document conversion backend.
+        # Keep it out of the core dependency graph; the adapter can use a local
+        # CLI or an isolated mineru-api sidecar when configured.
+        mineru = self.config.setdefault("mineru", {})
+        bool_env = {
+            "MINERU_ENABLED": "enabled",
+            "MINERU_FORMULA_ENABLE": "formula_enable",
+            "MINERU_TABLE_ENABLE": "table_enable",
+            "MINERU_IMAGE_ANALYSIS": "image_analysis",
+            "MINERU_CACHE_ENABLED": "cache_enabled",
+            "MINERU_ALLOW_INSECURE_HTTP": "allow_insecure_http",
+        }
+        for env_name, config_key in bool_env.items():
+            value = os.getenv(env_name)
+            if value is not None:
+                mineru[config_key] = value.strip().lower() in {"1", "true", "yes", "on"}
+        text_env = {
+            "MINERU_MODE": "mode",
+            "MINERU_COMMAND": "command",
+            "MINERU_API_URL": "api_url",
+            "MINERU_API_KEY": "api_key",
+            "MINERU_API_KEY_HEADER": "api_key_header",
+            "MINERU_API_KEY_PREFIX": "api_key_prefix",
+            "MINERU_API_PATH": "api_path",
+            "MINERU_HEALTH_PATH": "health_path",
+            "MINERU_BACKEND": "backend",
+            "MINERU_PARSE_METHOD": "parse_method",
+            "MINERU_EFFORT": "effort",
+            "MINERU_LANGUAGE": "language",
+            "MINERU_OUTPUT_DIR": "output_dir",
+        }
+        for env_name, config_key in text_env.items():
+            value = os.getenv(env_name)
+            if value:
+                mineru[config_key] = value
+        numeric_env = {
+            "MINERU_TIMEOUT_SECONDS": ("timeout_seconds", float),
+            "MINERU_CONNECT_TIMEOUT_SECONDS": ("connect_timeout_seconds", float),
+            "MINERU_MAX_OUTPUT_BYTES": ("max_output_bytes", int),
+            "MINERU_MAX_TEXT_CHARS": ("max_text_chars", int),
+            "MINERU_MAX_STRUCTURED_BYTES": ("max_structured_bytes", int),
+            "MINERU_MAX_BLOCKS": ("max_blocks", int),
+            "MINERU_CACHE_MAX_ENTRIES": ("cache_max_entries", int),
+        }
+        for env_name, (config_key, converter) in numeric_env.items():
+            value = os.getenv(env_name)
+            if not value:
+                continue
+            try:
+                mineru[config_key] = converter(value)
+            except (TypeError, ValueError):
                 continue
 
         # Database paths
@@ -251,6 +372,17 @@ class Config:
             exist_ok=True,
         )
         Path(self.config["database"]["vector_db_path"]).mkdir(parents=True, exist_ok=True)
+
+        mineru_config = self.config.setdefault("mineru", {})
+        mineru_output = Path(str(mineru_config.get("output_dir") or "./data/mineru")).expanduser()
+        if not mineru_output.is_absolute():
+            leaf = mineru_output
+            if leaf.parts and leaf.parts[0] in ("data", ".", ".."):
+                leaf = Path(*leaf.parts[1:])
+            mineru_output = resolved_root / leaf
+        mineru_output = mineru_output.resolve()
+        mineru_output.mkdir(parents=True, exist_ok=True)
+        mineru_config["output_dir"] = str(mineru_output)
 
         # Log directory stays with the install (operational logs, not user data).
         log_dir = self.base_dir / "logs"

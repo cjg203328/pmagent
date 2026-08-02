@@ -47,12 +47,11 @@ class SensitiveDataFilter(logging.Filter):
     """敏感信息过滤器"""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = mask_sensitive(str(record.msg))
-        if record.args:
-            record.args = tuple(
-                mask_sensitive(str(arg)) if isinstance(arg, str) else arg
-                for arg in record.args
-            )
+        # Render first so placeholders and their values are inspected together.
+        # Masking ``record.msg`` and ``record.args`` independently misses common
+        # calls such as logger.info("api_key=%s", secret).
+        record.msg = mask_sensitive(record.getMessage())
+        record.args = ()
         return True
 
 # 在 utils/logger.py 中添加

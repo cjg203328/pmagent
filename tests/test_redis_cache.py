@@ -5,7 +5,6 @@ The whole point of ``redis_cache`` is that the application must keep working
 absent, unreachable, or the ``redis`` package is not installed. These tests
 lock that contract so a missing Redis can never break a deployment.
 """
-import os
 
 from artpm_agent.core import redis_cache
 

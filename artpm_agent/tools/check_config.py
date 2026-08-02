@@ -8,7 +8,7 @@ import os
 import sys
 import json
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List
 
 
 def check_api_keys() -> List[str]:
@@ -63,6 +63,11 @@ def check_provider_model_alignment() -> List[str]:
     if not isinstance(available_models, list):
         return []
 
+    # OpenAI-compatible aggregators intentionally expose mixed model families
+    # behind one API key and base URL, so family alignment is not meaningful.
+    if provider == "custom":
+        return []
+
     # Infer provider from model name
     def infer_provider(model_id: str) -> str:
         model_lower = model_id.lower()
@@ -92,7 +97,7 @@ def check_provider_model_alignment() -> List[str]:
 
     if cross_provider_models:
         issues.append(
-            f"⚠️  LLM_AVAILABLE_MODELS 包含跨 provider 的模型："
+            "⚠️  LLM_AVAILABLE_MODELS 包含跨 provider 的模型："
         )
         for model in cross_provider_models:
             model_provider = infer_provider(model)
