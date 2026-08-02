@@ -9,7 +9,7 @@ description = "面向游戏美术外包项目管理的 Streamlit AI 助手（离
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "streamlit>=1.44.0",
+    "streamlit>=1.59.0,<1.60.0",
     "streamlit-option-menu>=0.3.6",
     "pandas>=2.0.0",
     "numpy>=1.24.0",
@@ -20,25 +20,59 @@ dependencies = [
     "python-docx>=1.1.0",
     "plotly>=5.18.0",
     "kaleido>=0.2.1",
-    "openai>=1.0.0",
-    "anthropic>=0.8.0",
+    "openai>=2.45.0,<3.0.0",
+    "anthropic>=0.96.0,<1.0.0",
+    # LangChain v1 model integrations. The existing AgentLoop, approval gate,
+    # memory pipeline, and provider failover remain the application boundary.
+    "langchain>=1.3.14,<1.4.0",
+    # Imported directly by the structured-provider bridge. Keep this explicit
+    # instead of relying on an integration package's transitive dependency.
+    "langchain-core>=1.4.9,<2.0.0",
+    "langchain-openai>=1.3.5,<1.4.0",
+    "langchain-anthropic>=1.4.8,<1.5.0",
+    "langgraph>=1.2.9,<1.3.0",
+    # Used by the offline dependency-audit command to parse requirement
+    # metadata according to PEP 508.
+    "packaging>=23.2",
     "Pillow>=10.0.0",
     "pdfplumber>=0.10.0",
     "PyMuPDF>=1.24.0",
     "python-dotenv>=1.0.0",
-    "pydantic>=2.0.0",
+    "pydantic>=2.7.4,<3.0.0",
     "jsonschema>=4.23.0,<5.0.0",
     "requests>=2.31.0",
     "python-dateutil>=2.8.2",
     "redis>=5.0.0",
     "mcp>=1.12.0,<2.0.0",
+    # REST gateway; kept in the core install so the documented API command
+    # works in a clean deployment without an undeclared transitive package.
+    "fastapi>=0.135.1,<0.136.0",
+    "uvicorn>=0.51.0,<0.52.0",
 ]
 
 [project.optional-dependencies]
+# Optional CPU-oriented MinerU runtime. It is version-pinned because upstream
+# structured output and CLI contracts have changed across minor releases.
+# Remote mineru-api mode does not require this extra in the ArtPM environment.
+mineru = ["mineru[pipeline]==3.4.4"]
+# Lightweight official package for deployments that call a remote mineru-api.
+# It does not download local VLM/OCR model weights.
+mineru-client = ["mineru==3.4.4"]
 # OCR 报价单/扫描件解析（重依赖，按需安装）
 ocr = ["paddleocr>=2.7.0", "paddlepaddle>=2.5.0"]
 # Backward-compatible extra; FAISS is also installed by the core dependency set.
 vector = ["faiss-cpu>=1.14.3,<2.0.0"]
+# Optional real-time voice stack; kept out of the core install because it adds
+# audio codecs, provider SDKs, and cloud credentials. MiniMax uses the current
+# `-ai` plugin; the older `livekit-plugins-minimax` package pins Agents 1.2.x.
+voice = [
+    "livekit-agents==1.6.6",
+    "livekit-api>=1.2.0,<2.0.0",
+    "livekit-plugins-cartesia==1.6.6",
+    "livekit-plugins-minimax-ai==1.6.6",
+    "livekit-plugins-silero==1.6.6",
+    "pyttsx3==2.99",
+]
 # 开发/测试/质量门禁
 dev = [
     "pytest>=8.0.0",
@@ -52,6 +86,9 @@ dev = [
 
 [project.scripts]
 artpm-agent = "artpm_agent.main:main"
+artpm-langchain-audit = "artpm_agent.tools.audit_langchain:main"
+artpm-api = "artpm_agent.api.__main__:main"
+artpm-voice-worker = "artpm_agent.voice.worker:main"
 
 [tool.setuptools]
 py-modules = ["agent", "app", "config", "health_check", "main"]
@@ -70,3 +107,24 @@ omit = ["tests/*", "*/__pycache__/*"]
 
 [tool.coverage.report]
 show_missing = true
+
+[tool.mypy]
+# Progressive typing — strictness will increase as annotations improve.
+# Starting point: catch wrong return types, unused configs, redundant casts,
+# and missing return statements without requiring full typed-def coverage.
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+warn_unused_ignores = false
+warn_redundant_casts = true
+warn_no_return = true
+check_untyped_defs = false
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+ignore_missing_imports = true
+exclude = ["tests/"]
+
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*", "pandas", "pandas.*", "faiss", "faiss.*", "plotly", "plotly.*", "kaleido", "PIL", "PIL.*", "cv2", "pdfplumber", "fitz", "paddleocr", "paddlepaddle"]
+ignore_missing_imports = true
+ignore_errors = true
