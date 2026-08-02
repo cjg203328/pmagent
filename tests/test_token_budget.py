@@ -1,4 +1,6 @@
 """Tests for token-aware context budgeting (Phase 4 extension)."""
+import pytest
+
 from artpm_agent.harness.memory_retrieval import (
     MemoryContextBudget,
     inject_memory_context,
@@ -106,6 +108,38 @@ def test_token_budget_within_limit_passes_through():
 
 
 # ── MemoryContextBudget + inject end-to-end ──
+
+
+def test_token_budget_counts_join_separator_and_truncation_marker():
+    # The rendered context joins blocks with two newlines. A character counter
+    # makes the boundary deterministic and catches both off-by-one sources.
+    def counter(text):
+        return len(text)
+    kept = apply_token_budget(
+        ["高优先级", "低优先级"],
+        max_tokens=8,
+        counter=counter,
+        priority_fn=lambda block: 0 if "低" in block else 1,
+    )
+    rendered = "\n\n".join(kept)
+    assert len(rendered) <= 8
+    assert kept == ["高优先级"]
+
+    truncated = apply_token_budget(
+        ["abcdefghij"],
+        max_tokens=4,
+        counter=counter,
+    )
+    assert len("\n\n".join(truncated)) <= 4
+    assert truncated[0].endswith("…")
+
+
+def test_token_budget_rejects_invalid_or_zero_limits():
+    assert apply_token_budget(["content"], max_tokens=0) == []
+    with pytest.raises(ValueError):
+        apply_token_budget(["content"], max_tokens=-1)
+    with pytest.raises(TypeError):
+        apply_token_budget(["content"], max_tokens=True)
 
 
 def test_budget_defaults_include_token_fields():

@@ -78,6 +78,19 @@ def test_known_topic_has_no_gap():
     assert report.known_topics
 
 
+def test_high_confidence_hit_counts_as_known_without_rendered_block():
+    mm = MetaMemory(confidence_threshold=0.5)
+    hits = [{"confidence": 0.95, "searchable_text": "高把握知识"}]
+    report = mm.analyze(
+        "某主题",
+        retrieved_block="",
+        knowledge_store=_FakeKnowledgeStore(hits),
+    )
+
+    assert report.known_topics == ["某主题"]
+    assert not report.has_gaps()
+
+
 def test_no_strategy_store_triggers_gap():
     mm = MetaMemory(confidence_threshold=0.5)
     # 置信度低于阈值 → 不会走「已知」早返回，从而能继续判定无策略缺口

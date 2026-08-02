@@ -13,11 +13,9 @@ dedicated database file and does not touch any existing schema or logic.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from artpm_agent.memory.sqlite_manager import SQLiteManager
@@ -74,7 +72,9 @@ class FeedbackStore:
     """Persist and query user feedback / preferences."""
 
     def __init__(self, db_path: str):
-        self.db = SQLiteManager(db_path)
+        # Feedback has an isolated schema and does not need project tables.
+        self.db = SQLiteManager(db_path, initialize_schema=False)
+        self.db.remove_empty_primary_schema_scaffold()
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:

@@ -2,13 +2,12 @@
 数据库模型设计 - SQLAlchemy ORM
 """
 from sqlalchemy import create_engine, inspect, Column, Integer, String, Float, DateTime, Text, ForeignKey, Boolean, func
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker, selectinload
+from sqlalchemy.orm import DeclarativeBase, relationship, sessionmaker, selectinload
 from datetime import datetime
 from typing import List, Dict, Optional
 import json
 import atexit
 import logging
-from pathlib import Path
 from weakref import WeakSet, finalize
 
 logger = logging.getLogger(__name__)
@@ -41,7 +40,9 @@ def _dispose_all_engines():
 atexit.register(_dispose_all_engines)
 
 
-Base = declarative_base()
+class Base(DeclarativeBase):
+    """Shared declarative base for all ORM models."""
+    pass
 
 
 class Project(Base):
@@ -336,7 +337,7 @@ class AssetVersion(Base):
 class DatabaseManager:
     """数据库管理器"""
 
-    def __init__(self, db_url: str = None):
+    def __init__(self, db_url: str | None = None):
         if db_url is None:
             from artpm_agent.config import resolve_state_path
 

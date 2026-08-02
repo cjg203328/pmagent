@@ -85,11 +85,15 @@ class SessionStore:
             timeout=self.BUSY_TIMEOUT_MS / 1000,
             isolation_level=None,
         )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute(f"PRAGMA busy_timeout = {self.BUSY_TIMEOUT_MS}")
-        conn.execute("PRAGMA synchronous = NORMAL")
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute(f"PRAGMA busy_timeout = {self.BUSY_TIMEOUT_MS}")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            return conn
+        except BaseException:
+            conn.close()
+            raise
 
     @contextmanager
     def _connection(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:

@@ -12,9 +12,7 @@ Fully additive: owns its own ``reflection_runs`` table in a dedicated db file.
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from artpm_agent.memory.sqlite_manager import SQLiteManager
@@ -26,7 +24,10 @@ from artpm_agent.evolution.reflection import ReflectionReport, run_reflection
 
 class ReflectionScheduler:
     def __init__(self, db_path: Optional[str] = None):
-        self.db = SQLiteManager(db_path or default_reflection_db_path())
+        self.db = SQLiteManager(
+            db_path or default_reflection_db_path(), initialize_schema=False
+        )
+        self.db.remove_empty_primary_schema_scaffold()
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
@@ -89,6 +90,7 @@ class ReflectionScheduler:
         **reflection_kw,
     ) -> Optional[ReflectionReport]:
         """Run reflection only when due; otherwise return None."""
+        ran_at, _ = self.last_run()
         current = episode_store.count()
         if not self.should_run(
             interval_minutes=interval_minutes,
@@ -96,6 +98,12 @@ class ReflectionScheduler:
             current_episode_count=current,
         ):
             return None
+        # A scheduler run is an incremental checkpoint.  Passing the previous
+        # run timestamp into the miner prevents old episodes (and their
+        # feedback) from being proposed again on every later run.  The first
+        # run intentionally keeps ``since=None`` and analyzes the backlog.
+        if ran_at:
+            reflection_kw["since"] = ran_at
         report = run_reflection(
             episode_store,
             feedback_store,

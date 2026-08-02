@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
-from .strategy_store import StrategyStore, get_default_strategy_store
+from .strategy_store import StrategyStore
 
 _DEFAULT_META_DB = "data/meta_memory.db"  # legacy label; default path resolves via resolve_state_path()
 
@@ -114,8 +115,6 @@ class MetaMemory:
             return report
 
         topic = _extract_topic(q)
-        retrieval_empty = not (retrieved_block or "").strip()
-
         best_conf = 1.0
         has_hits = False
         if knowledge_store is not None and hasattr(knowledge_store, "search"):
@@ -123,11 +122,27 @@ class MetaMemory:
                 hits = knowledge_store.search(q, limit=3)
                 if hits:
                     has_hits = True
-                    best_conf = max(
-                        float(h.get("confidence", 1.0)) for h in hits
-                    )
+                    confidences = []
+                    for hit in hits:
+                        try:
+                            confidences.append(float(hit.get("confidence", 1.0)))
+                        except (AttributeError, TypeError, ValueError):
+                            # A malformed score must not erase otherwise valid
+                            # knowledge hits; treat that hit as fully trusted
+                            # for this lightweight capability check.
+                            confidences.append(1.0)
+                    if confidences:
+                        best_conf = max(confidences)
             except Exception:  # noqa: BLE001 - 元记忆分析绝不应打断回合
                 pass
+
+        # ``retrieved_block`` is only one presentation layer.  The caller may
+        # intentionally omit it (for example when the context budget is full)
+        # while the knowledge store still returned a high-confidence hit.  A
+        # real hit therefore counts as retrieval evidence on its own.
+        retrieval_empty = not (
+            bool((retrieved_block or "").strip()) or has_hits
+        )
 
         # 1) 已知：检索有结果且置信度达标
         if not retrieval_empty and best_conf >= self.confidence_threshold:
@@ -232,11 +247,16 @@ class MetaMemoryStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(str(self.db_path), timeout=10)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout = 10000")
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout = 10000")
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         with self._connect() as conn:

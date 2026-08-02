@@ -21,6 +21,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,7 @@ class CrossSessionMemory:
         content: str,
         memory_type: str,
         *,
+        workspace_id: str = "local-default",
         source_conversation: str = "",
         source_type: str = "auto_extract",
         metadata: Optional[Dict[str, Any]] = None,
@@ -108,6 +110,7 @@ class CrossSessionMemory:
         Args:
             content: 记忆正文
             memory_type: 记忆类型 (preference/project_context/decision/entity/fact)
+            workspace_id: 记忆所属工作区
             source_conversation: 来源会话 ID
             source_type: explicit 或 auto_extract
             metadata: 附加元信息
@@ -121,12 +124,21 @@ class CrossSessionMemory:
             memory_type = "fact"
 
         try:
+            normalized_content = " ".join(str(content).split()).casefold()
+            content_key = sha256(normalized_content.encode("utf-8")).hexdigest()[:20]
+            stable_source_id = (
+                f"{source_conversation or 'global'}:{memory_type}:{content_key}"
+            )
             result = self.store.ingest_resource(
                 title=self._build_title(content, memory_type),
                 searchable_text=content,
                 resource_type=memory_type,
                 source_type="memory_" + source_type,
-                source_id=source_conversation or None,
+                workspace_id=workspace_id,
+                # Source identity must be content-level, not only conversation
+                # level.  Otherwise two memories from one conversation become
+                # versions of one resource and different memory types collide.
+                source_id=stable_source_id,
                 structured_data={
                     "type": "cross_session_memory",
                     "memory_subtype": memory_type,
@@ -148,6 +160,7 @@ class CrossSessionMemory:
         self,
         items: Iterable[Dict[str, Any]],
         *,
+        workspace_id: str = "local-default",
         source_conversation: str = "",
         source_type: str = "auto_extract",
     ) -> int:
@@ -160,6 +173,7 @@ class CrossSessionMemory:
             conf = float(item.get("confidence", 1.0))
             if self.save_memory(
                 content, mtype,
+                workspace_id=workspace_id,
                 source_conversation=source_conversation,
                 source_type=source_type,
                 metadata=meta,
@@ -173,6 +187,7 @@ class CrossSessionMemory:
         messages: Sequence[Dict[str, Any]],
         *,
         conversation_id: str = "",
+        workspace_id: str = "local-default",
         llm_callable: Any = None,  # 可选 LLM 用于增强提取
     ) -> List[MemoryItem]:
         """从消息列表中提取记忆并持久化。
@@ -203,6 +218,7 @@ class CrossSessionMemory:
             self.save_memory(
                 item.content,
                 item.memory_type,
+                workspace_id=workspace_id,
                 source_conversation=item.source_conversation,
                 source_type=item.source_type,
                 metadata=item.metadata,
@@ -225,6 +241,7 @@ class CrossSessionMemory:
         memory_types: Optional[List[str]] = None,
         top_k: int = 0,
         max_chars: int = 0,
+        workspace_id: str = "local-default",
         exclude_conversation: str = "",  # 排除当前会话的记忆
     ) -> List[MemoryItem]:
         """根据查询文本检索相关记忆。
@@ -234,6 +251,7 @@ class CrossSessionMemory:
             memory_types: 限制返回类型，None 表示全部
             top_k: 返回条数上限（默认用实例配置）
             max_chars: 单条最大字符数（默认用实例配置）
+            workspace_id: 只检索此工作区的记忆
             exclude_conversation: 排除指定来源（避免自我引用）
 
         Returns:
@@ -246,11 +264,16 @@ class CrossSessionMemory:
             [self.TYPE_MAP.get(t, t) for t in memory_types]
             if memory_types else None
         )
+        candidate_limit = top_k
+        if exclude_conversation:
+            max_search_limit = int(getattr(self.store, "MAX_SEARCH_LIMIT", 100))
+            candidate_limit = min(max_search_limit, max(top_k * 4, top_k + 4))
 
         try:
             results = self.store.search(
                 query,
-                limit=top_k,
+                workspace_id=workspace_id,
+                limit=candidate_limit,
                 resource_types=resource_types,
                 include_rules=False,
                 max_text_chars=max_chars,
@@ -268,7 +291,10 @@ class CrossSessionMemory:
                     continue
 
                 src_conv = ""
-                struct = r.get("structured_data") or {}
+                version = r.get("version") or {}
+                struct = r.get("structured_data") or version.get(
+                    "structured_data"
+                ) or {}
                 if isinstance(struct, str):
                     try:
                         struct = json.loads(struct)
@@ -307,17 +333,26 @@ class CrossSessionMemory:
                 except Exception:
                     pass
 
+                if len(items) >= top_k:
+                    break
+
             return items
 
         except Exception as exc:
             logger.error("记忆检索失败: %s", exc)
             return []
 
-    def get_all_preferences(self, *, limit: int = 20) -> List[MemoryItem]:
+    def get_all_preferences(
+        self,
+        *,
+        limit: int = 20,
+        workspace_id: str = "local-default",
+    ) -> List[MemoryItem]:
         """获取所有用户偏好记忆（用于 system prompt 注入）。"""
         try:
             results = self.store.search(
                 "用户偏好 设置 规则 习惯 要求",
+                workspace_id=workspace_id,
                 limit=limit,
                 resource_types=["user_preference"],
                 include_rules=False,
@@ -375,6 +410,7 @@ class CrossSessionMemory:
         user_input: str,
         *,
         conversation_id: str = "",
+        workspace_id: str = "local-default",
         include_preferences: bool = True,
     ) -> str:
         """为一次 LLM 调用构建完整的记忆上下文。
@@ -387,7 +423,10 @@ class CrossSessionMemory:
 
         # 用户偏好
         if include_preferences:
-            prefs = self.get_all_preferences(limit=10)
+            prefs = self.get_all_preferences(
+                limit=10,
+                workspace_id=workspace_id,
+            )
             if prefs:
                 parts.append("[已知用户偏好]")
                 for p in prefs:
@@ -396,6 +435,7 @@ class CrossSessionMemory:
         # 相关记忆检索
         relevant = self.retrieve(
             user_input,
+            workspace_id=workspace_id,
             exclude_conversation=conversation_id,
         )
         if relevant:
@@ -440,9 +480,13 @@ class CrossSessionMemory:
             (r"(?:采用|使用)(.{2,200})(?:方案|方式|策略|技术栈)", "project_context"),
         ]
 
+        # Only explicit user statements can become durable facts.  Including
+        # assistant text here would persist model guesses as if the user had
+        # confirmed them.
         full_text = "\n".join(
-            f"{m.get('role','')}: {m.get('content','')}"
+            str(m.get("content", ""))
             for m in messages
+            if isinstance(m, dict) and m.get("role") == "user"
         )
 
         for pattern, mtype in explicit_patterns:
@@ -517,6 +561,12 @@ class CrossSessionMemory:
             content = item.get("content", "").strip()
             mtype = item.get("type", "fact")
             conf = float(item.get("confidence", 0.7))
+            type_aliases = {
+                "preference": "user_preference",
+                "decision": "decision_history",
+                "entity": "entity_relationship",
+            }
+            mtype = type_aliases.get(mtype, mtype)
             if len(content) >= 4 and mtype in CrossSessionMemory.TYPE_MAP:
                 items.append(MemoryItem(
                     memory_type=mtype,

@@ -17,7 +17,9 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import logging
+from threading import RLock
 from typing import Any, Dict, List, Optional, Sequence
 
 from artpm_agent.memory.conversation_compressor import (
@@ -42,6 +44,8 @@ class MemoryInjector:
     - 支持降级模式（无 LLM 时退化为规则提取 + 截断）
     """
 
+    MAX_TRACKED_CONVERSATIONS = 512
+
     def __init__(
         self,
         knowledge_store: Any,  # WorkspaceKnowledgeStore
@@ -60,7 +64,37 @@ class MemoryInjector:
         self.max_context_chars = max_context_chars
 
         # 状态追踪（按会话隔离）
-        self._compress_state: Dict[str, Dict[str, Any]] = {}
+        self._compress_state: OrderedDict[
+            tuple[str, str], Dict[str, Any]
+        ] = OrderedDict()
+        self._state_lock = RLock()
+        # Compression and extraction are infrequent, but must be serialized for
+        # one shared store so concurrent turns cannot spend twice on one cursor.
+        self._compression_lock = RLock()
+
+    @staticmethod
+    def _state_key(conversation_id: str, workspace_id: str) -> tuple[str, str]:
+        return (
+            str(workspace_id or "local-default").strip() or "local-default",
+            str(conversation_id or "").strip(),
+        )
+
+    def _state_snapshot(self, key: tuple[str, str]) -> Dict[str, Any]:
+        with self._state_lock:
+            state = self._compress_state.get(key)
+            if state is None:
+                return {}
+            self._compress_state.move_to_end(key)
+            return dict(state)
+
+    def _update_state(self, key: tuple[str, str], **values: Any) -> None:
+        with self._state_lock:
+            state = dict(self._compress_state.get(key, {}))
+            state.update(values)
+            self._compress_state[key] = state
+            self._compress_state.move_to_end(key)
+            while len(self._compress_state) > self.MAX_TRACKED_CONVERSATIONS:
+                self._compress_state.popitem(last=False)
 
     # ---- 主入口 ---------------------------------------------------------
 
@@ -70,6 +104,7 @@ class MemoryInjector:
         messages: Sequence[Dict[str, Any]],
         user_input: str = "",
         conversation_id: str = "",
+        workspace_id: str = "local-default",
         llm_callable: Any = None,
     ) -> str:
         """为一次 LLM 调用准备完整的记忆上下文。
@@ -84,6 +119,7 @@ class MemoryInjector:
             messages: 当前会话完整消息列表
             user_input: 用户最新输入（用于相关性检索）
             conversation_id: 当前会话 ID
+            workspace_id: 当前工作区 ID
             llm_callable: 可选 LLM 调用（用于压缩和增强提取）
 
         Returns:
@@ -92,6 +128,7 @@ class MemoryInjector:
         if not messages and not user_input:
             return ""
 
+        state_key = self._state_key(conversation_id, workspace_id)
         parts: List[str] = []
         total_chars = 0
 
@@ -99,7 +136,7 @@ class MemoryInjector:
         compression_result: Optional[CompressionResult] = None
         if self.auto_compress and len(messages) > 10:
             compression_result = self._check_and_compress(
-                messages, conversation_id, llm_callable
+                messages, conversation_id, llm_callable, workspace_id
             )
             if compression_result and compression_result.was_compressed:
                 summary_ctx = self.compressor.build_compressed_context(
@@ -119,7 +156,7 @@ class MemoryInjector:
         # Step 2: 增量提取新记忆（仅在有 LLM 时做增强提取）
         if self.auto_extract and llm_callable is not None:
             try:
-                state = self._compress_state.get(conversation_id, {})
+                state = self._state_snapshot(state_key)
                 last_extract_count = state.get("last_extract_count", 0)
                 current_count = len(messages)
 
@@ -128,10 +165,16 @@ class MemoryInjector:
                     extracted = self.cross_memory.extract_and_save_from_messages(
                         messages,
                         conversation_id=conversation_id,
+                        workspace_id=workspace_id,
                         llm_callable=llm_callable,
                     )
-                    if conversation_id in self._compress_state:
-                        self._compress_state[conversation_id]["last_extract_count"] = current_count
+                    # Persist the cursor even when compression did not run in
+                    # this conversation.  Without this initialization the same
+                    # six-message window was extracted on every invocation.
+                    self._update_state(
+                        state_key,
+                        last_extract_count=current_count,
+                    )
                     if extracted:
                         logger.info("增量提取 %d 条新记忆", len(extracted))
             except Exception as exc:
@@ -143,6 +186,7 @@ class MemoryInjector:
                 memory_ctx = self.cross_memory.build_memory_context(
                     user_input,
                     conversation_id=conversation_id,
+                    workspace_id=workspace_id,
                     include_preferences=True,
                 )
                 if memory_ctx:
@@ -168,6 +212,7 @@ class MemoryInjector:
         messages: Sequence[Dict[str, Any]],
         conversation_id: str,
         llm_callable: Any = None,
+        workspace_id: str = "local-default",
     ) -> str:
         """Return a compressed-summary block for long conversations, or ''.
 
@@ -180,7 +225,7 @@ class MemoryInjector:
             return ""
         try:
             result = self._check_and_compress(
-                messages, conversation_id, llm_callable
+                messages, conversation_id, llm_callable, workspace_id
             )
             if result and result.was_compressed:
                 summary = self.compressor.build_compressed_context(
@@ -200,20 +245,26 @@ class MemoryInjector:
         messages: Sequence[Dict[str, Any]],
         conversation_id: str,
         llm_callable: Any,
+        workspace_id: str = "local-default",
     ) -> CompressionResult:
         """强制执行一次压缩（忽略触发条件）。"""
-        result = self.compressor.compress(
-            messages,
-            llm_callable,
-            conversation_id=conversation_id,
-            knowledge_store=self.store,
-        )
-
-        state = self._compress_state.setdefault(conversation_id, {})
-        state["last_compressed_at"] = result.compressed_at
-        state["last_message_count"] = result.messages_after
-
-        return result
+        state_key = self._state_key(conversation_id, workspace_id)
+        with self._compression_lock:
+            result = self.compressor.compress(
+                messages,
+                llm_callable,
+                conversation_id=conversation_id,
+                workspace_id=workspace_id,
+                knowledge_store=self.store,
+            )
+            if result.was_compressed:
+                self._update_state(
+                    state_key,
+                    last_compressed_at=result.compressed_at,
+                    last_message_count=len(messages),
+                    last_extract_count=len(messages),
+                )
+            return result
 
     def remember_explicitly(
         self,
@@ -221,11 +272,13 @@ class MemoryInjector:
         memory_type: str = "fact",
         *,
         conversation_id: str = "",
+        workspace_id: str = "local-default",
     ) -> bool:
         """记录一条显式记忆（用户说"记住 XXX"时调用）。"""
         rid = self.cross_memory.save_memory(
             content,
             memory_type,
+            workspace_id=workspace_id,
             source_conversation=conversation_id,
             source_type="explicit",
             confidence=1.0,
@@ -233,12 +286,16 @@ class MemoryInjector:
         return rid is not None
 
     def get_conversation_summary(
-        self, conversation_id: str
+        self,
+        conversation_id: str,
+        *,
+        workspace_id: str = "local-default",
     ) -> List[Dict[str, Any]]:
         """获取指定会话的所有摘要。"""
         try:
             results = self.store.search(
                 conversation_id,
+                workspace_id=workspace_id,
                 resource_types=["conversation_summary"],
                 include_rules=False,
                 limit=10,
@@ -256,35 +313,40 @@ class MemoryInjector:
         messages: Sequence[Dict[str, Any]],
         conversation_id: str,
         llm_callable: Any,
+        workspace_id: str = "local-default",
     ) -> Optional[CompressionResult]:
         """检查是否需要压缩并在条件满足时执行。"""
-        state = self._compress_state.get(conversation_id, {})
+        state_key = self._state_key(conversation_id, workspace_id)
+        with self._compression_lock:
+            state = self._state_snapshot(state_key)
 
-        should = self.compressor.should_compress(
-            messages,
-            last_compressed_at=state.get("last_compressed_at"),
-            message_count_at_last_compress=state.get("last_message_count", 0),
-        )
+            should = self.compressor.should_compress(
+                messages,
+                last_compressed_at=state.get("last_compressed_at"),
+                message_count_at_last_compress=state.get("last_message_count", 0),
+            )
 
-        if not should:
-            return None
+            if not should:
+                return None
 
-        if llm_callable is None:
-            logger.info("压缩触发但无可用的 LLM，跳过")
-            return None
+            if llm_callable is None:
+                logger.info("压缩触发但无可用的 LLM，跳过")
+                return None
 
-        result = self.compressor.compress(
-            messages,
-            llm_callable,
-            conversation_id=conversation_id,
-            knowledge_store=self.store,
-        )
+            result = self.compressor.compress(
+                messages,
+                llm_callable,
+                conversation_id=conversation_id,
+                workspace_id=workspace_id,
+                knowledge_store=self.store,
+            )
 
-        # 更新状态
-        self._compress_state[conversation_id] = {
-            "last_compressed_at": result.compressed_at,
-            "last_message_count": result.messages_after,
-            "last_extract_count": len(messages),
-        }
+            if result.was_compressed:
+                self._update_state(
+                    state_key,
+                    last_compressed_at=result.compressed_at,
+                    last_message_count=len(messages),
+                    last_extract_count=len(messages),
+                )
 
-        return result
+            return result

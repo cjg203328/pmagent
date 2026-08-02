@@ -11,7 +11,7 @@ import json
 import logging
 import math
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 

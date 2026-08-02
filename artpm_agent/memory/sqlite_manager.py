@@ -21,8 +21,19 @@ class SQLiteManager:
         "documents": {"id", "document_type", "source", "file_path", "file_hash", "extracted_data", "raw_text", "confidence", "created_at"},
         "operation_logs": {"id", "operation", "skill_name", "inputs", "outputs", "success", "error", "created_at"},
     }
+    _PRIMARY_SCHEMA_DROP_ORDER = (
+        "task_assignments",
+        "progress_updates",
+        "reminders",
+        "quotes",
+        "tasks",
+        "staff",
+        "documents",
+        "operation_logs",
+        "projects",
+    )
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, *, initialize_schema: bool = True):
         """
         Initialize database manager
 
@@ -31,20 +42,25 @@ class SQLiteManager:
         """
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+        # Auxiliary stores (episodes, feedback, strategies, reflection runs)
+        # use this connection helper but own their schema.  Avoid creating the
+        # unrelated project/legacy tables in every auxiliary database.
+        if initialize_schema:
+            self._init_schema()
 
     @contextmanager
     def get_connection(self):
         """Get database connection context manager"""
         conn = sqlite3.connect(self.db_path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
         try:
-            yield conn
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            raise e
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
         finally:
             conn.close()
 
@@ -190,6 +206,63 @@ class SQLiteManager:
 
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(project_id, status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(document_type)")
+
+    def remove_empty_primary_schema_scaffold(self) -> bool:
+        """Remove the old auto-created business schema from an auxiliary DB.
+
+        Older auxiliary stores inherited all primary tables from this manager.
+        Cleanup is deliberately fail-closed: every expected table must have the
+        exact known columns, contain no rows, and have no custom trigger.  If
+        any check fails, no table is dropped and user data is preserved.
+        """
+        expected_tables = set(self.TABLE_COLUMNS)
+        with self.get_connection() as conn:
+            existing_tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            if not expected_tables <= existing_tables:
+                return False
+
+            placeholders = ", ".join("?" for _ in expected_tables)
+            trigger = conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                f"WHERE type = 'trigger' AND tbl_name IN ({placeholders}) LIMIT 1",
+                tuple(sorted(expected_tables)),
+            ).fetchone()
+            if trigger is not None:
+                return False
+
+            # An auxiliary table with a foreign key into the scaffold would
+            # make dropping a parent unsafe.  Preserve the whole schema in
+            # that case instead of partially migrating it.
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall():
+                table = str(row[0])
+                if table.startswith("sqlite_") or table in expected_tables:
+                    continue
+                foreign_keys = conn.execute(
+                    f'PRAGMA foreign_key_list("{table}")'
+                ).fetchall()
+                if any(str(foreign_key[2]) in expected_tables for foreign_key in foreign_keys):
+                    return False
+
+            for table, expected_columns in self.TABLE_COLUMNS.items():
+                columns = {
+                    str(row[1])
+                    for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+                }
+                if columns != expected_columns:
+                    return False
+                if conn.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone():
+                    return False
+
+            for table in self._PRIMARY_SCHEMA_DROP_ORDER:
+                conn.execute(f'DROP TABLE "{table}"')
+        return True
 
     def _validate_identifiers(self, table: str, columns=None) -> None:
         allowed = self.TABLE_COLUMNS.get(table)

@@ -18,6 +18,15 @@ def test_add_and_active(tmp_path):
     assert active[0].capability == "skill_handler"
 
 
+def test_duplicate_active_strategy_is_idempotent(tmp_path):
+    store = StrategyStore(str(tmp_path / "st.db"))
+    first = store.add(Strategy(capability="global", rule_text="同一条经验"))
+    second = store.add(Strategy(capability="global", rule_text="同一条经验"))
+
+    assert second == first
+    assert len(store.active()) == 1
+
+
 def test_capability_filter(tmp_path):
     store = StrategyStore(str(tmp_path / "st.db"))
     store.add(Strategy(capability="global", rule_text="g"))

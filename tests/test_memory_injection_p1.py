@@ -5,7 +5,6 @@ priority ordering, cross-block dedup, and that feedback/strategy are surfaced.
 """
 from types import SimpleNamespace
 
-import pytest
 
 from artpm_agent.harness.memory_retrieval import (
     FEEDBACK_CATEGORIES,
@@ -13,8 +12,6 @@ from artpm_agent.harness.memory_retrieval import (
     record_turn_feedback,
 )
 from artpm_agent.profiles.models import (
-    AgentProfile,
-    AgentIdentity,
     response_style_rule,
 )
 
@@ -109,7 +106,6 @@ def test_positive_feedback_not_injected_as_preference():
             return []
 
     # Patch the default feedback store used by record_turn_feedback.
-    import artpm_agent.harness.memory_retrieval as mr
     import artpm_agent.memory.feedback_store as fs
 
     orig = fs.get_default_feedback_store

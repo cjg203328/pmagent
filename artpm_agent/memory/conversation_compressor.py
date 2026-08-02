@@ -105,6 +105,31 @@ class ConversationCompressor:
         """判断当前对话是否需要压缩（只读，无副作用）。"""
         msg_count = len(messages)
 
+        # Once a window has been compressed, the original messages remain in
+        # durable history.  Gate subsequent summaries by both cursor growth and
+        # time before re-evaluating the absolute size thresholds.
+        if last_compressed_at:
+            try:
+                last_ts = datetime.fromisoformat(last_compressed_at)
+                elapsed = (
+                    datetime.now(timezone.utc) - last_ts
+                ).total_seconds() / 60.0
+                new_msgs = msg_count - message_count_at_last_compress
+                if (
+                    new_msgs <= self.min_new_messages
+                    or elapsed < self.min_compress_interval_min
+                ):
+                    return False
+                logger.info(
+                    "压缩触发: 距上次 %.0f min, 新增 %d 条消息",
+                    elapsed,
+                    new_msgs,
+                )
+                return True
+            except (ValueError, TypeError):
+                # Invalid legacy cursors fall through to the size checks.
+                pass
+
         # 条件 1：消息数超限
         if msg_count > self.max_messages:
             logger.info(
@@ -126,21 +151,6 @@ class ConversationCompressor:
             )
             return True
 
-        # 条件 3：时间间隔 + 新增消息量
-        if last_compressed_at and msg_count > message_count_at_last_compress + self.min_new_messages:
-            try:
-                last_ts = datetime.fromisoformat(last_compressed_at)
-                elapsed = (datetime.now(timezone.utc) - last_ts).total_seconds() / 60.0
-                if elapsed >= self.min_compress_interval_min:
-                    new_msgs = msg_count - message_count_at_last_compress
-                    logger.info(
-                        "压缩触发: 距上次 %.0f min, 新增 %d 条消息",
-                        elapsed, new_msgs,
-                    )
-                    return True
-            except (ValueError, TypeError):
-                pass
-
         return False
 
     def compress(
@@ -149,6 +159,7 @@ class ConversationCompressor:
         llm_callable: Any,  # Callable[[str], str] — 接收 prompt 返回摘要文本
         *,
         conversation_id: str = "",
+        workspace_id: str = "local-default",
         knowledge_store: Any = None,  # WorkspaceKnowledgeStore or None
     ) -> CompressionResult:
         """执行压缩：生成摘要 → 提取关键点 → 可选写入知识库。
@@ -157,6 +168,7 @@ class ConversationCompressor:
             messages: 当前完整消息列表 (role/content 格式)
             llm_callable: LLM 调用入口，接收 system+user prompt，返回文本
             conversation_id: 所属会话 ID（用于知识库关联）
+            workspace_id: 所属工作区 ID（用于知识隔离）
             knowledge_store: 若提供，将摘要写入知识库供跨会话检索
 
         Returns:
@@ -200,6 +212,7 @@ class ConversationCompressor:
                     knowledge_store,
                     result,
                     conversation_id,
+                    workspace_id,
                 )
 
             logger.info(
@@ -309,6 +322,7 @@ class ConversationCompressor:
         store: Any,  # WorkspaceKnowledgeStore
         result: CompressionResult,
         conversation_id: str,
+        workspace_id: str,
     ) -> None:
         """将摘要和相关记忆写入知识库。"""
         try:
@@ -334,6 +348,7 @@ class ConversationCompressor:
                 searchable_text=searchable_text,
                 resource_type="conversation_summary",
                 source_type="auto_compress",
+                workspace_id=workspace_id,
                 source_id=conversation_id,
                 structured_data={
                     "type": "conversation_summary",
@@ -355,6 +370,7 @@ class ConversationCompressor:
                         searchable_text=pref,
                         resource_type="user_preference",
                         source_type="auto_extract",
+                        workspace_id=workspace_id,
                         source_id=conversation_id,
                         structured_data={
                             "type": "user_preference",

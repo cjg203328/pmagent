@@ -81,9 +81,10 @@ class EpisodeStore:
     """Persist and query per-turn outcome Episodes."""
 
     def __init__(self, db_path: str):
-        # SQLiteManager initializes its own (unused) schema on this file; the
-        # episodes table below is ours and does not collide with any existing one.
-        self.db = SQLiteManager(db_path)
+        # This database is dedicated to episodes; do not install the primary
+        # project schema (including legacy tables) into it.
+        self.db = SQLiteManager(db_path, initialize_schema=False)
+        self.db.remove_empty_primary_schema_scaffold()
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:

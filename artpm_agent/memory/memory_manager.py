@@ -3,6 +3,7 @@ Memory Manager - Unified interface for short-term and long-term memory
 """
 from hashlib import sha256
 import json
+import re
 from typing import Dict, Any, List, Optional
 
 from artpm_agent.memory.embeddings import DeterministicEmbeddingProvider, EmbeddingProvider
@@ -130,19 +131,41 @@ class MemoryManager:
                 print(f"[Warning] Vector search failed: {e}")
 
         # Offline fallback: filter structured records and rank literal matches.
+        # Keep the full phrase as the strongest signal, but also match
+        # whitespace/punctuation-separated terms so a long conversational query
+        # does not become an all-or-nothing substring lookup.
         if not results:
             docs = self.db.query("documents", filters or {})
-            query_text = query.strip().lower()
+            query_text = " ".join(str(query or "").split()).casefold()
             if query_text:
-                docs = [
-                    doc for doc in docs
-                    if query_text in " ".join([
-                        str(doc.get("document_type", "")),
-                        str(doc.get("raw_text", "")),
-                        str(doc.get("extracted_data", "")),
-                    ]).lower()
+                terms = [
+                    term.casefold()
+                    for term in re.split(r"[\s,，。；;、:：/\\]+", query_text)
+                    if len(term.strip()) >= 2
                 ]
-            results = [{"id": doc["id"], "score": 1.0, "data": doc} for doc in docs[:top_k]]
+                if not terms:
+                    terms = [query_text]
+                ranked = []
+                for doc in docs:
+                    haystack = " ".join(
+                        [
+                            str(doc.get("document_type", "")),
+                            str(doc.get("raw_text", "")),
+                            str(doc.get("extracted_data", "")),
+                        ]
+                    ).casefold()
+                    exact = 1.0 if query_text in haystack else 0.0
+                    term_hits = sum(term in haystack for term in terms)
+                    if not exact and term_hits == 0:
+                        continue
+                    score = exact + term_hits / max(1, len(terms))
+                    ranked.append((score, doc))
+                ranked.sort(key=lambda item: (-item[0], str(item[1].get("id", ""))))
+                docs = [doc for _score, doc in ranked]
+            results = [
+                {"id": doc["id"], "score": 1.0, "data": doc}
+                for doc in docs[:top_k]
+            ]
 
         return results
 
@@ -216,13 +239,28 @@ class MemoryManager:
 
     def _build_embedding_text(self, doc_data: Dict[str, Any]) -> str:
         """Build text for embedding generation"""
-        parts = [doc_data.get("document_type", "")]
+        parts = [
+            str(doc_data.get("document_type", "")),
+            str(doc_data.get("source", "")),
+        ]
 
         raw_text = doc_data.get("raw_text", "")
         if raw_text:
-            parts.append(raw_text[:1000])
+            parts.append(str(raw_text)[:2000])
 
-        return " ".join(parts)
+        extracted = doc_data.get("extracted_data", {})
+        if isinstance(extracted, str):
+            try:
+                extracted = json.loads(extracted)
+            except json.JSONDecodeError:
+                extracted = extracted[:2000]
+        if extracted:
+            try:
+                parts.append(json.dumps(extracted, ensure_ascii=False, sort_keys=True)[:2000])
+            except (TypeError, ValueError):
+                parts.append(str(extracted)[:2000])
+
+        return " ".join(part for part in parts if part).strip()
 
     def _sync_vector_index(self) -> None:
         """Reconcile persisted documents after FAISS installation or rebuild."""

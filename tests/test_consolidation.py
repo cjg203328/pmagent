@@ -1,6 +1,7 @@
 """Tests for Phase 2 ConsolidationService and its schema migration."""
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -28,7 +29,7 @@ def _columns(conn: sqlite3.Connection, table: str) -> set:
 
 def test_schema_migration_adds_consolidation_columns(tmp_path: Path):
     store = _new_store(tmp_path)
-    with store._connect() as conn:
+    with closing(store._connect()) as conn, conn:
         res_cols = _columns(conn, "knowledge_resources")
         ver_cols = _columns(conn, "knowledge_versions")
     assert {"confidence", "consolidation_status", "supersedes", "last_hit"} <= res_cols
@@ -59,6 +60,27 @@ def test_dedup_marks_duplicates_superseded(tmp_path: Path):
     )
     assert len(superseded) == 1
     assert superseded[0]["supersedes"] is None or superseded[0]["supersedes"] != ""
+
+
+def test_search_excludes_superseded_and_conflict_resources(tmp_path: Path):
+    store = _new_store(tmp_path)
+    active_id = store.ingest_resource(
+        title="当前知识", searchable_text="项目必须保留验收记录", resource_type="lesson"
+    )["id"]
+    superseded_id = store.ingest_resource(
+        title="旧知识", searchable_text="项目必须保留验收记录", resource_type="lesson"
+    )["id"]
+    conflict_id = store.ingest_resource(
+        title="冲突知识", searchable_text="项目必须保留验收记录", resource_type="lesson"
+    )["id"]
+    store.mark_consolidation_status(superseded_id, "superseded")
+    store.mark_consolidation_status(conflict_id, "conflict")
+
+    results = store.search(
+        "验收记录", include_rules=False, limit=10, use_confidence=True
+    )
+
+    assert [item["id"] for item in results] == [active_id]
 
 
 def test_decay_reduces_confidence_for_stale_resources(tmp_path: Path):
@@ -110,7 +132,6 @@ def test_scheduler_throttles_runs(tmp_path: Path):
     store.ingest_resource(
         title="S", searchable_text="scheduler test", resource_type="lesson"
     )
-    svc = ConsolidationService(store)
     sched = ConsolidationScheduler(tmp_path / "consolidation.db")
     ws = store.DEFAULT_WORKSPACE_ID
     assert sched.should_run(workspace_id=ws) is True

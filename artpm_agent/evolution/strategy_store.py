@@ -11,11 +11,9 @@ Fully additive: owns its own ``strategies`` table in a dedicated database file.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from artpm_agent.memory.sqlite_manager import SQLiteManager
@@ -71,7 +69,10 @@ class StrategyStore:
     """Persist and query learned strategies."""
 
     def __init__(self, db_path: str):
-        self.db = SQLiteManager(db_path)
+        # Strategies live in a dedicated database; keep unrelated business
+        # and legacy tables out of the file.
+        self.db = SQLiteManager(db_path, initialize_schema=False)
+        self.db.remove_empty_primary_schema_scaffold()
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
@@ -102,6 +103,19 @@ class StrategyStore:
     def add(self, strategy: Strategy) -> str:
         row = strategy.to_row()
         with self.db.get_connection() as conn:
+            # Reflection can be retried after a timeout or process restart.
+            # Treat the same active capability/rule pair as idempotent so one
+            # episode cannot inflate the strategy list on every retry.
+            existing = conn.execute(
+                """
+                SELECT id FROM strategies
+                WHERE active = 1 AND capability = ? AND rule_text = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (row["capability"], row["rule_text"]),
+            ).fetchone()
+            if existing is not None:
+                return str(existing["id"])
             conn.execute(
                 """
                 INSERT INTO strategies (

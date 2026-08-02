@@ -85,10 +85,14 @@ class WorkspaceKnowledgeStore:
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.db_path), timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 10000")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 10000")
+            return connection
+        except BaseException:
+            connection.close()
+            raise
 
     @contextmanager
     def _connection(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
@@ -614,16 +618,20 @@ class WorkspaceKnowledgeStore:
         resource_id: str,
         *,
         version: Optional[int] = None,
+        workspace_id: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         resource_id = self._required_text(resource_id, "resource_id")
+        if workspace_id is not None:
+            workspace_id = self._required_text(workspace_id, "workspace_id")
         if version is not None and (
             isinstance(version, bool) or not isinstance(version, int) or version <= 0
         ):
             raise ValueError("version must be a positive integer")
         with self._connection() as connection:
+            workspace_clause = "" if workspace_id is None else " AND workspace_id = ?"
             resource_row = connection.execute(
-                "SELECT * FROM knowledge_resources WHERE id = ?",
-                (resource_id,),
+                "SELECT * FROM knowledge_resources WHERE id = ?" + workspace_clause,
+                (resource_id,) if workspace_id is None else (resource_id, workspace_id),
             ).fetchone()
             if resource_row is None:
                 return None
@@ -639,15 +647,27 @@ class WorkspaceKnowledgeStore:
             return None
         return self._resource_record(resource_row, version_row)
 
-    def list_versions(self, resource_id: str) -> list[dict[str, Any]]:
+    def list_versions(
+        self,
+        resource_id: str,
+        *,
+        workspace_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
         resource_id = self._required_text(resource_id, "resource_id")
+        if workspace_id is not None:
+            workspace_id = self._required_text(workspace_id, "workspace_id")
+        workspace_clause = "" if workspace_id is None else " AND r.workspace_id = ?"
+        parameters = (
+            (resource_id,) if workspace_id is None else (resource_id, workspace_id)
+        )
         with self._connection() as connection:
             rows = connection.execute(
-                """
-                SELECT * FROM knowledge_versions
-                WHERE resource_id = ? ORDER BY version DESC
-                """,
-                (resource_id,),
+                "SELECT v.* FROM knowledge_versions v "
+                "JOIN knowledge_resources r ON r.id = v.resource_id "
+                "WHERE v.resource_id = ?"
+                + workspace_clause
+                + " ORDER BY v.version DESC",
+                parameters,
             ).fetchall()
         return [self._version_record(row) for row in rows]
 
@@ -682,16 +702,25 @@ class WorkspaceKnowledgeStore:
             ).fetchall()
         return [self._joined_resource_record(row) for row in rows]
 
-    def archive_resource(self, resource_id: str) -> bool:
+    def archive_resource(
+        self,
+        resource_id: str,
+        *,
+        workspace_id: Optional[str] = None,
+    ) -> bool:
         resource_id = self._required_text(resource_id, "resource_id")
+        if workspace_id is not None:
+            workspace_id = self._required_text(workspace_id, "workspace_id")
+        workspace_clause = "" if workspace_id is None else " AND workspace_id = ?"
+        parameters: tuple[Any, ...] = (self._utc_now(), resource_id)
+        if workspace_id is not None:
+            parameters += (workspace_id,)
         with self._connection(write=True) as connection:
             cursor = connection.execute(
-                """
-                UPDATE knowledge_resources
-                SET status = 'archived', updated_at = ?
-                WHERE id = ? AND status != 'archived'
-                """,
-                (self._utc_now(), resource_id),
+                "UPDATE knowledge_resources "
+                "SET status = 'archived', updated_at = ? "
+                "WHERE id = ? AND status != 'archived'" + workspace_clause,
+                parameters,
             )
         archived = cursor.rowcount > 0
         if archived:
@@ -1793,6 +1822,7 @@ class WorkspaceKnowledgeStore:
                     JOIN knowledge_versions v
                       ON v.resource_id = r.id AND v.version = r.current_version
                     WHERE r.status = 'active'
+                      AND r.consolidation_status = 'active'
                     ORDER BY r.workspace_id, r.id
                     """
                 ).fetchall()
@@ -1984,7 +2014,9 @@ class WorkspaceKnowledgeStore:
             FROM knowledge_resources r
             JOIN knowledge_versions v
                 ON v.resource_id = r.id AND v.version = r.current_version
-            WHERE r.workspace_id = ? AND r.status = 'active'
+            WHERE r.workspace_id = ?
+                AND r.status = 'active'
+                AND r.consolidation_status = 'active'
         """
         resource_params: list[Any] = [workspace_id]
         if resource_type_filter:
