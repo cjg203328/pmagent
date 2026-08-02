@@ -2,11 +2,157 @@
 系统健康检查 - 验证所有组件是否正常工作
 """
 import sys
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from typing import Dict, Any
 import json
+
+
+def _is_javascript_response(response: Any) -> bool:
+    content_type = str(response.headers.get("Content-Type", "")).lower()
+    prefix = bytes(response.content[:256]).lstrip().lower()
+    return (
+        response.status_code == 200
+        and "javascript" in content_type
+        and not prefix.startswith((b"<!doctype html", b"<html"))
+    )
+
+
+def check_frontend_assets(
+    *,
+    static_root: Path | None = None,
+    base_url: str | None = None,
+) -> Dict[str, Any]:
+    """Check local JS integrity and reject Streamlit's HTML asset fallback."""
+    from artpm_agent.ui_asset_recovery import inspect_frontend_bundle
+
+    result = inspect_frontend_bundle(static_root)
+    if result.get("status") != "ok":
+        return result
+
+    if base_url is None:
+        port = os.getenv("ARTPM_PORT", "8501").strip() or "8501"
+        base_url = os.getenv(
+            "ARTPM_HEALTH_BASE_URL",
+            f"http://127.0.0.1:{port}",
+        )
+    base_url = str(base_url or "").rstrip("/")
+    if not base_url:
+        result["server"] = "not_checked"
+        return result
+
+    import requests
+
+    try:
+        health = requests.get(f"{base_url}/_stcore/health", timeout=1.0)
+    except requests.RequestException:
+        return {
+            **result,
+            "status": "error",
+            "server": "not_running",
+            "message": "Streamlit health endpoint is not reachable",
+        }
+    if health.status_code != 200:
+        return {
+            **result,
+            "status": "error",
+            "server": "unhealthy",
+            "message": f"Streamlit health returned HTTP {health.status_code}",
+        }
+
+    invalid_assets = []
+    for asset in result.get("critical_assets", []):
+        try:
+            response = requests.get(f"{base_url}/{asset}", timeout=2.0)
+        except requests.RequestException as error:
+            invalid_assets.append(
+                {
+                    "asset": asset,
+                    "status_code": 0,
+                    "content_type": "",
+                    "error": str(error),
+                }
+            )
+            continue
+        if not _is_javascript_response(response):
+            invalid_assets.append(
+                {
+                    "asset": asset,
+                    "status_code": response.status_code,
+                    "content_type": response.headers.get("Content-Type", ""),
+                }
+            )
+    if invalid_assets:
+        return {
+            **result,
+            "status": "error",
+            "server": "asset_mismatch",
+            "invalid_assets": invalid_assets,
+            "message": "Frontend JS path returned a non-JavaScript response",
+        }
+    result["server"] = "ok"
+    return result
+
+
+def check_api_health(*, base_url: str | None = None) -> Dict[str, Any]:
+    """Probe the optional FastAPI gateway without breaking local-only mode."""
+    configured_base = base_url or os.getenv("ARTPM_API_BASE_URL") or os.getenv("ARTPM_API_URL")
+    required = bool(configured_base) or os.getenv("ARTPM_API_REQUIRED", "").casefold() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if base_url is None:
+        base_url = configured_base
+    if not base_url:
+        port = os.getenv("ARTPM_API_PORT", "8765").strip() or "8765"
+        base_url = f"http://127.0.0.1:{port}"
+    base_url = str(base_url).rstrip("/")
+
+    import requests
+
+    try:
+        response = requests.get(f"{base_url}/health", timeout=1.0)
+    except requests.RequestException as error:
+        return {
+            "status": "error" if required else "optional",
+            "server": "not_running",
+            "url": base_url,
+            "message": "API 网关未连接，当前继续使用本地运行链路",
+            "detail": str(error),
+        }
+
+    content_type = str(response.headers.get("Content-Type", "")).lower()
+    try:
+        payload = response.json()
+    except ValueError:
+        return {
+            "status": "error",
+            "server": "invalid_response",
+            "url": base_url,
+            "message": "API 健康端点返回了无法解析的内容",
+            "content_type": content_type,
+        }
+
+    gateway_status = payload.get("status") if isinstance(payload, dict) else None
+    if response.status_code != 200 or gateway_status not in {"ok", "degraded"}:
+        return {
+            "status": "error",
+            "server": "unhealthy",
+            "url": base_url,
+            "message": f"API 健康检查失败（HTTP {response.status_code}）",
+            "gateway_status": gateway_status,
+        }
+    return {
+        "status": "ok" if gateway_status == "ok" else "degraded",
+        "server": "ok",
+        "url": base_url,
+        "version": payload.get("version", ""),
+        "gateway_status": gateway_status,
+        "content_type": content_type,
+    }
 
 
 def _configure_console() -> None:
@@ -153,14 +299,43 @@ def check_config() -> Dict[str, Any]:
         }
 
 
+def check_mineru() -> Dict[str, Any]:
+    """Inspect the optional MinerU backend without starting models or a sidecar."""
+    try:
+        from artpm_agent.config import get_config
+        from artpm_agent.utils.mineru_adapter import MinerUDocumentConverter
+
+        converter = MinerUDocumentConverter(get_config().get("mineru", {}))
+        try:
+            runtime = converter.runtime_status(probe=True)
+            payload = runtime.as_dict()
+        finally:
+            converter.close()
+        return {
+            "status": "ok" if payload.get("available") else "optional",
+            **payload,
+        }
+    except Exception as error:
+        # A malformed optional configuration must not make the core app
+        # unhealthy; the document parser will continue with its fallback.
+        return {"status": "optional", "available": False, "detail": str(error)}
+
+
 def check_agent() -> Dict[str, Any]:
     """检查Agent是否可以初始化"""
+    agent = None
     try:
         from artpm_agent.agent import ArtPMAgent
 
         agent = ArtPMAgent()
         skills = agent.list_skills()
         ocr_runtime = agent.unlimited_ocr_client.runtime_status()
+        mineru_converter = getattr(agent, "mineru_converter", None)
+        mineru_runtime = (
+            mineru_converter.runtime_status(probe=False)
+            if mineru_converter is not None
+            else None
+        )
 
         return {
             'status': 'ok',
@@ -175,12 +350,27 @@ def check_agent() -> Dict[str, Any]:
                 'available': ocr_runtime.available,
                 'detail': ocr_runtime.detail,
             },
+            # MinerU is optional. Its absence is a documented fallback state,
+            # not an application health failure.
+            'mineru_runtime': (
+                mineru_runtime.as_dict()
+                if mineru_runtime is not None
+                else {
+                    'enabled': False,
+                    'available': False,
+                    'detail': 'adapter unavailable',
+                }
+            ),
         }
     except Exception as e:
         return {
             'status': 'error',
             'message': str(e)
         }
+    finally:
+        close = getattr(agent, "close", None)
+        if callable(close):
+            close()
 
 
 def run_health_check() -> Dict[str, Any]:
@@ -192,10 +382,13 @@ def run_health_check() -> Dict[str, Any]:
 
     results = {
         'imports': check_imports(),
+        'frontend_assets': check_frontend_assets(),
+        'api_gateway': check_api_health(),
         'llm_providers': check_llm_providers(),
         'vector_search': check_vector_search(),
         'database': check_database(),
         'config': check_config(),
+        'mineru': check_mineru(),
         'agent': check_agent()
     }
 
@@ -205,6 +398,21 @@ def run_health_check() -> Dict[str, Any]:
         status = "✓" if result['status'] == 'ok' else "✗"
         version = f"v{result.get('version', 'N/A')}" if result['status'] == 'ok' else result.get('message', '')
         print(f"  {status} {name:20s} {version}")
+
+    frontend_result = results['frontend_assets']
+    api_result = results['api_gateway']
+    api_icon = "OK" if api_result.get("status") in {"ok", "degraded"} else "-"
+    print(
+        f"\nAPI gateway: {api_icon} "
+        f"{api_result.get('message', api_result.get('server', 'unknown'))}"
+    )
+    if frontend_result['status'] == 'ok':
+        print(
+            f"\n🧩 前端资源: ✓ {frontend_result.get('javascript_assets', 0)} JS assets "
+            f"(server: {frontend_result.get('server', 'not_checked')})"
+        )
+    else:
+        print(f"\n🧩 前端资源: ✗ {frontend_result.get('message', 'unavailable')}")
 
     print("\n🤖 LLM提供商:")
     for name, result in results['llm_providers'].items():
@@ -241,6 +449,13 @@ def run_health_check() -> Dict[str, Any]:
     else:
         print(f"  ✗ 错误: {cfg_result['message']}")
 
+    mineru_result = results['mineru']
+    mineru_icon = "✓" if mineru_result.get("status") == "ok" else "-"
+    print(
+        f"\n🧾 MinerU: {mineru_icon} "
+        f"{mineru_result.get('detail', 'not configured')}"
+    )
+
     print("\n🤖 Agent:")
     agent_result = results['agent']
     if agent_result['status'] == 'ok':
@@ -248,6 +463,12 @@ def run_health_check() -> Dict[str, Any]:
         print(f"  ✓ Skills数量: {agent_result['skills_count']}")
         print(f"  {'✓' if agent_result['llm_available'] else '✗'} LLM可用: {agent_result['llm_available']}")
         print(f"  {'✓' if agent_result['mcp_enabled'] else '✗'} MCP启用: {agent_result['mcp_enabled']}")
+        mineru_runtime = agent_result.get('mineru_runtime', {})
+        mineru_icon = "✓" if mineru_runtime.get('available') else "-"
+        print(
+            f"  {mineru_icon} MinerU: "
+            f"{mineru_runtime.get('detail', 'not configured')}"
+        )
     else:
         print(f"  ✗ 错误: {agent_result['message']}")
 
@@ -257,11 +478,17 @@ def run_health_check() -> Dict[str, Any]:
     all_ok = imports_ok and all(
         r.get('status') == 'ok' for r in [
             results['vector_search'],
+            results['frontend_assets'],
             results['database'],
             results['config'],
             results['agent']
         ]
     )
+    all_ok = all_ok and results["api_gateway"].get("status") in {
+        "ok",
+        "degraded",
+        "optional",
+    }
 
     if all_ok and agent_result.get('llm_available'):
         results['overall_status'] = 'healthy'
