@@ -17,7 +17,7 @@ from artpm_agent.editing.document_model import EditableDocument
 from artpm_agent.editing.edit_interpreter import interpret, make_llm_callable
 from artpm_agent.editing.edit_tools import apply_plan
 from artpm_agent.editing.feedback_store import EditFeedbackStore
-from artpm_agent.editing.reflection import reflect
+from artpm_agent.editing.edit_feedback_analyzer import reflect
 from artpm_agent.editing.rule_distiller import RuleDistiller, distill_from_correction
 
 __all__ = [

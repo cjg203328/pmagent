@@ -114,8 +114,13 @@ def _find_rows(df: Any, column: str | None, criteria: dict[str, Any]) -> list[in
                 matched.append(i)
                 break
     # de-dup preserving order
-    seen = set()
-    return [i for i in matched if not (i in seen or seen.add(i))]
+    seen: set[int] = set()
+    result: list[int] = []
+    for i in matched:
+        if i not in seen:
+            seen.add(i)
+            result.append(i)
+    return result
 
 
 def _split_compound(instr: str) -> list[str]:
