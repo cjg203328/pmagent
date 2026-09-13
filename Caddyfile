@@ -13,7 +13,7 @@
 #   • docker-compose.yml 中这两个变量用 ${VAR:?...} 声明为必填；
 #     未设置时 `docker compose up` 会在配置阶段直接报错，不会以弱默认启动。
 #
-# 注意：reverse_proxy 指向 compose 网络内的服务名 artpm-agent:8501，
+# 注意：reverse_proxy 指向 compose 网络内的服务名，
 # 不要写 localhost（在 Caddy 容器内 localhost 是它自己，不是 app）。
 
 {$SITE_ADDRESS:localhost} {
@@ -22,8 +22,17 @@
         {$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
     }
 
-    # Streamlit 依赖 WebSocket 长连接，reverse_proxy 默认已支持
-    reverse_proxy artpm-agent:8501
+    # The API keeps its native /health and /v1 paths; handle_path strips the
+    # public /api prefix before proxying (e.g. /api/health -> /health).
+    handle_path /api/* {
+        reverse_proxy artpm-api:8765
+    }
+
+    # Streamlit depends on WebSocket long connections; reverse_proxy supports
+    # those by default.
+    handle {
+        reverse_proxy artpm-agent:8501
+    }
 
     # 可选：上传大文件（知识库导入）时放宽超时
     # reverse_proxy artpm-agent:8501 {

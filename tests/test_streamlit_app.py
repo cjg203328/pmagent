@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 import time
+from uuid import uuid4
 
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -449,6 +450,38 @@ def test_streamlit_capability_question_skips_knowledge_lookup_and_returns_fast_a
     assert not app.exception
     assert agent.calls[-1]["context"]["knowledge_context"] == ""
     assert app.session_state["messages"][-1]["content"] == "回答：你可以帮我做什么？"
+    assert app.session_state["messages"][-1]["metadata"]["turn_mode"] == "fast"
+
+
+def test_streamlit_wiki_publish_projects_into_workspace_rag():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+    app.pills(key="sidebar_nav_pills").set_value("设置").run(timeout=30)
+    token = f"wiki-rag-{uuid4().hex}"
+
+    app.text_input(key="wiki_title_new").set_value("项目 Wiki 规范").run(
+        timeout=30
+    )
+    app.text_area(key="wiki_markdown_new").set_value(
+        f"发布后必须能够检索到 {token}。"
+    ).run(timeout=30)
+    app.button(key="wiki_publish_new").click().run(timeout=30)
+
+    assert not app.exception
+    wiki_store = app.session_state["wiki_store"]
+    knowledge_store = app.session_state["knowledge_store"]
+    page = next(
+        page
+        for page in wiki_store.list_pages(workspace_id="local-default")
+        if page["title"] == "项目 Wiki 规范"
+        and page["sync"]["status"] == "synced"
+    )
+    assert knowledge_store.search(token, workspace_id="local-default")
+
+    wiki_store.archive_page(
+        page["id"],
+        workspace_id="local-default",
+        expected_version=page["version"],
+    )
 
 
 def test_streamlit_ordinary_text_uses_streaming_agent_response():

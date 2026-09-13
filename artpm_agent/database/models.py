@@ -6,6 +6,7 @@ from sqlalchemy.orm import DeclarativeBase, relationship, sessionmaker, selectin
 from datetime import datetime
 from typing import List, Dict, Optional
 import json
+import os
 import atexit
 import logging
 from weakref import WeakSet, finalize
@@ -45,7 +46,16 @@ class Base(DeclarativeBase):
     pass
 
 
-class Project(Base):
+class TenantScopedMixin:
+    """Common database-enforced tenant/workspace ownership columns."""
+
+    tenant_id = Column(String(128), nullable=False, default="local", index=True)
+    workspace_id = Column(
+        String(128), nullable=False, default="local-default", index=True
+    )
+
+
+class Project(TenantScopedMixin, Base):
     """项目表"""
     __tablename__ = 'projects'
 
@@ -100,7 +110,7 @@ class Project(Base):
         }
 
 
-class Asset(Base):
+class Asset(TenantScopedMixin, Base):
     """资产表"""
     __tablename__ = 'assets'
 
@@ -146,7 +156,7 @@ class Asset(Base):
         }
 
 
-class TeamMember(Base):
+class TeamMember(TenantScopedMixin, Base):
     """团队成员表"""
     __tablename__ = 'team_members'
 
@@ -189,7 +199,7 @@ class TeamMember(Base):
         }
 
 
-class Task(Base):
+class Task(TenantScopedMixin, Base):
     """任务表"""
     __tablename__ = 'tasks'
 
@@ -236,7 +246,7 @@ class Task(Base):
         }
 
 
-class Document(Base):
+class Document(TenantScopedMixin, Base):
     """文档表"""
     __tablename__ = 'documents'
 
@@ -271,7 +281,7 @@ class Document(Base):
         }
 
 
-class KnowledgeBase(Base):
+class KnowledgeBase(TenantScopedMixin, Base):
     """知识库表 - 用于RAG"""
     __tablename__ = 'knowledge_base'
 
@@ -304,7 +314,7 @@ class KnowledgeBase(Base):
         }
 
 
-class Delivery(Base):
+class Delivery(TenantScopedMixin, Base):
     """交付记录表 - 产品交付阶段的每次交付包（草稿/已交付/已验收/已驳回）"""
     __tablename__ = 'deliveries'
 
@@ -321,7 +331,7 @@ class Delivery(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 
-class AssetVersion(Base):
+class AssetVersion(TenantScopedMixin, Base):
     """资产版本表 - 单个资产的交付版本历史（待审核/已通过/已驳回）"""
     __tablename__ = 'asset_versions'
 
@@ -343,24 +353,47 @@ class DatabaseManager:
 
             db_path = resolve_state_path("artpm.db", "DB_PATH")
             db_url = f"sqlite:///{db_path.as_posix()}"
-        self.engine = create_engine(db_url, echo=False)
+        engine_options = {"pool_pre_ping": True} if db_url.startswith("postgresql") else {}
+        self.engine = create_engine(db_url, echo=False, **engine_options)
         self.SessionLocal = sessionmaker(bind=self.engine, expire_on_commit=False)
+        from artpm_agent.database.tenant_session import install_tenant_session_hooks
+
+        install_tenant_session_hooks(self.SessionLocal)
         _ACTIVE_ENGINES.add(self.engine)
         self._engine_finalizer = finalize(self, _dispose_engine, self.engine)
 
         try:
-            # Validate existing shared tables before running any DDL.
-            self._validate_existing_schema()
-            # 优先通过 Alembic 管理 schema（幂等、可演进）；不可用时回退 create_all。
+            # Reject structurally incompatible legacy tables before any stamp
+            # or migration can modify them. Only the newly introduced tenant
+            # ownership columns may be absent at this stage.
+            self._validate_existing_schema(allow_missing_tenant_scope=True)
+            # Alembic 是生产 schema 的唯一来源。SQLite 本地环境保留显式
+            # fallback 以兼容最小离线安装；PostgreSQL 不能绕过 tenant/RLS 迁移。
             try:
                 from artpm_agent.database.migrate import ensure_schema
 
                 ensure_schema(self.engine)
             except Exception as exc:
+                if self.engine.dialect.name == "postgresql":
+                    logger.error(
+                        "PostgreSQL schema migration failed; refusing create_all fallback",
+                        exc_info=True,
+                    )
+                    raise RuntimeError(
+                        "PostgreSQL schema migration failed; database startup is blocked"
+                    ) from exc
+                fallback_enabled = os.getenv(
+                    "ARTPM_SQLITE_FALLBACK", "true"
+                ).strip().lower() in {"1", "true", "yes", "on"}
+                if not fallback_enabled:
+                    raise
                 logger.warning(
                     "Alembic 迁移不可用，回退至 Base.metadata.create_all: %s", exc
                 )
                 Base.metadata.create_all(self.engine)
+            # Existing databases need migrations to add tenant columns before
+            # model compatibility can be evaluated.
+            self._validate_existing_schema()
         except BaseException:
             self.close()
             raise
@@ -389,11 +422,14 @@ class DatabaseManager:
         self.close()
         return False
 
-    def get_session(self):
+    def get_session(self, tenant_context=None):
         """获取数据库会话"""
-        return self.SessionLocal()
+        session = self.SessionLocal()
+        if tenant_context is not None:
+            session.info["tenant_context"] = tenant_context
+        return session
 
-    def _validate_existing_schema(self):
+    def _validate_existing_schema(self, *, allow_missing_tenant_scope=False):
         """Reject incompatible existing tables without modifying the database."""
         inspector = inspect(self.engine)
         existing_tables = set(inspector.get_table_names())
@@ -403,6 +439,8 @@ class DatabaseManager:
             existing_columns = {column["name"] for column in inspector.get_columns(table.name)}
             required_columns = {column.name for column in table.columns}
             missing = required_columns - existing_columns
+            if allow_missing_tenant_scope:
+                missing -= {"tenant_id", "workspace_id"}
             if missing:
                 raise RuntimeError(
                     f"Database table '{table.name}' is incompatible; missing columns: "
@@ -739,7 +777,7 @@ class DatabaseManager:
 # operation_logs 仍被 sqlite_manager.py 以原生 SQL 使用。
 # ============================================================================
 
-class Staff(Base):
+class Staff(TenantScopedMixin, Base):
     """遗留：人员表（历史残留，当前无业务代码读写）。"""
     __tablename__ = "staff"
 
@@ -753,7 +791,7 @@ class Staff(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 
-class Quote(Base):
+class Quote(TenantScopedMixin, Base):
     """遗留：报价单解析结果表（历史残留，当前无业务代码读写）。"""
     __tablename__ = "quotes"
 
@@ -768,7 +806,7 @@ class Quote(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 
-class Reminder(Base):
+class Reminder(TenantScopedMixin, Base):
     """遗留：催办提醒表（历史残留，当前无业务代码读写）。"""
     __tablename__ = "reminders"
 
@@ -783,7 +821,7 @@ class Reminder(Base):
     sent_at = Column(DateTime)
 
 
-class OperationLog(Base):
+class OperationLog(TenantScopedMixin, Base):
     """遗留：操作日志表（仍被 sqlite_manager.py 原生 SQL 使用）。"""
     __tablename__ = "operation_logs"
 
@@ -797,7 +835,7 @@ class OperationLog(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 
-class ProgressUpdate(Base):
+class ProgressUpdate(TenantScopedMixin, Base):
     """遗留：进度更新表（仍被 sqlite_manager.py 原生 SQL 使用）。"""
     __tablename__ = "progress_updates"
 
@@ -809,7 +847,7 @@ class ProgressUpdate(Base):
     updated_at = Column(DateTime, default=datetime.now)
 
 
-class TaskAssignment(Base):
+class TaskAssignment(TenantScopedMixin, Base):
     """遗留：任务分派表（仍被 sqlite_manager.py 原生 SQL 使用）。"""
     __tablename__ = "task_assignments"
 

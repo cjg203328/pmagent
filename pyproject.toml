@@ -12,9 +12,15 @@ dependencies = [
     "streamlit>=1.59.0,<1.60.0",
     "streamlit-option-menu>=0.3.6",
     "pandas>=2.0.0",
-    "numpy>=1.24.0",
+    # NumPy 2.5 switched its stubs to PEP 695 aliases, which mypy targeting
+    # Python 3.10 cannot parse. Keep the cap until the project target is
+    # raised; Python 3.10 resolves to the latest compatible 2.2.x release.
+    "numpy>=1.24.0,<2.5.0",
     "faiss-cpu>=1.14.3,<2.0.0",
     "sqlalchemy>=2.0.0",
+    # The production Compose migration job invokes Alembic directly. Keep it
+    # in the runtime install instead of relying on a developer environment.
+    "alembic>=1.13.0,<2.0.0",
     "openpyxl>=3.1.0",
     "xlrd>=2.0.1",
     "python-docx>=1.1.0",
@@ -42,15 +48,36 @@ dependencies = [
     "jsonschema>=4.23.0,<5.0.0",
     "requests>=2.31.0",
     "python-dateutil>=2.8.2",
-    "redis>=5.0.0",
     "mcp>=1.12.0,<2.0.0",
-    # REST gateway; kept in the core install so the documented API command
-    # works in a clean deployment without an undeclared transitive package.
-    "fastapi>=0.135.1,<0.136.0",
-    "uvicorn>=0.51.0,<0.52.0",
 ]
 
 [project.optional-dependencies]
+api = [
+    "fastapi>=0.135.1,<0.136.0",
+    "uvicorn>=0.51.0,<0.52.0",
+]
+postgres = ["psycopg[binary]>=3.2.0,<4.0.0"]
+vector-remote = ["qdrant-client>=1.15.0,<2.0.0"]
+cache = ["redis>=5.0.0"]
+observability = [
+    "opentelemetry-api>=1.36.0,<2.0.0",
+    "opentelemetry-sdk>=1.36.0,<2.0.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.36.0,<2.0.0",
+    "opentelemetry-instrumentation-fastapi>=0.57b0,<1.0.0",
+    "sentry-sdk[fastapi]>=2.35.0,<3.0.0",
+]
+production = [
+    "fastapi>=0.135.1,<0.136.0",
+    "uvicorn>=0.51.0,<0.52.0",
+    "psycopg[binary]>=3.2.0,<4.0.0",
+    "qdrant-client>=1.15.0,<2.0.0",
+    "redis>=5.0.0",
+    "opentelemetry-api>=1.36.0,<2.0.0",
+    "opentelemetry-sdk>=1.36.0,<2.0.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.36.0,<2.0.0",
+    "opentelemetry-instrumentation-fastapi>=0.57b0,<1.0.0",
+    "sentry-sdk[fastapi]>=2.35.0,<3.0.0",
+]
 # Optional CPU-oriented MinerU runtime. It is version-pinned because upstream
 # structured output and CLI contracts have changed across minor releases.
 # Remote mineru-api mode does not require this extra in the ArtPM environment.
@@ -77,11 +104,22 @@ voice = [
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "pytest-timeout>=2.3.1",
     "pytest-cov>=4.0.0",
     "ruff>=0.15.0",
     "mypy>=1.8.0",
     "bandit>=1.7.0",
     "safety>=3.0.0",
+    "fastapi>=0.135.1,<0.136.0",
+    "uvicorn>=0.51.0,<0.52.0",
+    "psycopg[binary]>=3.2.0,<4.0.0",
+    "qdrant-client>=1.15.0,<2.0.0",
+    "redis>=5.0.0",
+    "opentelemetry-api>=1.36.0,<2.0.0",
+    "opentelemetry-sdk>=1.36.0,<2.0.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.36.0,<2.0.0",
+    "opentelemetry-instrumentation-fastapi>=0.57b0,<1.0.0",
+    "sentry-sdk[fastapi]>=2.35.0,<3.0.0",
 ]
 
 [project.scripts]

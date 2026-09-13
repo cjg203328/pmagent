@@ -1,132 +1,53 @@
-# 🚀 ArtPM Agent 启动指南
+# ArtPM Agent 启动指南
 
-**启动时间**：2026-07-14  
-**状态**：✅ 应用已启动
+## 本地完整栈
 
----
+本地 UI + API 需要安装 API extra：
 
-## 📍 访问信息
-
-**本地访问地址**：
-```
-http://localhost:8501
-```
-
-**网络访问地址**（同一局域网）：
-```
-http://127.0.0.1:8501
+```powershell
+python -m pip install -e ".[api]"
+Copy-Item .env.example .env
+python -m artpm_agent.tools.check_config
+python start_with_checks.py
 ```
 
----
+Linux/macOS 使用 `cp .env.example .env` 替代 `Copy-Item`。启动后访问：
 
-## 🎯 快速开始
+- Streamlit UI：`http://127.0.0.1:8501`
+- API 健康检查：`http://127.0.0.1:8765/health`
+- API 文档：`http://127.0.0.1:8765/docs`
 
-### 1. 打开浏览器
-访问 `http://localhost:8501` 即可看到应用界面
+## 仅离线 UI
 
-### 2. 离线模式（无需API Key）
-应用默认工作在**离线模式**，可直接使用以下功能：
+不需要 API Key，也不需要 FastAPI：
 
-**示例指令**：
-```
-报价12万成本8万帮我算利润
-分配建模任务给团队成员
-检查项目进度
-解析这份报价单（可上传Excel）
-```
-
-### 3. 在线模式（可选）
-如需使用智能对话功能，配置API密钥：
-
-**编辑 `.env` 文件**：
-```env
-LLM_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-your-key-here
-```
-
-重启应用后生效。
-
----
-
-## ✨ 核心功能
-
-| 功能 | 离线可用 | 说明 |
-|------|---------|------|
-| 💰 利润测算 | ✅ | 报价/成本/税费/风险计算 |
-| 📋 任务分配 | ✅ | 基于技能智能分配 |
-| 📊 进度预警 | ✅ | 项目截止日期检查 |
-| 📄 文档解析 | ✅ | Excel/PDF/CSV解析 |
-| 📁 文件分析 | ✅ | 本地文件搜索分析 |
-| 💬 智能对话 | ❌ | 需要API Key |
-
----
-
-## 🔧 管理命令
-
-### 停止应用
 ```bash
-# 按 Ctrl+C 停止
-# 或找到进程并终止
-taskkill /F /IM streamlit.exe
+python -m pip install -e .
+python -m streamlit run artpm_agent/app.py --server.address 127.0.0.1 --server.port 8501
 ```
 
-### 重启应用
+Windows 可使用 `start.bat`，Linux/macOS 可使用 `./start.sh`。配置检查模式：
+
 ```bash
-cd "d:\桌面\xiangmu\pmagent"
-streamlit run artpm_agent/app.py
+python start_with_checks.py --check-only
 ```
 
-### 查看日志
+## Docker Compose
+
+生产 Compose 使用 PostgreSQL/RLS、Qdrant、Redis、Caddy 和可观测组件；对外入口为 Caddy
+的 `80/443`。请先按 [`../operations/DEPLOY.md`](../operations/DEPLOY.md) 设置认证、数据库、
+网关和 Grafana 凭据，再执行：
+
 ```bash
-# 应用日志
-cat artpm_agent/logs/artpm_20260714.log
-
-# Streamlit日志
-# 在控制台直接查看
+docker compose config
+docker compose up -d --build
+docker compose ps
 ```
 
----
+## 停止与排查
 
-## 🐛 故障排查
-
-### 端口被占用
-```bash
-# 更换端口
-streamlit run artpm_agent/app.py --server.port 8502
-```
-
-### 依赖问题
-```bash
-# 重新安装依赖
-python -m pip install -e . --force-reinstall
-```
-
-### 数据库问题
-```bash
-# 重置数据库
-rm data/*.db
-# 应用会自动重建
-```
-
----
-
-## 📊 项目状态
-
-✅ **代码质量**：A级 (92/100)  
-✅ **测试通过率**：99.6% (547/549)  
-✅ **Bug修复**：全部完成  
-✅ **生产就绪**：是
-
----
-
-## 📚 更多信息
-
-- [README.md](README.md) - 完整文档
-- [OFFLINE_FALLBACK.md](OFFLINE_FALLBACK.md) - 离线模式详解
-- [QUICKSTART.md](artpm_agent/QUICKSTART.md) - 快速开始
-
----
-
-**启动成功！** 🎉
-
-在浏览器中访问 **http://localhost:8501** 开始使用。
+- 本地前台进程按 `Ctrl+C` 停止，启动器只回收本次创建的 API 进程。
+- 端口被占用时先确认监听进程属于本项目，不要强制结束其他项目服务。
+- 先运行 `python -m artpm_agent.tools.check_config`，再查看
+  [`../operations/TROUBLESHOOTING.md`](../operations/TROUBLESHOOTING.md)。
+- 质量命令见 [`../operations/QUALITY_GATES.md`](../operations/QUALITY_GATES.md)。

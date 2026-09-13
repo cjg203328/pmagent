@@ -406,6 +406,152 @@ class ZhipuClient(OpenAIClient):
         super().__init__(adapted)
 
 
+class DeepSeekClient(OpenAIClient):
+    """DeepSeek official client (deepseek-chat / deepseek-reasoner).
+
+    DeepSeek serves an OpenAI-compatible chat-completions API, so this adapter
+    inherits the OpenAI transport and adds DeepSeek-specific handling aligned
+    with the official thinking-mode rules (see deepseek-harness
+    ``packages/llm/llm-deepseek``):
+
+    - ``reasoning_content`` (the chain of thought) is captured separately on
+      both non-streaming and streaming replies and exposed as
+      ``last_reasoning_content`` for the UI; it is never mixed into the text
+      returned to the caller.
+    - ``reasoning_effort`` accepts ``off`` / ``high`` / ``max``. ``off`` is
+      serialized as ``thinking: {type: disabled}``; ``high`` / ``max`` are
+      passed through as the top-level ``reasoning_effort``. An empty value
+      leaves the provider default untouched.
+    - ``content`` is never ``None`` on a reply: pure tool-call or
+      reasoning-only turns return ``""`` instead of a null that would brick
+      later turns of a durable session.
+    """
+
+    DEFAULT_BASE_URL = "https://api.deepseek.com"
+    SUPPORTED_EFFORTS = {"off", "high", "max"}
+
+    def __init__(self, config: Dict[str, Any]):
+        adapted = dict(config)
+        adapted["openai_api_key"] = config.get("deepseek_api_key")
+        adapted["openai_api_base"] = config.get(
+            "deepseek_api_base", self.DEFAULT_BASE_URL
+        )
+        super().__init__(adapted)
+        self.last_reasoning_content: Optional[str] = None
+        effort = str(config.get("reasoning_effort", "") or "").strip().lower()
+        if effort and effort not in self.SUPPORTED_EFFORTS:
+            raise ValueError(
+                f"不支持的 DEEPSEEK_REASONING_EFFORT: {effort!r}（可选 off/high/max）"
+            )
+        self.reasoning_effort: Optional[str] = effort or None
+
+    def _wire_extras(self) -> Dict[str, Any]:
+        """Return DeepSeek thinking-mode wire fields (empty when unset)."""
+        if not self.reasoning_effort:
+            return {}
+        if self.reasoning_effort == "off":
+            return {"thinking": {"type": "disabled"}}
+        return {"reasoning_effort": self.reasoning_effort}
+
+    @staticmethod
+    def _message_reasoning(message: Any) -> Optional[str]:
+        reasoning = getattr(message, "reasoning_content", None)
+        if isinstance(reasoning, str):
+            return reasoning
+        return None
+
+    def chat(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        history: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        """Send a chat completion and capture ``reasoning_content`` separately."""
+
+        def _request() -> str:
+            kwargs: Dict[str, Any] = {
+                "model": self.model,
+                "messages": self._build_messages(prompt, system_prompt, history),
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+            }
+            extras = self._wire_extras()
+            if extras:
+                kwargs["extra_body"] = extras
+            response = self.client.chat.completions.create(**kwargs)
+            message = response.choices[0].message
+            self.last_reasoning_content = self._message_reasoning(message)
+            content = message.content
+            # Official wire rule: content must never be null (bricks durable
+            # sessions on reasoning-only or pure tool-call turns).
+            return content if isinstance(content, str) else ""
+
+        return self._retry_request(_request)
+
+    def stream_chat(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Iterator[str]:
+        """Yield text deltas while accumulating the reasoning channel."""
+        reasoning_parts: List[str] = []
+        self.last_reasoning_content = None
+        stream = self._retry_request(
+            self.client.chat.completions.create,
+            model=self.model,
+            messages=self._build_messages(prompt, system_prompt, history),
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            stream=True,
+            **(self._wire_extras() and {"extra_body": self._wire_extras()}),
+        )
+        try:
+            for chunk in stream:
+                choice = (
+                    chunk.get("choices")
+                    if isinstance(chunk, dict)
+                    else getattr(chunk, "choices", None)
+                )
+                if not choice:
+                    continue
+                delta = (
+                    choice[0].get("delta")
+                    if isinstance(choice[0], dict)
+                    else getattr(choice[0], "delta", None)
+                )
+                if delta is None:
+                    continue
+                reasoning = (
+                    delta.get("reasoning_content")
+                    if isinstance(delta, dict)
+                    else getattr(delta, "reasoning_content", None)
+                )
+                if isinstance(reasoning, str) and reasoning:
+                    reasoning_parts.append(reasoning)
+                content = self._extract_stream_content(chunk)
+                if content:
+                    yield content
+        finally:
+            if reasoning_parts:
+                self.last_reasoning_content = "".join(reasoning_parts)
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+
+    def chat_with_images(
+        self,
+        prompt: str,
+        image_paths: List[str],
+        system_prompt: Optional[str] = None,
+        history: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        """DeepSeek official chat-completions is text-only today; surface a
+        clear capability error instead of sending an image payload the provider
+        will reject mid-request."""
+        raise NotImplementedError("当前模型客户端不支持图片")
+
+
 def create_llm_client(config: Dict[str, Any]) -> BaseLLMClient:
     """
     Factory function to create LLM client
@@ -464,5 +610,17 @@ def create_llm_client(config: Dict[str, Any]) -> BaseLLMClient:
         return OpenAIClient(config)
     elif provider == "zhipu":
         return ZhipuClient(config)
+    elif provider == "deepseek":
+        return DeepSeekClient(config)
     else:
+        # Plugin-contributed providers: consult the capability registry so a
+        # deployment can add a provider without forking this module.
+        try:
+            from artpm_agent.plugins.capabilities import get_capability_registry
+
+            entry = get_capability_registry().provider(provider)
+        except Exception:
+            entry = None
+        if entry is not None and callable(entry.factory):
+            return entry.factory(config)
         raise ValueError(f"Unsupported LLM provider: {provider}")

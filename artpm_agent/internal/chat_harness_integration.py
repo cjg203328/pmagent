@@ -7,7 +7,7 @@ This wraps run_turn() with chat.py-specific context extraction and result handli
 from collections.abc import Callable
 import logging
 from typing import Any, Dict, List, Optional, Tuple
-from artpm_agent.harness import TurnContext, run_turn
+from artpm_agent.harness import TurnContext, complete_turn_lifecycle, run_turn
 from artpm_agent.harness.runtime import LegacyAgentRuntimeAdapter
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,12 @@ def _record_evolution_event(
         AgentTelemetry(db_path=default_telemetry_db_path()).record_event(
             stage=stage, level=level, message=message, turn_id=turn_id
         )
-    except Exception:  # noqa: BLE001 - telemetry must never crash a turn
+    except Exception as error:  # noqa: BLE001 - telemetry must never crash a turn
+        logger.warning(
+            "Evolution telemetry recording failed (non-fatal): %s",
+            error,
+            exc_info=True,
+        )
         pass
 
 
@@ -96,6 +101,15 @@ def execute_turn_with_harness(
     auto_reflect: bool = True,
     memory_inject_token_budget: int = 0,
     memory_inject_max_tokens: Optional[int] = None,
+    session_store: Optional[Any] = None,
+    memory_manager: Optional[Any] = None,
+    tencentdb_memory: Optional[Any] = None,
+    feedback_store: Optional[Any] = None,
+    strategy_store: Optional[Any] = None,
+    episode_store: Optional[Any] = None,
+    reflection_scheduler: Optional[Any] = None,
+    meta_memory_store: Optional[Any] = None,
+    consolidation_scheduler: Optional[Any] = None,
 ) -> Tuple[str, bool, Dict[str, Any], Any]:
     """
     Execute a turn using the unified harness (run_turn()).
@@ -133,6 +147,103 @@ def execute_turn_with_harness(
     """
 
     # Build TurnContext
+    from artpm_agent.runtime.request_services import TurnServiceBundle
+
+    if memory_manager is None:
+        memory_manager = getattr(agent, "memory", None)
+    if tencentdb_memory is None:
+        tencentdb_memory = getattr(agent, "tencentdb_memory", None)
+    if feedback_store is None:
+        try:
+            from artpm_agent.memory.feedback_store import get_default_feedback_store
+
+            feedback_store = get_default_feedback_store()
+        except Exception as error:  # noqa: BLE001 - optional memory service
+            logger.warning(
+                "Default feedback store unavailable (non-fatal): %s",
+                error,
+                exc_info=True,
+            )
+            feedback_store = None
+    if strategy_store is None:
+        try:
+            from artpm_agent.evolution.strategy_store import get_default_strategy_store
+
+            strategy_store = get_default_strategy_store()
+        except Exception as error:  # noqa: BLE001 - optional evolution service
+            logger.warning(
+                "Default strategy store unavailable (non-fatal): %s",
+                error,
+                exc_info=True,
+            )
+            strategy_store = None
+    if episode_store is None:
+        try:
+            from artpm_agent.harness.outcome_recorder import default_episode_db_path
+            from artpm_agent.memory.episode_store import EpisodeStore
+
+            episode_store = EpisodeStore(default_episode_db_path())
+        except Exception as error:  # noqa: BLE001 - optional evolution service
+            logger.warning(
+                "Default episode store unavailable (non-fatal): %s",
+                error,
+                exc_info=True,
+            )
+            episode_store = None
+    if reflection_scheduler is None:
+        try:
+            from artpm_agent.evolution.scheduler import get_default_scheduler
+
+            reflection_scheduler = get_default_scheduler()
+        except Exception as error:  # noqa: BLE001 - optional evolution service
+            logger.warning(
+                "Default reflection scheduler unavailable (non-fatal): %s",
+                error,
+                exc_info=True,
+            )
+            reflection_scheduler = None
+    if meta_memory_store is None:
+        try:
+            from artpm_agent.evolution.meta_memory import get_default_meta_memory_store
+
+            meta_memory_store = get_default_meta_memory_store()
+        except Exception as error:  # noqa: BLE001 - optional evolution service
+            logger.warning(
+                "Default meta-memory store unavailable (non-fatal): %s",
+                error,
+                exc_info=True,
+            )
+            meta_memory_store = None
+    if consolidation_scheduler is None:
+        try:
+            from artpm_agent.memory.consolidation import ConsolidationScheduler
+
+            consolidation_scheduler = ConsolidationScheduler()
+        except Exception as error:  # noqa: BLE001 - optional evolution service
+            logger.warning(
+                "Default consolidation scheduler unavailable (non-fatal): %s",
+                error,
+                exc_info=True,
+            )
+            consolidation_scheduler = None
+
+    turn_services = TurnServiceBundle(
+        profile_store=profile_store,
+        knowledge_store=knowledge_store,
+        artifact_coordinator=artifact_coordinator,
+        workflow_coordinator=workflow_coordinator,
+        workflow_formatter=workflow_formatter,
+        permission_store=agent_context.get("permission_store"),
+        session_store=session_store,
+        memory_manager=memory_manager,
+        tencentdb_memory=tencentdb_memory,
+        feedback_store=feedback_store,
+        strategy_store=strategy_store,
+        episode_store=episode_store,
+        reflection_scheduler=reflection_scheduler,
+        meta_memory_store=meta_memory_store,
+        consolidation_scheduler=consolidation_scheduler,
+    )
     turn_ctx = TurnContext(
         turn_id=turn_id,
         conversation_id=conversation_id or "",
@@ -143,6 +254,7 @@ def execute_turn_with_harness(
         conversation_history=agent_context.get("conversation_history", []),
         agent=agent,
         runtime=LegacyAgentRuntimeAdapter(agent),
+        services=turn_services,
         extra={
             # Pass through full context for compatibility
             **agent_context,
@@ -167,10 +279,13 @@ def execute_turn_with_harness(
         )
         if resolved_token_budget > 0:
             turn_ctx.extra["memory_inject_max_tokens"] = resolved_token_budget
+        if not auto_activate_memory:
+            turn_ctx.extra["disable_memory_injection"] = True
 
     # Execute unified turn
     turn_result = run_turn(
         turn_ctx,
+        services=turn_services,
         profile_store=profile_store,
         knowledge_store=knowledge_store,
         artifact_coordinator=artifact_coordinator,
@@ -179,89 +294,20 @@ def execute_turn_with_harness(
         workflow_coordinator=workflow_coordinator,
         workflow_formatter=workflow_formatter,
         response_handler=response_handler,
+        feedback=user_feedback,
+        auto_reflect=auto_reflect,
     )
 
-    # 用户即时反馈：写入偏好库（下一回合即生效），并随 Episode 记录供复盘使用。
-    if user_feedback:
-        try:
-            from artpm_agent.memory.feedback_store import (
-                get_default_feedback_store,
-            )
-            _fb = get_default_feedback_store()
-            if _fb is not None:
-                _kind = (
-                    "avoid"
-                    if ("👎" in user_feedback or "差" in user_feedback)
-                    else "preference"
-                )
-                _fb.add(
-                    kind=_kind,
-                    content=user_feedback,
-                    scope=turn_result.handled_by or "global",
-                )
-        except Exception as exc:  # noqa: BLE001 - 反馈写入失败不应中断主流程
-            logger.warning("即时反馈写入失败（非致命）: %s", exc, exc_info=True)
-            _record_evolution_event("user_feedback", "warning", str(exc))
-
-    # Phase 0 (记忆+进化): 记录回合结果，供后续学习闭环使用（纯增量、非阻塞）
-    try:
-        from artpm_agent.harness.outcome_recorder import record_outcome
-        record_outcome(turn_ctx, turn_result, feedback=user_feedback)
-    except Exception as exc:  # noqa: BLE001 - 结果记录失败不应中断主流程
-        logger.warning("回合结果记录失败（非致命）: %s", exc, exc_info=True)
-        _record_evolution_event("outcome_record", "warning", str(exc))
-
-    # Phase 3 (进化闭环): 按调度器自动复盘，仅自动应用低风险提案（best-effort）。
-    if auto_reflect:
-        try:
-            from artpm_agent.memory.episode_store import EpisodeStore
-            from artpm_agent.harness.outcome_recorder import default_episode_db_path
-            from artpm_agent.memory.feedback_store import get_default_feedback_store
-            from artpm_agent.evolution.strategy_store import (
-                get_default_strategy_store,
-            )
-            from artpm_agent.evolution.scheduler import get_default_scheduler
-
-            _sched = get_default_scheduler()
-            if _sched is not None:
-                _ep = EpisodeStore(default_episode_db_path())
-                _fb = get_default_feedback_store()
-                _st = get_default_strategy_store()
-                if _ep is not None and _fb is not None and _st is not None:
-                    _report = _sched.run_if_due(_ep, _fb, _st)
-                    if _report is not None:
-                        logger.info("Auto-reflection run:\n%s", _report)
-        except Exception as exc:  # noqa: BLE001 - 自动复盘失败不应中断主流程
-            logger.warning("自动复盘失败（非致命）: %s", exc, exc_info=True)
-            _record_evolution_event("auto_reflect", "warning", str(exc))
-
-    # Phase 2 (知识炼化): 按调度器周期性对知识库做去重/矛盾/衰减（best-effort）。
-    if auto_reflect and knowledge_store is not None:
-        try:
-            from artpm_agent.memory.consolidation import (
-                ConsolidationScheduler,
-                ConsolidationService,
-            )
-
-            _csched = ConsolidationScheduler()
-            _svc = ConsolidationService(knowledge_store)
-            _creport = _csched.run_if_due(
-                _svc,
-                workspace_id=getattr(
-                    knowledge_store,
-                    "DEFAULT_WORKSPACE_ID",
-                    "local-default",
-                ),
-            )
-            if _creport is not None:
-                logger.info("Auto-consolidation run:\n%s", _creport.as_dict())
-        except Exception as exc:  # noqa: BLE001 - 知识炼化失败不应中断主流程
-            logger.warning("知识炼化失败（非致命）: %s", exc, exc_info=True)
-            _record_evolution_event("auto_consolidate", "warning", str(exc))
-
-    # 闭环心跳（成功运行标记）：让可观测面板「最后运行」反映真实运行时间，
-    # 而非仅记录失败。仅成功走完各阶段（均为独立 try/except）才会到达此处。
-    _record_evolution_event("loop_run", "info", "回合闭环完成", turn_id=turn_id)
+    # Normal runs finalize inside run_turn(). Keep this compatibility fallback
+    # for hosts that replace the runner with a legacy test adapter.
+    if not turn_result.metadata.get("lifecycle_managed"):
+        complete_turn_lifecycle(
+            turn_ctx,
+            turn_result,
+            services=turn_services,
+            feedback=user_feedback,
+            auto_reflect=auto_reflect,
+        )
 
     # Extract response and approval state
     response_text = turn_result.response

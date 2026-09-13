@@ -65,7 +65,7 @@ class MemoryInjector:
 
         # 状态追踪（按会话隔离）
         self._compress_state: OrderedDict[
-            tuple[str, str], Dict[str, Any]
+            tuple[str, str, str], Dict[str, Any]
         ] = OrderedDict()
         self._state_lock = RLock()
         # Compression and extraction are infrequent, but must be serialized for
@@ -73,13 +73,18 @@ class MemoryInjector:
         self._compression_lock = RLock()
 
     @staticmethod
-    def _state_key(conversation_id: str, workspace_id: str) -> tuple[str, str]:
+    def _state_key(
+        conversation_id: str,
+        workspace_id: str,
+        tenant_id: str = "local",
+    ) -> tuple[str, str, str]:
         return (
+            str(tenant_id or "local").strip() or "local",
             str(workspace_id or "local-default").strip() or "local-default",
             str(conversation_id or "").strip(),
         )
 
-    def _state_snapshot(self, key: tuple[str, str]) -> Dict[str, Any]:
+    def _state_snapshot(self, key: tuple[str, str, str]) -> Dict[str, Any]:
         with self._state_lock:
             state = self._compress_state.get(key)
             if state is None:
@@ -87,7 +92,7 @@ class MemoryInjector:
             self._compress_state.move_to_end(key)
             return dict(state)
 
-    def _update_state(self, key: tuple[str, str], **values: Any) -> None:
+    def _update_state(self, key: tuple[str, str, str], **values: Any) -> None:
         with self._state_lock:
             state = dict(self._compress_state.get(key, {}))
             state.update(values)
@@ -104,6 +109,7 @@ class MemoryInjector:
         messages: Sequence[Dict[str, Any]],
         user_input: str = "",
         conversation_id: str = "",
+        tenant_id: str = "local",
         workspace_id: str = "local-default",
         llm_callable: Any = None,
     ) -> str:
@@ -128,7 +134,7 @@ class MemoryInjector:
         if not messages and not user_input:
             return ""
 
-        state_key = self._state_key(conversation_id, workspace_id)
+        state_key = self._state_key(conversation_id, workspace_id, tenant_id)
         parts: List[str] = []
         total_chars = 0
 
@@ -136,7 +142,11 @@ class MemoryInjector:
         compression_result: Optional[CompressionResult] = None
         if self.auto_compress and len(messages) > 10:
             compression_result = self._check_and_compress(
-                messages, conversation_id, llm_callable, workspace_id
+                messages,
+                conversation_id,
+                llm_callable,
+                workspace_id,
+                tenant_id,
             )
             if compression_result and compression_result.was_compressed:
                 summary_ctx = self.compressor.build_compressed_context(
@@ -165,6 +175,7 @@ class MemoryInjector:
                     extracted = self.cross_memory.extract_and_save_from_messages(
                         messages,
                         conversation_id=conversation_id,
+                        tenant_id=tenant_id,
                         workspace_id=workspace_id,
                         llm_callable=llm_callable,
                     )
@@ -186,6 +197,7 @@ class MemoryInjector:
                 memory_ctx = self.cross_memory.build_memory_context(
                     user_input,
                     conversation_id=conversation_id,
+                    tenant_id=tenant_id,
                     workspace_id=workspace_id,
                     include_preferences=True,
                 )
@@ -213,6 +225,7 @@ class MemoryInjector:
         conversation_id: str,
         llm_callable: Any = None,
         workspace_id: str = "local-default",
+        tenant_id: str = "local",
     ) -> str:
         """Return a compressed-summary block for long conversations, or ''.
 
@@ -225,7 +238,11 @@ class MemoryInjector:
             return ""
         try:
             result = self._check_and_compress(
-                messages, conversation_id, llm_callable, workspace_id
+                messages,
+                conversation_id,
+                llm_callable,
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
             )
             if result and result.was_compressed:
                 summary = self.compressor.build_compressed_context(
@@ -246,14 +263,16 @@ class MemoryInjector:
         conversation_id: str,
         llm_callable: Any,
         workspace_id: str = "local-default",
+        tenant_id: str = "local",
     ) -> CompressionResult:
         """强制执行一次压缩（忽略触发条件）。"""
-        state_key = self._state_key(conversation_id, workspace_id)
+        state_key = self._state_key(conversation_id, workspace_id, tenant_id)
         with self._compression_lock:
             result = self.compressor.compress(
                 messages,
                 llm_callable,
                 conversation_id=conversation_id,
+                tenant_id=tenant_id,
                 workspace_id=workspace_id,
                 knowledge_store=self.store,
             )
@@ -272,12 +291,14 @@ class MemoryInjector:
         memory_type: str = "fact",
         *,
         conversation_id: str = "",
+        tenant_id: str = "local",
         workspace_id: str = "local-default",
     ) -> bool:
         """记录一条显式记忆（用户说"记住 XXX"时调用）。"""
         rid = self.cross_memory.save_memory(
             content,
             memory_type,
+            tenant_id=tenant_id,
             workspace_id=workspace_id,
             source_conversation=conversation_id,
             source_type="explicit",
@@ -289,12 +310,14 @@ class MemoryInjector:
         self,
         conversation_id: str,
         *,
+        tenant_id: str = "local",
         workspace_id: str = "local-default",
     ) -> List[Dict[str, Any]]:
         """获取指定会话的所有摘要。"""
         try:
             results = self.store.search(
                 conversation_id,
+                tenant_id=tenant_id,
                 workspace_id=workspace_id,
                 resource_types=["conversation_summary"],
                 include_rules=False,
@@ -314,9 +337,10 @@ class MemoryInjector:
         conversation_id: str,
         llm_callable: Any,
         workspace_id: str = "local-default",
+        tenant_id: str = "local",
     ) -> Optional[CompressionResult]:
         """检查是否需要压缩并在条件满足时执行。"""
-        state_key = self._state_key(conversation_id, workspace_id)
+        state_key = self._state_key(conversation_id, workspace_id, tenant_id)
         with self._compression_lock:
             state = self._state_snapshot(state_key)
 
@@ -337,6 +361,7 @@ class MemoryInjector:
                 messages,
                 llm_callable,
                 conversation_id=conversation_id,
+                tenant_id=tenant_id,
                 workspace_id=workspace_id,
                 knowledge_store=self.store,
             )

@@ -71,16 +71,27 @@ coverage.xml
 # 本地缓存（市场技能 TTL 缓存等，非源码）
 .cache/
 
-# Alembic
-alembic/versions/*.py
-!alembic/versions/__init__.py
+# Alembic migration source files are versioned application code.
 
 # 构建 / 测试 / 临时产物（不入库）
 temp/
 _legacy_backup/
 .pytest-tmp/
 .reasonix/
-artifacts/
+artifacts/*
+!artifacts/screenshots/
+artifacts/screenshots/*
+!artifacts/screenshots/ref-doubao.png
+!artifacts/screenshots/ref-kimi.png
+!artifacts/screenshots/ui-chat-active.png
+!artifacts/screenshots/ui-chat-mobile.png
+!artifacts/screenshots/ui-chat-pending.png
+!artifacts/screenshots/ui-chat-wide.png
+!artifacts/screenshots/ui-desktop.png
+!artifacts/screenshots/ui-mobile.png
+!artifacts/screenshots/ui-overview.png
+!artifacts/screenshots/ui-projects.png
+!artifacts/screenshots/ui-settings.png
 coverage.xml
 *.wip_bak
 

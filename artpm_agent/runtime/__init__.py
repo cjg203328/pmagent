@@ -17,7 +17,47 @@ from .agent_loop import (
     ToolExecutionRecord,
     ToolExecutor,
 )
-from .events import AgentEvent, AgentEventType, AgentMessage
+from .event_bus import (
+    DeliveryReport,
+    EventBus,
+    SessionEventLog,
+    Subscription,
+    build_bus_with_session_log,
+)
+from .events import AgentEvent, AgentEventType, AgentMessage, EventDomain
+from .pipeline import (
+    DEFAULT_SPILL_MAX_CHARS,
+    PreToolPolicy,
+    PostToolPolicy,
+    ToolExecutionPipeline,
+    load_spilled_result,
+    spill_policy,
+    spill_tool_result,
+)
+from .plan import (
+    Plan,
+    PlanCoordinator,
+    PlanError,
+    PlanStatus,
+    PlanStep,
+    PlanStepStatus,
+    PlanStore,
+)
+from .session_query import (
+    RunLineage,
+    SessionQuery,
+    TurnGroup,
+)
+from .subagent import (
+    InProcessSubagentExecutor,
+    SubagentExecutor,
+    SubagentPool,
+    SubagentRequest,
+    SubagentResult,
+    subagent_delegate_tool,
+)
+from .request_services import RequestServiceBundle, TurnServiceBundle
+from .turn_events import TurnEventRecorder, recorder_for_turn
 from .tools import (
     AgentTool,
     BeforeToolCallDecision,
@@ -48,16 +88,49 @@ __all__ = [
     "AgentTool",
     "AssistantTurn",
     "BeforeToolCallDecision",
+    "DeliveryReport",
+    "EventBus",
+    "EventDomain",
+    "DEFAULT_SPILL_MAX_CHARS",
+    "PreToolPolicy",
+    "PostToolPolicy",
+    "SessionEventLog",
+    "Subscription",
+    "InProcessSubagentExecutor",
+    "Plan",
+    "PlanCoordinator",
+    "PlanError",
+    "PlanStatus",
+    "PlanStep",
+    "PlanStepStatus",
+    "PlanStore",
+    "RunLineage",
+    "SessionQuery",
+    "SubagentExecutor",
+    "SubagentPool",
+    "SubagentRequest",
+    "SubagentResult",
     "ToolBatchResult",
     "ToolCall",
     "ToolDefinitionError",
     "ToolExecutionError",
+    "ToolExecutionPipeline",
     "ToolExecutionRecord",
     "ToolExecutor",
     "ToolRegistry",
     "ToolResult",
+    "TurnGroup",
+    "build_bus_with_session_log",
     "build_capability_registry",
+    "load_spilled_result",
     "registry_from_mcp_client",
     "registry_from_skill_router",
     "registry_from_workflow_engine",
+    "spill_policy",
+    "spill_tool_result",
+    "subagent_delegate_tool",
+    "RequestServiceBundle",
+    "TurnServiceBundle",
+    "TurnEventRecorder",
+    "recorder_for_turn",
 ]

@@ -58,8 +58,10 @@ from artpm_agent.ui_state import (  # noqa: F401 — re-exported for wildcard co
     get_artifact_generator,
     get_chat_attachment_store,
     get_conversation_store,
+    get_session_store,
     get_current_profile,
     get_knowledge_store,
+    get_wiki_store,
     get_permission_store,
     get_profile_store,
     get_workflow_store,
@@ -83,6 +85,7 @@ from artpm_agent.ui_state import (  # noqa: F401 — re-exported for wildcard co
     WORKFLOW_RUNTIME_AVAILABLE,
     WorkspaceArtifactGenerator,
     WorkspaceKnowledgeStore,
+    WorkspaceWikiStore,
 )
 
 logger = get_logger(__name__)
@@ -189,11 +192,17 @@ def build_knowledge_context(prompt, *, max_chars=6000):
     if store is None or not str(prompt).strip():
         return ""
     try:
-        rules = store.get_active_rules(limit=8)
+        tenant_context = _trusted_knowledge_context()
+        scope = {
+            "tenant_id": tenant_context.tenant_id,
+            "workspace_id": tenant_context.workspace_id,
+        }
+        rules = store.get_active_rules(limit=8, **scope)
         try:
             resources = store.search(
                 str(prompt),
                 limit=5,
+                **scope,
                 include_rules=False,
                 max_text_chars=1200,
                 use_confidence=True,
@@ -203,6 +212,7 @@ def build_knowledge_context(prompt, *, max_chars=6000):
             resources = store.search(
                 str(prompt),
                 limit=5,
+                **scope,
                 include_rules=False,
                 max_text_chars=1200,
             )
@@ -283,10 +293,31 @@ def get_workflow_coordinator():
     agent = st.session_state.get("agent")
     if store is None or agent is None or not hasattr(agent, "router"):
         return None
+    tenant_context = st.session_state.get("tenant_context") or TenantContext.local()
+    if not isinstance(tenant_context, TenantContext):
+        return None
+    workspace_id = tenant_context.require_workspace()
+    profile = get_current_profile()
+    profile_id = str(getattr(profile, "profile_id", None) or "local-default")
+    try:
+        store.ensure_builtins(workspace_id=workspace_id, profile_id=profile_id)
+    except Exception:
+        logger.exception("工作流内置定义初始化失败")
+        return None
     coordinator = st.session_state.get("workflow_coordinator")
-    if coordinator is None or getattr(coordinator, "agent", None) is not agent:
+    if (
+        coordinator is None
+        or getattr(coordinator, "agent", None) is not agent
+        or getattr(coordinator, "workspace_id", None) != workspace_id
+        or getattr(coordinator, "profile_id", None) != profile_id
+    ):
         try:
-            coordinator = WorkflowCoordinator(store, agent)
+            coordinator = WorkflowCoordinator(
+                store,
+                agent,
+                workspace_id=workspace_id,
+                profile_id=profile_id,
+            )
         except (TypeError, ValueError):
             logger.exception("工作流协调器初始化失败")
             return None
@@ -560,6 +591,25 @@ def init_session():
             except Exception as error:
                 record_runtime_init_failure("knowledge_store", error)
 
+    if "wiki_store" not in st.session_state:
+        st.session_state.wiki_store = None
+        knowledge_store = get_knowledge_store()
+        if WorkspaceWikiStore is not None and knowledge_store is not None:
+            try:
+                wiki_store = WorkspaceWikiStore(knowledge_store)
+                tenant_context = st.session_state.get("tenant_context")
+                workspace_id = str(
+                    getattr(
+                        tenant_context,
+                        "workspace_id",
+                        WorkspaceKnowledgeStore.DEFAULT_WORKSPACE_ID,
+                    )
+                )
+                wiki_store.reconcile(workspace_id=workspace_id)
+                st.session_state.wiki_store = wiki_store
+            except Exception as error:
+                record_runtime_init_failure("wiki_store", error)
+
     store = get_conversation_store()
     if store is not None:
         conversation_id = st.session_state.get("active_conversation_id")
@@ -604,10 +654,6 @@ def render_conversation_sidebar():
     request_pending = bool(st.session_state.get("pending_prompt"))
     pending_delete_id = st.session_state.get("pending_conversation_delete")
     with st.container(key="conversation_panel"):
-        st.markdown(
-            '<div class="sidebar-section-label">会话</div>',
-            unsafe_allow_html=True,
-        )
         if st.button(
             "新建会话",
             key="new_conversation",
@@ -634,6 +680,11 @@ def render_conversation_sidebar():
                     key="conversation_create_error",
                     retry=False,
                 )
+
+        st.markdown(
+            '<div class="sidebar-section-label">最近会话</div>',
+            unsafe_allow_html=True,
+        )
 
         # 30 秒内的重复 rerun 复用缓存，避免高频刷新反复打库。
         _conv_cache = st.session_state.get("_conv_list_cache")
@@ -735,7 +786,10 @@ def render_sidebar():
             """
             <div class="sidebar-brand">
                 <span class="brand-mark" aria-hidden="true"></span>
-                <span class="brand-name">ArtPM Agent</span>
+                <span class="brand-copy">
+                    <strong class="brand-name">ArtPM Agent</strong>
+                    <small class="brand-tagline">项目协作工作台</small>
+                </span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -760,15 +814,20 @@ def render_sidebar():
         if st.session_state.get(_NAV_WIDGET_KEY) != _current_view:
             st.session_state[_NAV_WIDGET_KEY] = _current_view
 
-        st.pills(
-            "导航",
-            _NAV_OPTIONS,
-            selection_mode="single",
-            key=_NAV_WIDGET_KEY,
-            on_change=_queue_sidebar_navigation,
-        )
-
-        _render_backend_link_status()
+        with st.container(key="sidebar_footer"):
+            st.markdown(
+                '<div class="sidebar-section-label">工作区</div>',
+                unsafe_allow_html=True,
+            )
+            st.pills(
+                "导航",
+                _NAV_OPTIONS,
+                selection_mode="single",
+                key=_NAV_WIDGET_KEY,
+                on_change=_queue_sidebar_navigation,
+                label_visibility="collapsed",
+            )
+            _render_backend_link_status()
 
 
 def normalize_agent_response(response):
@@ -1417,6 +1476,22 @@ def _permission_actor():
     if actor_role not in {"user", "admin"}:
         actor_role = "user"
     return actor_id, actor_role
+
+
+def _trusted_knowledge_context() -> TenantContext:
+    """Return the current UI workspace from the host-created tenant context."""
+
+    tenant_context = st.session_state.get("tenant_context")
+    if tenant_context is None:
+        tenant_context = TenantContext.local()
+    if not isinstance(tenant_context, TenantContext):
+        raise RuntimeError("tenant_context must be created by the application host")
+    tenant_context.require_workspace()
+    return tenant_context
+
+
+def _trusted_knowledge_workspace_id() -> str:
+    return _trusted_knowledge_context().workspace_id
 
 
 def _permission_feedback_state_key(conversation_id):
@@ -2137,7 +2212,16 @@ def _render_knowledge_ingestion_approvals(conversation_id):
     if knowledge_store is None or not conversation_id:
         return
     try:
+        tenant_context = _trusted_knowledge_context()
+        workspace_id = tenant_context.workspace_id
+        tenant_id = tenant_context.tenant_id
+    except Exception:
+        logger.exception("当前工作区身份无效，拒绝加载资料入库提案")
+        return
+    try:
         proposals = knowledge_store.list_ingestion_proposals(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
             status="pending",
             conversation_id=conversation_id,
         )
@@ -2175,6 +2259,8 @@ def _render_knowledge_ingestion_approvals(conversation_id):
                         confirmation_token=(
                             f"{conversation_id}:{proposal['id']}:confirmed"
                         ),
+                        tenant_id=tenant_id,
+                        workspace_id=workspace_id,
                         expected_state_version=proposal["state_version"],
                     )
                     ingested = confirmed.get("ingested_resources", [])
@@ -2194,6 +2280,8 @@ def _render_knowledge_ingestion_approvals(conversation_id):
                 try:
                     rejected = knowledge_store.reject_ingestion(
                         proposal["id"],
+                        tenant_id=tenant_id,
+                        workspace_id=workspace_id,
                         actor="本地用户（会话拒绝）",
                         expected_state_version=proposal["state_version"],
                     )
@@ -2214,9 +2302,21 @@ def _render_knowledge_approvals(conversation_id):
     if knowledge_store is None or not conversation_id:
         return
     try:
+        tenant_context = _trusted_knowledge_context()
+        workspace_id = tenant_context.workspace_id
+        tenant_id = tenant_context.tenant_id
+    except Exception:
+        logger.exception("当前工作区身份无效，拒绝加载知识规则提案")
+        return
+    try:
         rules = [
             rule
-            for rule in knowledge_store.list_rules(status="proposed", limit=100)
+            for rule in knowledge_store.list_rules(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                status="proposed",
+                limit=100,
+            )
             if rule.get("source_conversation_id") == conversation_id
         ]
     except Exception:
@@ -2248,6 +2348,8 @@ def _render_knowledge_approvals(conversation_id):
                 try:
                     accepted = knowledge_store.confirm_rule(
                         rule["id"],
+                        tenant_id=tenant_id,
+                        workspace_id=workspace_id,
                         confirmed_by="本地用户（会话确认）",
                         confirmation_token=(
                             f"{conversation_id}:{rule['id']}:accepted"
@@ -2269,6 +2371,8 @@ def _render_knowledge_approvals(conversation_id):
                 try:
                     rejected = knowledge_store.reject_rule(
                         rule["id"],
+                        tenant_id=tenant_id,
+                        workspace_id=workspace_id,
                         rejected_by="本地用户（会话拒绝）",
                     )
                     _persist_knowledge_response(

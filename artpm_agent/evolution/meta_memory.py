@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from .strategy_store import StrategyStore
+from artpm_agent.tenancy import TenantContextManager, WorkspaceAccessDenied
 
 _DEFAULT_META_DB = "data/meta_memory.db"  # legacy label; default path resolves via resolve_state_path()
 
@@ -108,6 +109,9 @@ class MetaMemory:
         strategy_store: Optional[StrategyStore] = None,
         feedback_store: Optional[Any] = None,
         meta_store: Optional["MetaMemoryStore"] = None,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        principal_id: Optional[str] = None,
     ) -> MetaMemoryReport:
         report = MetaMemoryReport()
         q = (user_input or "").strip()
@@ -119,7 +123,19 @@ class MetaMemory:
         has_hits = False
         if knowledge_store is not None and hasattr(knowledge_store, "search"):
             try:
-                hits = knowledge_store.search(q, limit=3)
+                search_kwargs: dict[str, Any] = {"limit": 3}
+                if workspace_id:
+                    search_kwargs["workspace_id"] = workspace_id
+                try:
+                    hits = knowledge_store.search(q, **search_kwargs)
+                except TypeError:
+                    default_workspace = getattr(
+                        knowledge_store, "DEFAULT_WORKSPACE_ID", "local-default"
+                    )
+                    if workspace_id and workspace_id != default_workspace:
+                        hits = []
+                    else:
+                        hits = knowledge_store.search(q, limit=3)
                 if hits:
                     has_hits = True
                     confidences = []
@@ -186,7 +202,22 @@ class MetaMemory:
         # 4) 无策略覆盖：若某能力从未沉淀过优化策略，温和提示
         if strategy_store is not None:
             try:
-                if not strategy_store.active():
+                strategy_kwargs = {
+                    key: value
+                    for key, value in {
+                        "tenant_id": tenant_id,
+                        "workspace_id": workspace_id,
+                    }.items()
+                    if value
+                }
+                try:
+                    active_strategies = strategy_store.active(**strategy_kwargs)
+                except TypeError:
+                    if workspace_id and workspace_id != "local-default":
+                        active_strategies = []
+                    else:
+                        active_strategies = strategy_store.active()
+                if not active_strategies:
                     report.gaps.append(
                         KnowledgeGap(
                             topic=topic,
@@ -205,7 +236,12 @@ class MetaMemory:
 
         if meta_store is not None and report.has_gaps():
             try:
-                meta_store.record_gaps(report.gaps)
+                meta_store.record_gaps(
+                    report.gaps,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    principal_id=principal_id,
+                )
             except Exception:  # noqa: BLE001
                 pass
 
@@ -260,37 +296,155 @@ class MetaMemoryStore:
 
     def _init_db(self) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS meta_gaps (
-                    topic TEXT PRIMARY KEY,
-                    kind TEXT NOT NULL,
-                    suggested_action TEXT NOT NULL,
-                    detail TEXT NOT NULL DEFAULT '',
-                    first_seen TEXT NOT NULL,
-                    last_seen TEXT NOT NULL,
-                    seen_count INTEGER NOT NULL DEFAULT 1
-                )
-                """
-            )
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta_gaps'"
+            ).fetchone()
+            if table_exists is None:
+                self._create_scoped_schema(conn)
+                return
 
-    def record_gaps(self, gaps: List[KnowledgeGap]) -> None:
+            columns = conn.execute("PRAGMA table_info(meta_gaps)").fetchall()
+            names = {str(row["name"]) for row in columns}
+            topic_is_primary_key = any(
+                str(row["name"]) == "topic" and int(row["pk"] or 0) == 1
+                for row in columns
+            )
+            if topic_is_primary_key or not {
+                "tenant_id",
+                "workspace_id",
+                "principal_id",
+            }.issubset(names):
+                self._migrate_to_scoped_schema(conn, names)
+
+    @staticmethod
+    def _create_scoped_schema(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE meta_gaps (
+                topic TEXT NOT NULL,
+                tenant_id TEXT NOT NULL DEFAULT 'local',
+                workspace_id TEXT NOT NULL DEFAULT 'local-default',
+                principal_id TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL,
+                suggested_action TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '',
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                seen_count INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (tenant_id, workspace_id, principal_id, topic)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_meta_gaps_scope "
+            "ON meta_gaps(tenant_id, workspace_id, principal_id, seen_count)"
+        )
+
+    @classmethod
+    def _migrate_to_scoped_schema(
+        cls,
+        conn: sqlite3.Connection,
+        columns: set[str],
+    ) -> None:
+        conn.execute("ALTER TABLE meta_gaps RENAME TO meta_gaps_legacy")
+        cls._create_scoped_schema(conn)
+        tenant_expr = "tenant_id" if "tenant_id" in columns else "'local'"
+        workspace_expr = "workspace_id" if "workspace_id" in columns else "'local-default'"
+        principal_expr = "principal_id" if "principal_id" in columns else "''"
+        conn.execute(
+            """
+            INSERT INTO meta_gaps(
+                topic, tenant_id, workspace_id, principal_id, kind,
+                suggested_action, detail, first_seen, last_seen, seen_count
+            )
+            SELECT topic, %s, %s, %s, kind, suggested_action, detail,
+                   first_seen, last_seen, seen_count
+            FROM meta_gaps_legacy
+            """ % (tenant_expr, workspace_expr, principal_expr)
+        )
+        conn.execute("DROP TABLE meta_gaps_legacy")
+
+    @staticmethod
+    def _resolve_scope(
+        tenant_id: Optional[str],
+        workspace_id: Optional[str],
+        principal_id: Optional[str],
+    ) -> tuple[str, str, str]:
+        current = TenantContextManager.get_current()
+        if current is not None:
+            requested_tenant = str(tenant_id or "").strip()
+            requested_workspace = str(workspace_id or "").strip()
+            requested_principal = str(principal_id or "").strip()
+            if requested_tenant and requested_tenant != current.tenant_id:
+                raise WorkspaceAccessDenied(
+                    "tenant does not match the authenticated context"
+                )
+            if requested_workspace and requested_workspace != current.workspace_id:
+                raise WorkspaceAccessDenied(
+                    "workspace does not match the authenticated context"
+                )
+            if requested_principal and requested_principal != current.principal_id:
+                raise WorkspaceAccessDenied(
+                    "principal does not match the authenticated context"
+                )
+            return current.tenant_id, current.workspace_id, current.principal_id
+        return (
+            str(tenant_id or "local").strip() or "local",
+            str(workspace_id or "local-default").strip() or "local-default",
+            str(principal_id or "").strip(),
+        )
+
+    @classmethod
+    def _query_scope(
+        cls,
+        tenant_id: Optional[str],
+        workspace_id: Optional[str],
+        principal_id: Optional[str],
+    ) -> Optional[tuple[str, str, str]]:
+        if TenantContextManager.get_current() is None and all(
+            value is None for value in (tenant_id, workspace_id, principal_id)
+        ):
+            return None
+        return cls._resolve_scope(tenant_id, workspace_id, principal_id)
+
+    def record_gaps(
+        self,
+        gaps: List[KnowledgeGap],
+        *,
+        tenant_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        principal_id: Optional[str] = None,
+    ) -> None:
         now = _utc_now()
+        resolved_tenant, resolved_workspace, resolved_principal = self._resolve_scope(
+            tenant_id, workspace_id, principal_id
+        )
         with self._connect() as conn:
             for g in gaps:
                 row = conn.execute(
-                    "SELECT * FROM meta_gaps WHERE topic = ?", (g.topic,)
+                    "SELECT * FROM meta_gaps WHERE topic = ? "
+                    "AND tenant_id = ? AND workspace_id = ? AND principal_id = ?",
+                    (
+                        g.topic,
+                        resolved_tenant,
+                        resolved_workspace,
+                        resolved_principal,
+                    ),
                 ).fetchone()
                 if row is None:
                     conn.execute(
                         """
                         INSERT INTO meta_gaps(
-                            topic, kind, suggested_action, detail,
+                            topic, tenant_id, workspace_id, principal_id,
+                            kind, suggested_action, detail,
                             first_seen, last_seen, seen_count
-                        ) VALUES (?, ?, ?, ?, ?, ?, 1)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                         """,
                         (
                             g.topic,
+                            resolved_tenant,
+                            resolved_workspace,
+                            resolved_principal,
                             g.kind,
                             g.suggested_action,
                             g.detail,
@@ -304,7 +458,8 @@ class MetaMemoryStore:
                         UPDATE meta_gaps
                         SET kind = ?, suggested_action = ?, detail = ?,
                             last_seen = ?, seen_count = seen_count + 1
-                        WHERE topic = ?
+                        WHERE topic = ? AND tenant_id = ? AND workspace_id = ?
+                          AND principal_id = ?
                         """,
                         (
                             g.kind,
@@ -312,14 +467,40 @@ class MetaMemoryStore:
                             g.detail,
                             now,
                             g.topic,
+                            resolved_tenant,
+                            resolved_workspace,
+                            resolved_principal,
                         ),
                     )
 
-    def top_gaps(self, limit: int = 20) -> List[Dict[str, Any]]:
+    def top_gaps(
+        self,
+        limit: int = 20,
+        *,
+        tenant_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        principal_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        scope = self._query_scope(tenant_id, workspace_id, principal_id)
+        clauses: list[str] = []
+        params: list[Any] = []
+        if scope is not None:
+            clauses.extend(
+                [
+                    "tenant_id = ?",
+                    "workspace_id = ?",
+                    "principal_id = ?",
+                ]
+            )
+            params.extend(scope)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        params.append(limit)
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM meta_gaps ORDER BY seen_count DESC, last_seen DESC LIMIT ?",
-                (limit,),
+                "SELECT * FROM meta_gaps"
+                + where
+                + " ORDER BY seen_count DESC, last_seen DESC LIMIT ?",
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
 

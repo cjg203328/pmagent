@@ -26,8 +26,114 @@ from .workflow_handler import try_workflow_routing
 from .skill_handler import try_skill_routing
 from .model_handler import fallback_to_model
 from .runtime import HarnessRuntime, adapt_runtime
+from artpm_agent.runtime.events import AgentEventType
+from artpm_agent.runtime.request_services import TurnServiceBundle
+from artpm_agent.runtime.turn_events import recorder_for_turn
+from artpm_agent.utils.chat_intent import is_local_fast_intent
+from artpm_agent.routing.service import IntentDecision
 
 logger = logging.getLogger(__name__)
+
+
+def _classify_turn_error(error: BaseException) -> str:
+    """Classify failures without storing provider-specific error text."""
+
+    signals: list[str] = []
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(signals) < 5:
+        seen.add(id(current))
+        signals.append(f"{type(current).__name__}: {current}".casefold())
+        current = current.__cause__ or current.__context__
+    signal_text = " ".join(signals)
+    if any(marker in signal_text for marker in ("timeout", "timed out", "超时")):
+        return "timeout"
+    if any(
+        marker in signal_text
+        for marker in (
+            "resourceexhausted",
+            "resource exhausted",
+            "rate limit",
+            "too many requests",
+            "429",
+            "worker local total request limit",
+            "overloaded",
+            "service busy",
+            "服务繁忙",
+            "capacity",
+        )
+    ):
+        return "busy"
+    if any(
+        marker in signal_text
+        for marker in (
+            "no valid response",
+            "empty response",
+            "未返回有效回答",
+            "未收到有效回答",
+        )
+    ):
+        return "empty_response"
+    return "generic"
+
+
+@dataclass(frozen=True, slots=True)
+class TurnScope:
+    """Trusted request scope carried alongside the conversational payload."""
+
+    tenant_id: str = "local"
+    workspace_id: str = "local-default"
+    actor_id: str = "local-user"
+    actor_role: str = "user"
+
+    @classmethod
+    def from_tenant_context(cls, context: Any) -> "TurnScope":
+        roles = getattr(context, "roles", frozenset())
+        actor_role = "admin" if "admin" in roles else "user"
+        return cls(
+            tenant_id=str(getattr(context, "tenant_id", "local")),
+            workspace_id=str(
+                getattr(context, "workspace_id", "local-default")
+                or "local-default"
+            ),
+            actor_id=str(getattr(context, "principal_id", "local-user")),
+            actor_role=actor_role,
+        )
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, Any]) -> "TurnScope":
+        tenant_context = values.get("tenant_context")
+        if all(
+            hasattr(tenant_context, name)
+            for name in ("tenant_id", "workspace_id", "principal_id")
+        ):
+            scope = cls.from_tenant_context(tenant_context)
+            actor_role = str(values.get("actor_role") or scope.actor_role)
+            return cls(
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                actor_id=scope.actor_id,
+                actor_role=actor_role,
+            )
+        return cls(
+            tenant_id=str(
+                values.get("tenant_id")
+                or getattr(tenant_context, "tenant_id", None)
+                or "local"
+            ),
+            workspace_id=str(
+                values.get("workspace_id")
+                or getattr(tenant_context, "workspace_id", None)
+                or "local-default"
+            ),
+            actor_id=str(
+                values.get("actor_id")
+                or values.get("principal_id")
+                or getattr(tenant_context, "principal_id", None)
+                or "local-user"
+            ),
+            actor_role=str(values.get("actor_role") or "user"),
+        )
 
 
 @dataclass
@@ -57,7 +163,32 @@ class TurnContext:
     # API worker, plugin host, or any other process without a concrete agent.
     runtime: Optional[HarnessRuntime] = None
 
+    # Explicit request boundaries. ``extra`` remains a compatibility bag for
+    # older hosts, but new orchestration code reads these fields first.
+    scope: Optional[TurnScope] = None
+    services: Optional[TurnServiceBundle] = None
+    intent: Optional[str] = None
+    intent_decision: Optional[IntentDecision] = None
+    intent_checked: bool = False
+    memory_injected: bool = False
+
     def __post_init__(self) -> None:
+        if not isinstance(self.extra, dict):
+            self.extra = dict(self.extra or {})
+        if self.scope is None:
+            try:
+                from artpm_agent.tenancy import TenantContextManager
+
+                current_context = TenantContextManager.get_current()
+            except Exception:  # pragma: no cover - tenancy is optional at import time
+                current_context = None
+            self.scope = (
+                TurnScope.from_tenant_context(current_context)
+                if current_context is not None and "tenant_context" not in self.extra
+                else TurnScope.from_mapping(self.extra)
+            )
+        elif not isinstance(self.scope, TurnScope):
+            raise TypeError("scope must be a TurnScope")
         self.runtime = adapt_runtime(self.runtime, self.agent)
 
 
@@ -84,9 +215,25 @@ class TurnResult:
     response_rendered: bool = False
 
 
-def run_turn(
+def _is_fast_response_turn(ctx: TurnContext) -> bool:
+    """Return whether this is a host-requested, read-only meta response.
+
+    Hosts may request the lightweight path, but the Harness independently
+    validates the input. This prevents a caller from using ``turn_mode=fast``
+    to bypass approvals, workflows, or skills for an arbitrary action.
+    """
+    extra = ctx.extra
+    return bool(
+        isinstance(extra, Mapping)
+        and extra.get("turn_mode") == "fast"
+        and is_local_fast_intent(ctx.user_input)
+    )
+
+
+def _run_turn_core(
     ctx: TurnContext,
     *,
+    services: Optional[TurnServiceBundle] = None,
     profile_store: Optional[Any] = None,
     knowledge_store: Optional[Any] = None,
     artifact_coordinator: Optional[Any] = None,
@@ -152,10 +299,31 @@ def run_turn(
             handled_by="harness_runtime_error",
         )
 
+    if _is_fast_response_turn(ctx):
+        if response_handler is not None:
+            result = _run_response_handler(
+                ctx,
+                response_handler,
+                handled_by="fast_response",
+            )
+            result.metadata["turn_mode"] = "fast"
+            return result
+
+        # External callers that opt into fast mode without a host response
+        # adapter retain the legacy direct-response compatibility path.
+        result = _run_thin_runtime(ctx)
+        result.metadata["turn_mode"] = "fast"
+        return result
+
     # ── Step 0: 记忆系统 — 对话压缩 + 跨会话记忆注入 ──
     # 在所有 handler 之前执行，确保 ctx.knowledge_context 携带完整记忆。
     # best-effort：任何环节失败不阻塞主流程。
-    _inject_memory_context(ctx, knowledge_store)
+    _inject_memory_context(
+        ctx,
+        knowledge_store,
+        feedback_store=(services.feedback_store if services else None),
+        strategy_store=(services.strategy_store if services else None),
+    )
 
     # Handler 1: Profile change proposal
     profile_result = try_profile_proposal(
@@ -183,6 +351,11 @@ def run_turn(
     )
     if knowledge_result is not None:
         return knowledge_result
+
+    # All later handlers consume this one parser snapshot. Knowledge ingestion
+    # intentionally stays before it because ingestion has its own durable
+    # proposal payload and must not parse the same files twice.
+    _prepare_turn_attachments(ctx)
 
     # Handler 3: Explicit Workspace knowledge-rule proposal
     knowledge_rule_result = try_knowledge_rule_proposal(
@@ -235,6 +408,260 @@ def run_turn(
 
     # Handler 7: Model fallback (terminal - always returns)
     return fallback_to_model(ctx, parsed_files, attachment_context)
+
+
+def run_turn(
+    ctx: TurnContext,
+    *,
+    services: Optional[TurnServiceBundle] = None,
+    profile_store: Optional[Any] = None,
+    knowledge_store: Optional[Any] = None,
+    artifact_coordinator: Optional[Any] = None,
+    request_conversation_id: Optional[str] = None,
+    knowledge_rule_extractor: Optional[
+        Callable[[str], Optional[str]]
+    ] = None,
+    workflow_coordinator: Optional[Any] = None,
+    workflow_formatter: Optional[Callable[[Any, Any], str]] = None,
+    response_handler: Optional[Callable[[TurnContext], Any]] = None,
+    feedback: Optional[str] = None,
+    auto_reflect: bool = True,
+) -> TurnResult:
+    """Run one turn through the single canonical orchestration boundary."""
+
+    resolved_services = services or ctx.services
+    if resolved_services is not None:
+        profile_store = profile_store or resolved_services.profile_store
+        knowledge_store = knowledge_store or resolved_services.knowledge_store
+        artifact_coordinator = artifact_coordinator or resolved_services.artifact_coordinator
+        workflow_coordinator = workflow_coordinator or resolved_services.workflow_coordinator
+        workflow_formatter = workflow_formatter or resolved_services.workflow_formatter
+        ctx.services = resolved_services
+    request_conversation_id = request_conversation_id or ctx.conversation_id
+
+    # Scope is authenticated before the lifecycle stream starts. A rejected
+    # request must not look like a valid turn in audit or replay data.
+    try:
+        ctx.scope = get_turn_scope(ctx)
+    except Exception as error:  # noqa: BLE001 - reject forged request scope
+        return _scope_rejection_result(ctx, error)
+
+    recorder = recorder_for_turn(ctx)
+    recorder.emit(ctx, AgentEventType.TURN_START)
+    try:
+        result = _run_turn_core(
+            ctx,
+            services=resolved_services,
+            profile_store=profile_store,
+            knowledge_store=knowledge_store,
+            artifact_coordinator=artifact_coordinator,
+            request_conversation_id=request_conversation_id,
+            knowledge_rule_extractor=knowledge_rule_extractor,
+            workflow_coordinator=workflow_coordinator,
+            workflow_formatter=workflow_formatter,
+            response_handler=response_handler,
+        )
+        _capture_tencentdb_memory(ctx, result)
+        lifecycle = complete_turn_lifecycle(
+            ctx,
+            result,
+            services=resolved_services,
+            feedback=feedback,
+            auto_reflect=auto_reflect,
+        )
+        if lifecycle:
+            result.metadata.setdefault("lifecycle", {}).update(lifecycle)
+        if resolved_services is not None:
+            result.metadata["lifecycle_managed"] = True
+    except Exception as error:
+        result = TurnResult(
+            response="本次请求处理失败，请稍后重试。",
+            success=False,
+            error=str(error) or error.__class__.__name__,
+            handled_by="harness_error",
+            metadata={
+                "turn_id": ctx.turn_id,
+                "error_code": "turn_processing_failed",
+                "error_kind": _classify_turn_error(error),
+            },
+        )
+        if resolved_services is not None:
+            result.metadata["lifecycle_managed"] = True
+        try:
+            lifecycle = complete_turn_lifecycle(
+                ctx,
+                result,
+                services=resolved_services,
+                feedback=feedback,
+                auto_reflect=auto_reflect,
+            )
+            if lifecycle:
+                result.metadata.setdefault("lifecycle", {}).update(lifecycle)
+        except Exception:  # noqa: BLE001 - lifecycle must not mask turn errors
+            logger.warning("failed to finalize failed turn", exc_info=True)
+
+    result.metadata.setdefault("turn_id", ctx.turn_id)
+    if ctx.intent_checked:
+        result.metadata.setdefault("intent", ctx.intent)
+        result.metadata.setdefault("intent_checked", True)
+    recorder.emit(
+        ctx,
+        AgentEventType.TURN_END,
+        error=result.error if not result.success else None,
+        metadata={
+            "success": bool(result.success),
+            "handled_by": result.handled_by,
+            "awaiting_approval": bool(result.awaiting_approval),
+            "intent": ctx.intent,
+            "intent_checked": bool(ctx.intent_checked),
+        },
+    )
+    return result
+
+
+def _feedback_kind(feedback: str) -> str:
+    return (
+        "avoid"
+        if any(marker in feedback for marker in ("👎", "差", "错误", "不对"))
+        else "preference"
+    )
+
+
+def complete_turn_lifecycle(
+    ctx: TurnContext,
+    result: TurnResult,
+    *,
+    services: Optional[TurnServiceBundle] = None,
+    feedback: Optional[str] = None,
+    auto_reflect: bool = True,
+) -> dict[str, Any]:
+    """Persist the post-turn learning tail at the canonical boundary.
+
+    Every operation is independently best-effort. A learning or observability
+    outage must never turn a completed user response into a failed request.
+    """
+    resolved_services = services or ctx.services
+    if resolved_services is None:
+        return {}
+
+    extra = ctx.extra if isinstance(ctx.extra, dict) else {}
+    if extra.get("_lifecycle_finalized"):
+        return {"already_finalized": True}
+    extra["_lifecycle_finalized"] = True
+
+    status: dict[str, Any] = {}
+    scope = ctx.scope or TurnScope()
+    feedback_text = feedback.strip() if isinstance(feedback, str) else ""
+    feedback_store = resolved_services.feedback_store
+    if feedback_text and feedback_store is not None:
+        try:
+            feedback_store.add(
+                kind=_feedback_kind(feedback_text),
+                content=feedback_text,
+                scope=result.handled_by or "global",
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+                principal_id=scope.actor_id,
+            )
+            status["feedback_recorded"] = True
+        except Exception:  # noqa: BLE001 - learning must not block a turn
+            logger.warning("turn feedback recording failed", exc_info=True)
+            status["feedback_recorded"] = False
+
+    episode_store = resolved_services.episode_store
+    if episode_store is not None:
+        try:
+            from .outcome_recorder import record_outcome
+
+            episode_id = record_outcome(
+                ctx,
+                result,
+                store=episode_store,
+                feedback=feedback_text or None,
+            )
+            status["outcome_recorded"] = episode_id is not None
+        except Exception:  # noqa: BLE001 - recorder already fails soft
+            logger.warning("turn outcome recording failed", exc_info=True)
+            status["outcome_recorded"] = False
+
+    if auto_reflect:
+        reflection_scheduler = resolved_services.reflection_scheduler
+        if (
+            reflection_scheduler is not None
+            and episode_store is not None
+            and feedback_store is not None
+            and resolved_services.strategy_store is not None
+        ):
+            try:
+                report = reflection_scheduler.run_if_due(
+                    episode_store,
+                    feedback_store,
+                    resolved_services.strategy_store,
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                    all_principals=True,
+                )
+                status["reflection_ran"] = report is not None
+            except Exception:  # noqa: BLE001 - reflection is asynchronous policy
+                logger.warning("turn reflection failed", exc_info=True)
+                status["reflection_ran"] = False
+
+        knowledge_store = resolved_services.knowledge_store
+        consolidation_scheduler = resolved_services.consolidation_scheduler
+        if knowledge_store is not None and consolidation_scheduler is not None:
+            try:
+                from artpm_agent.memory.consolidation import ConsolidationService
+
+                report = consolidation_scheduler.run_if_due(
+                    ConsolidationService(knowledge_store),
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                )
+                status["consolidation_ran"] = report is not None
+            except Exception:  # noqa: BLE001 - consolidation is asynchronous policy
+                logger.warning("turn knowledge consolidation failed", exc_info=True)
+                status["consolidation_ran"] = False
+
+    status["finalized"] = True
+    return status
+
+
+def _scope_rejection_result(ctx: TurnContext, error: Exception) -> TurnResult:
+    return TurnResult(
+        response="租户或工作区范围校验失败，未处理本次请求。",
+        success=False,
+        error=str(error) or error.__class__.__name__,
+        handled_by="tenant_scope_gate",
+        metadata={
+            "turn_id": ctx.turn_id,
+            "conversation_id": ctx.conversation_id,
+            "error_code": "workspace_access_denied",
+        },
+    )
+
+
+def _capture_tencentdb_memory(ctx: TurnContext, result: TurnResult) -> None:
+    if result.metadata.get("turn_mode") == "fast" or _is_fast_response_turn(ctx):
+        return
+    if not result.success or result.awaiting_approval or not result.response.strip():
+        return
+    services = getattr(ctx, "services", None)
+    memory = getattr(services, "tencentdb_memory", None)
+    if memory is None:
+        runtime = ctx.runtime
+        memory = getattr(runtime, "tencentdb_memory", None)
+    if memory is None or not callable(getattr(memory, "capture", None)):
+        return
+    try:
+        from artpm_agent.harness.memory_retrieval import (
+            tencentdb_scope_from_context,
+        )
+
+        scope = tencentdb_scope_from_context(ctx, memory)
+        if scope is not None:
+            memory.capture(ctx.user_input, result.response, scope)
+    except Exception:  # noqa: BLE001 - persistence is best-effort
+        logger.warning("TencentDB Agent Memory capture skipped", exc_info=True)
 
 
 def _run_thin_runtime(
@@ -323,6 +750,10 @@ def _run_response_handler(
 def _inject_memory_context(
     ctx: "TurnContext",
     knowledge_store: Optional[Any],
+    *,
+    feedback_store: Optional[Any] = None,
+    strategy_store: Optional[Any] = None,
+    meta_memory_store: Optional[Any] = None,
 ) -> None:
     """Step 0: 单一记忆注入入口（幂等）。
 
@@ -343,11 +774,96 @@ def _inject_memory_context(
         )
 
         extra = ctx.extra if isinstance(ctx.extra, dict) else {}
-        inject_memory_context(
-            ctx,
+        if extra.get("disable_memory_injection"):
+            return
+        services = getattr(ctx, "services", None)
+        if knowledge_store is None and services is not None:
+            knowledge_store = services.knowledge_store
+        if feedback_store is None and services is not None:
+            feedback_store = services.feedback_store
+        if strategy_store is None and services is not None:
+            strategy_store = services.strategy_store
+        if meta_memory_store is None and services is not None:
+            meta_memory_store = services.meta_memory_store
+        memory_manager = services.memory_manager if services is not None else None
+        tencentdb_memory = services.tencentdb_memory if services is not None else None
+        inject_memory_context(ctx,
+            memory_manager=memory_manager,
+            tencentdb_memory=tencentdb_memory,
             knowledge_store=knowledge_store,
+            feedback_store=feedback_store,
+            strategy_store=strategy_store,
+            meta_memory_store=meta_memory_store,
             max_context_chars=int(extra.get("memory_inject_max_chars") or 0),
             max_context_tokens=int(extra.get("memory_inject_max_tokens") or 0),
         )
     except Exception as exc:  # noqa: BLE001 - injection must never break a turn
         logger.warning("记忆系统 Step 0 跳过 (非致命): %s", exc, exc_info=True)
+
+
+def get_turn_scope(ctx: Any) -> TurnScope:
+    """Return the canonical scope and reject conflicts with trusted tenancy."""
+
+    extra = getattr(ctx, "extra", None)
+    extra = extra if isinstance(extra, Mapping) else {}
+    scope = getattr(ctx, "scope", None)
+    if not isinstance(scope, TurnScope):
+        scope = TurnScope.from_mapping(extra)
+
+    from artpm_agent.tenancy import (
+        TenantContextManager,
+        tenant_context_from_host,
+    )
+
+    host_context = tenant_context_from_host(extra)
+    current_context = TenantContextManager.get_current()
+    if (
+        host_context is not None
+        and current_context is not None
+        and (
+            host_context.tenant_id != current_context.tenant_id
+            or host_context.workspace_id != current_context.workspace_id
+        )
+    ):
+        raise ValueError("tenant contexts conflict")
+    trusted_context = host_context or current_context
+    if trusted_context is not None:
+        trusted_scope = TurnScope.from_tenant_context(trusted_context)
+        if (
+            scope.tenant_id != trusted_scope.tenant_id
+            or scope.workspace_id != trusted_scope.workspace_id
+            or scope.actor_id != trusted_scope.actor_id
+            or scope.actor_role != trusted_scope.actor_role
+        ):
+            raise ValueError("turn scope conflicts with authenticated tenant context")
+    return scope
+
+
+def _prepare_turn_attachments(ctx: TurnContext) -> None:
+    """Create one normalized attachment snapshot for every handler in a turn."""
+
+    extra = ctx.extra if isinstance(ctx.extra, dict) else {}
+    if extra.get("parsed_files") and extra.get("attachment_context"):
+        return
+    runtime = ctx.runtime
+    if runtime is None or not runtime.capabilities.attachment_parsing:
+        return
+    file_paths = list(extra.get("file_paths") or [])
+    if not file_paths:
+        for attachment in list(ctx.attachments or extra.get("attachments", [])):
+            if isinstance(attachment, Mapping):
+                path = attachment.get("file_path") or attachment.get("stored_path")
+                if path:
+                    file_paths.append(str(path))
+    if not file_paths:
+        return
+    try:
+        parsed_files, attachment_context = runtime.parse_attachments(
+            ctx.user_input,
+            {**extra, "file_paths": file_paths},
+        )
+        extra["file_paths"] = file_paths
+        extra["parsed_files"] = parsed_files
+        extra["attachment_context"] = attachment_context
+    except Exception:  # noqa: BLE001 - model fallback can still explain the failure
+        logger.warning("统一附件预处理失败", exc_info=True)

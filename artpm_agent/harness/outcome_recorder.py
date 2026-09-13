@@ -3,9 +3,8 @@
 This module lives in the harness package (same layer as ``turn_service``) but
 is fully additive:
 
-* Importing it has **no side effects** (``run_turn`` is imported lazily inside
-  ``run_turn_recorded`` only).
-* It does **not** alter the ``run_turn`` handler chain.
+* ``run_turn`` owns lifecycle finalization when a request service bundle is
+  present; this module remains the compatibility adapter for direct callers.
 
 Use ``record_outcome(ctx, result)`` after a turn, or call
 ``run_turn_recorded(ctx, **kw)`` as a drop-in replacement for ``run_turn`` to
@@ -78,6 +77,7 @@ def episode_from_turn(
     feedback: Optional[str] = None,
 ) -> Episode:
     """Build an Episode from a turn's context and result."""
+    scope = getattr(ctx, "scope", None)
     return Episode(
         turn_id=ctx.turn_id,
         conversation_id=ctx.conversation_id,
@@ -88,6 +88,11 @@ def episode_from_turn(
         feedback=feedback,
         run_id=run_id,
         metadata={"awaiting_approval": bool(result.awaiting_approval)},
+        tenant_id=str(getattr(scope, "tenant_id", "local") or "local"),
+        workspace_id=str(
+            getattr(scope, "workspace_id", "local-default") or "local-default"
+        ),
+        principal_id=str(getattr(scope, "actor_id", "") or ""),
     )
 
 
@@ -103,6 +108,9 @@ def record_outcome(
 
     Returns the stored episode id, or None when recording is unavailable.
     """
+    if store is None:
+        services = getattr(ctx, "services", None)
+        store = getattr(services, "episode_store", None)
     target = store or _default_store()
     if target is None:
         return None
@@ -130,5 +138,7 @@ def run_turn_recorded(
     from .turn_service import run_turn
 
     result = run_turn(ctx, **kw)
-    record_outcome(ctx, result, store=store, run_id=run_id)
+    lifecycle = result.metadata.get("lifecycle_managed")
+    if not lifecycle:
+        record_outcome(ctx, result, store=store, run_id=run_id)
     return result

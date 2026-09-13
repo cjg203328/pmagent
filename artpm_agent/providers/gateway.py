@@ -29,7 +29,7 @@ class ModelGateway:
     """
 
     MODEL_FAILOVER_COOLDOWN_SECONDS = 60
-    MODEL_FAILOVER_PROVIDERS = {"openai", "custom", "zhipu"}
+    MODEL_FAILOVER_PROVIDERS = {"openai", "custom", "zhipu", "deepseek"}
     VISION_MODEL_MARKERS = (
         "vision",
         "multimodal",
@@ -83,7 +83,208 @@ class ModelGateway:
         if primary_client is not None and self.last_response_model:
             self._clients[self.last_response_model] = primary_client
 
-    # ── Provider-neutral helpers (no Streamlit / DB / Skill) ──
+        # "Eyes model" pairing: an optional dedicated vision model (e.g.
+        # GLM-4V-Flash) that handles image requests independently of the
+        # text primary model, so a non-vision primary (DeepSeek, …) can still
+        # understand images. Configured via LLM_VISION_* env vars.
+        self._vision_provider: Optional[str] = (
+            str(self._llm_config.get("vision_provider", "") or "").strip().lower()
+            or None
+        )
+        self._vision_model: Optional[str] = (
+            str(self._llm_config.get("vision_model", "") or "").strip() or None
+        )
+        self._vision_client: Optional[Any] = None
+        self._vision_client_built = False
+
+    # ── Vision pairing ("eyes model") ──
+
+    def _vision_client_config(self) -> Dict[str, Any]:
+        """Assemble a client config for the dedicated vision model."""
+        cfg = dict(self._llm_config)
+        provider = self._vision_provider or str(cfg.get("provider", "")).strip().lower()
+        cfg["provider"] = provider
+        cfg["model"] = self._vision_model or ""
+        if provider == "zhipu":
+            key = cfg.get("vision_api_key") or cfg.get("zhipu_api_key")
+            base = (
+                cfg.get("vision_api_base")
+                or cfg.get("zhipu_api_base")
+                or "https://open.bigmodel.cn/api/paas/v4"
+            )
+        elif provider in {"openai", "custom"}:
+            key = cfg.get("vision_api_key") or cfg.get("openai_api_key")
+            base = cfg.get("vision_api_base") or cfg.get("openai_api_base")
+        elif provider == "deepseek":
+            key = cfg.get("vision_api_key") or cfg.get("deepseek_api_key")
+            base = cfg.get("vision_api_base") or cfg.get("deepseek_api_base")
+        else:
+            key = cfg.get("vision_api_key")
+            base = cfg.get("vision_api_base")
+        if key:
+            cfg[f"{provider}_api_key"] = key
+        if base:
+            cfg[f"{provider}_api_base"] = base
+        # GLM-4V-Flash caps output at 1024 tokens; be safe for other models too.
+        try:
+            configured_max = int(cfg.get("max_tokens", 1200))
+        except (TypeError, ValueError):
+            configured_max = 1200
+        cfg["max_tokens"] = min(configured_max, 1024)
+        cfg["retry_max_attempts"] = 1
+        return cfg
+
+    def vision_client(self) -> Any:
+        """Lazily build (once) the dedicated vision client."""
+        if not self._vision_client_built:
+            self._vision_client_built = True
+            try:
+                self._vision_client = self._client_factory(
+                    self._vision_client_config()
+                )
+            except Exception:
+                logger.exception("vision client failed to build")
+                self._vision_client = None
+        return self._vision_client
+
+    @property
+    def has_vision_pairing(self) -> bool:
+        """True when a dedicated vision model is configured."""
+        return bool(self._vision_model)
+
+    def _chat_with_vision(
+        self,
+        prompt: str,
+        system_prompt: Optional[str],
+        history: Any,
+        image_paths: List[str],
+        *,
+        cache_scope: str = "local:default",
+    ) -> str:
+        """Single-attempt image request through the dedicated vision client.
+
+        When a vision pairing is configured, image requests no longer fall
+        back to the text primary model (which may reject images outright);
+        they go straight to the vision model (e.g. GLM-4V-Flash).
+        """
+        model_id = self._vision_model or ""
+        client = self.vision_client()
+        if client is None:
+            raise RuntimeError("视觉模型未配置或不可用，无法识别图片")
+        cached, reservation = self._cache_acquire(
+            model_id,
+            system_prompt,
+            prompt,
+            history,
+            image_paths,
+            cache_scope,
+        )
+        if cached is not None:
+            self.record_success(model_id, None)
+            if reservation:
+                self._cache_release(reservation)
+            return cached
+        try:
+            response = client.chat_with_images(
+                prompt,
+                image_paths,
+                system_prompt=system_prompt,
+                history=history,
+            )
+        except Exception:
+            if reservation:
+                self._cache_release(reservation)
+            raise
+        if reservation:
+            self._cache_release(reservation)
+        if not isinstance(response, str) or not response.strip():
+            raise RuntimeError("视觉模型未返回有效回答")
+        answer = response.strip()
+        self.record_success(model_id, None)
+        self._cache_put(
+            model_id,
+            system_prompt,
+            prompt,
+            history,
+            image_paths,
+            answer,
+            cache_scope,
+        )
+        return answer
+
+    def _stream_with_vision(
+        self,
+        user_input: str,
+        system_prompt: Optional[str],
+        history: Any,
+        image_paths: List[str],
+        *,
+        cache_scope: str = "local:default",
+    ) -> Any:
+        """Stream an image request through the dedicated vision client."""
+        model_id = self._vision_model or ""
+        client = self.vision_client()
+        if client is None:
+            raise RuntimeError("视觉模型未配置或不可用，无法识别图片")
+        cached, reservation = self._cache_acquire(
+            model_id,
+            system_prompt,
+            user_input,
+            history,
+            image_paths,
+            cache_scope,
+        )
+        if cached is not None:
+            self.record_success(model_id, None)
+            if reservation:
+                self._cache_release(reservation)
+            yield cached
+            return
+        parts: list[str] = []
+        yielded = False
+        try:
+            stream_fn = getattr(client, "stream_chat_with_images", None)
+            if stream_fn is not None:
+                chunks = stream_fn(
+                    user_input,
+                    image_paths,
+                    system_prompt=system_prompt,
+                    history=history,
+                )
+            else:
+                chunks = iter(
+                    [client.chat_with_images(
+                        user_input,
+                        image_paths,
+                        system_prompt=system_prompt,
+                        history=history,
+                    )]
+                )
+            for chunk in chunks:
+                if not isinstance(chunk, str) or not chunk:
+                    continue
+                if not yielded:
+                    self.record_success(model_id, None)
+                yielded = True
+                parts.append(chunk)
+                yield chunk
+        finally:
+            if reservation:
+                self._cache_release(reservation)
+        if parts:
+            try:
+                self._cache_put(
+                    model_id,
+                    system_prompt,
+                    user_input,
+                    history,
+                    image_paths,
+                    "".join(parts),
+                    cache_scope,
+                )
+            except Exception:
+                logger.warning("vision stream cache put failed", exc_info=True)
+
 
     @staticmethod
     def _model_family(model_id: str) -> str:
@@ -847,6 +1048,18 @@ class ModelGateway:
         primary_model = self.primary_model_id()
         requires_vision = bool(image_paths)
 
+        # "Eyes model" pairing: when a dedicated vision model is configured,
+        # image requests bypass the text primary/failover path entirely and
+        # go straight to the vision client (e.g. GLM-4V-Flash).
+        if requires_vision and self.has_vision_pairing:
+            return self._chat_with_vision(
+                prompt,
+                system_prompt,
+                history,
+                image_paths,
+                cache_scope=cache_scope,
+            )
+
         # Task-aware model selection (deployment-level recognition). When the
         # caller omits task_type AND the classifier is enabled, lazily classify
         # it (opt-in LLM classifier runs on the cheap routing-tier model). When
@@ -1033,6 +1246,17 @@ class ModelGateway:
     ):
         primary_model = self.primary_model_id()
         requires_vision = bool(image_paths)
+
+        # "Eyes model" pairing: image streams go straight to the vision model.
+        if requires_vision and self.has_vision_pairing:
+            yield from self._stream_with_vision(
+                user_input,
+                system_prompt,
+                history,
+                image_paths,
+                cache_scope=cache_scope,
+            )
+            return
 
         if task_type is None and self._task_classification_enabled:
             task_type = self.classify_task(user_input, image_paths)

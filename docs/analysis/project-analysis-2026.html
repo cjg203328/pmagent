@@ -1,0 +1,434 @@
+<title>ArtPM Agent · 项目分析 2026</title>
+<style>
+/* ── Tokens (dark-first) ── */
+:root {
+  --ink:      #0D1520;
+  --surface:  #131E2E;
+  --card:     #1C2D42;
+  --rim:      #2A3F5A;
+  --teal:     #2ED4A0;
+  --amber:    #F5A342;
+  --red:      #FF6464;
+  --green:    #5DD88A;
+  --prose:    #DDE8F5;
+  --dim:      #7A9EC0;
+  --muted:    #4A6A8A;
+  --teal-bg:  rgba(46,212,160,.09);
+  --amber-bg: rgba(245,163,66,.09);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --ink:      #EEF3FA;
+    --surface:  #FFFFFF;
+    --card:     #E5EEF8;
+    --rim:      #C4D4E8;
+    --teal:     #0A7A5E;
+    --amber:    #B86A00;
+    --red:      #C43030;
+    --green:    #1A8040;
+    --prose:    #0D1F35;
+    --dim:      #3A5A78;
+    --muted:    #7A9AB8;
+    --teal-bg:  rgba(10,122,94,.08);
+    --amber-bg: rgba(184,106,0,.08);
+  }
+}
+:root[data-theme="light"] {
+  --ink:#EEF3FA; --surface:#FFFFFF; --card:#E5EEF8; --rim:#C4D4E8;
+  --teal:#0A7A5E; --amber:#B86A00; --red:#C43030; --green:#1A8040;
+  --prose:#0D1F35; --dim:#3A5A78; --muted:#7A9AB8;
+  --teal-bg:rgba(10,122,94,.08); --amber-bg:rgba(184,106,0,.08);
+}
+
+/* ── Reset ── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--ink);color:var(--prose);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;font-size:15px;line-height:1.65}
+a{color:var(--teal);text-decoration:none}
+
+/* ── Typography scale ── */
+h1{font-size:clamp(26px,4vw,38px);font-weight:800;line-height:1.12;letter-spacing:-.02em;text-wrap:balance}
+h2{font-size:18px;font-weight:700;letter-spacing:-.01em;text-wrap:balance}
+h3{font-size:13px;font-weight:600;text-wrap:balance}
+code,pre,.mono{font-family:"Cascadia Code","Fira Code","SF Mono",Consolas,monospace;font-size:.875em}
+.eyebrow{font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:var(--teal);font-weight:700}
+.section-label{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:600;display:block;padding-bottom:10px;border-bottom:1px solid var(--rim);margin-bottom:24px}
+
+/* ── Layout ── */
+.wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+section{padding:52px 0}
+
+/* ── Page header ── */
+.page-header{background:var(--surface);border-bottom:1px solid var(--rim);padding:28px 0 22px;position:sticky;top:0;z-index:20}
+.header-inner{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap}
+.header-meta{display:flex;align-items:center;gap:10px;margin-top:6px}
+.badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:3px 9px;border-radius:3px;letter-spacing:.04em}
+.badge-teal{background:var(--teal-bg);color:var(--teal);border:1px solid color-mix(in srgb,var(--teal) 25%,transparent)}
+.badge-amber{background:var(--amber-bg);color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 25%,transparent)}
+.pulse{width:7px;height:7px;border-radius:50%;background:var(--teal);animation:pulse 2s ease infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.8)}}
+
+/* ── Metrics bar ── */
+.metrics{display:flex;gap:0;border:1px solid var(--rim);border-radius:5px;overflow:hidden;margin-top:20px}
+.metric{flex:1;padding:12px 18px;background:var(--card);border-right:1px solid var(--rim);min-width:120px}
+.metric:last-child{border-right:none}
+.metric-val{font-size:22px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums;color:var(--prose)}
+.metric-val.teal{color:var(--teal)}
+.metric-val.amber{color:var(--amber)}
+.metric-lbl{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-top:3px;font-weight:600}
+@media(max-width:640px){.metrics{flex-wrap:wrap}.metric{min-width:50%}}
+
+/* ── Cards & grids ── */
+.card{background:var(--card);border:1px solid var(--rim);border-radius:5px;padding:18px 20px}
+.card-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+@media(max-width:760px){.card-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:480px){.card-grid{grid-template-columns:1fr}}
+.card-tag{font-size:9px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;padding:2px 7px;border-radius:2px;display:inline-block;margin-bottom:8px}
+.tag-core{background:var(--teal-bg);color:var(--teal)}
+.tag-infra{background:rgba(100,130,180,.12);color:var(--dim)}
+.tag-ui{background:rgba(200,150,200,.08);color:#B08AC8}
+.card h3{margin-bottom:4px}
+.card p{font-size:13px;color:var(--dim);line-height:1.5}
+
+/* ── Flow diagram ── */
+.flow-wrap{overflow-x:auto;padding-bottom:8px}
+.flow{display:flex;flex-direction:column;align-items:center;gap:0;min-width:560px}
+.flow-row{display:flex;align-items:center;justify-content:center;gap:12px;width:100%}
+.flow-box{background:var(--card);border:1px solid var(--rim);border-radius:4px;padding:10px 18px;text-align:center;white-space:nowrap;position:relative}
+.flow-box.accent{border-color:color-mix(in srgb,var(--teal) 40%,transparent);background:var(--teal-bg)}
+.flow-box .lbl{font-size:12px;font-weight:600;color:var(--prose)}
+.flow-box .sub{font-size:10px;color:var(--dim);margin-top:1px}
+.flow-arrow{display:flex;align-items:center;color:var(--muted);font-size:18px;line-height:1;flex-shrink:0}
+.flow-vline{width:1px;height:24px;background:var(--rim);margin:0 auto}
+.flow-branches{display:flex;gap:12px;justify-content:center;align-items:flex-start;width:100%}
+.flow-branch{display:flex;flex-direction:column;align-items:center;gap:0}
+.flow-branch-label{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:8px;text-align:center}
+.flow-join-line{width:2px;height:20px;background:var(--rim);margin:0 auto}
+
+/* ── Table ── */
+.data-table{width:100%;border-collapse:collapse;font-size:13px}
+.data-table th{text-align:left;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;padding:8px 14px;border-bottom:1px solid var(--rim)}
+.data-table td{padding:9px 14px;border-bottom:1px solid color-mix(in srgb,var(--rim) 50%,transparent);vertical-align:top}
+.data-table tr:last-child td{border-bottom:none}
+.data-table td.mono{font-family:"Cascadia Code","Fira Code",Consolas,monospace;font-size:12px;color:var(--teal);font-variant-numeric:tabular-nums;white-space:nowrap}
+.data-table td.dim{color:var(--dim)}
+.table-wrap{background:var(--card);border:1px solid var(--rim);border-radius:5px;overflow:hidden;overflow-x:auto}
+
+/* ── Decision cards ── */
+.decision-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+@media(max-width:640px){.decision-grid{grid-template-columns:1fr}}
+.decision-card{background:var(--card);border:1px solid var(--rim);border-radius:5px;padding:20px}
+.decision-card .num{font-size:11px;font-weight:700;color:var(--muted);font-variant-numeric:tabular-nums;margin-bottom:8px;letter-spacing:.06em}
+.decision-card h3{font-size:14px;margin-bottom:8px;color:var(--prose)}
+.decision-card p{font-size:13px;color:var(--dim);line-height:1.55}
+.decision-card .tag-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}
+.pill{font-size:10px;padding:2px 8px;border-radius:11px;background:var(--teal-bg);color:var(--teal);font-weight:600;border:1px solid color-mix(in srgb,var(--teal) 20%,transparent)}
+
+/* ── Quality section ── */
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+@media(max-width:680px){.two-col{grid-template-columns:1fr}}
+.debt-item{display:flex;align-items:baseline;gap:10px;padding:8px 0;border-bottom:1px solid color-mix(in srgb,var(--rim) 50%,transparent);font-size:13px}
+.debt-item:last-child{border-bottom:none}
+.debt-status{font-size:10px;font-weight:700;letter-spacing:.04em;flex-shrink:0;padding:2px 7px;border-radius:2px}
+.status-fixed{background:rgba(93,216,138,.1);color:var(--green)}
+.status-open{background:var(--amber-bg);color:var(--amber)}
+.stat-row{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid color-mix(in srgb,var(--rim) 50%,transparent);font-size:13px}
+.stat-row:last-child{border-bottom:none}
+.stat-val{font-weight:700;font-variant-numeric:tabular-nums;color:var(--teal);font-family:"Cascadia Code","Fira Code",Consolas,monospace;font-size:14px}
+@media(prefers-reduced-motion:reduce){.pulse{animation:none}}
+</style>
+
+<!-- ── PAGE HEADER ── -->
+<header class="page-header">
+  <div class="wrap">
+    <div class="header-inner">
+      <div>
+        <div class="eyebrow">游戏美术外包 · 项目管理 AI 助手</div>
+        <h1 style="margin-top:6px">ArtPM Agent</h1>
+        <div class="header-meta">
+          <span class="badge badge-teal"><span class="pulse"></span>服务运行中</span>
+          <span class="badge badge-amber">Python ≥ 3.10</span>
+          <span style="font-size:12px;color:var(--muted)">branch: chore/consolidate-uncommitted-work</span>
+        </div>
+      </div>
+    </div>
+    <div class="metrics" style="margin-top:18px">
+      <div class="metric"><div class="metric-val teal">378</div><div class="metric-lbl">Python 模块</div></div>
+      <div class="metric"><div class="metric-val">140+</div><div class="metric-lbl">测试文件</div></div>
+      <div class="metric"><div class="metric-val teal">73%</div><div class="metric-lbl">代码覆盖率</div></div>
+      <div class="metric"><div class="metric-val amber">23</div><div class="metric-lbl">主题提交</div></div>
+      <div class="metric"><div class="metric-val">91<span style="font-size:14px;font-weight:600;color:var(--dim)">/100</span></div><div class="metric-lbl">健康评分</div></div>
+    </div>
+  </div>
+</header>
+
+<main>
+<!-- ── ARCHITECTURE FLOW ── -->
+
+<section id="flow" style="background:var(--surface)">
+  <div class="wrap">
+    <span class="section-label">架构数据流</span>
+    <div class="flow-wrap">
+      <div class="flow">
+
+        <div class="flow-row">
+          <div class="flow-box accent">
+            <div class="lbl">浏览器</div>
+            <div class="sub">用户操作</div>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box accent">
+            <div class="lbl">Streamlit · <code>chat.py</code></div>
+            <div class="sub">会话状态 · 附件上传 · 语音输入</div>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-box accent">
+            <div class="lbl">ArtPMAgent</div>
+            <div class="sub"><code>agent.py</code> · 初始化上下文</div>
+          </div>
+        </div>
+
+        <div class="flow-vline"></div>
+
+        <div class="flow-row" style="gap:16px">
+          <div class="flow-arrow" style="transform:rotate(90deg)">→</div>
+        </div>
+
+        <div class="flow-branches">
+          <div class="flow-branch">
+            <div class="flow-branch-label">本地快速路径</div>
+            <div class="flow-box">
+              <div class="lbl">IntentRouter</div>
+              <div class="sub">问候 · 能力查询 · 记忆</div>
+            </div>
+            <div class="flow-join-line"></div>
+            <div class="flow-box" style="border-color:color-mix(in srgb,var(--teal) 30%,transparent)">
+              <div class="lbl" style="color:var(--teal)">直接返回</div>
+              <div class="sub">无 API 调用</div>
+            </div>
+          </div>
+          <div class="flow-branch">
+            <div class="flow-branch-label">业务技能路径</div>
+            <div class="flow-box">
+              <div class="lbl">SkillRouter</div>
+              <div class="sub">7 大内置技能 + 插件</div>
+            </div>
+            <div class="flow-join-line"></div>
+            <div class="flow-box">
+              <div class="lbl">SQLite · Excel · MinerU</div>
+              <div class="sub">本地数据层</div>
+            </div>
+          </div>
+          <div class="flow-branch">
+            <div class="flow-branch-label">LLM 推理路径</div>
+            <div class="flow-box">
+              <div class="lbl">AgentLoop</div>
+              <div class="sub">Token 预算 · 工具审批</div>
+            </div>
+            <div class="flow-join-line"></div>
+            <div class="flow-box">
+              <div class="lbl">ModelGateway</div>
+              <div class="sub">故障转移 · 响应缓存</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="flow-vline" style="height:16px"></div>
+        <div class="flow-row">
+          <div class="flow-box" style="width:100%;max-width:480px;text-align:center">
+            <div class="lbl">Harness Pipeline</div>
+            <div class="sub" style="margin-top:3px">Memory Injector · MinerU Converter · Vision Attachment · Permission Preflight</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── MODULE MAP ── -->
+<section id="modules">
+  <div class="wrap">
+    <span class="section-label">模块地图</span>
+    <div class="card-grid">
+
+      <div class="card">
+        <span class="card-tag tag-core">核心</span>
+        <h3>agent.py · app.py</h3>
+        <p>Agent 主类：意图路由、技能分发、AgentLoop 调度、MinerU 附件注入、Plugin Manager 初始化。<code>app.py</code> 是 70 行 Streamlit 入口，保持最小。</p>
+      </div>
+
+      <div class="card">
+        <span class="card-tag tag-core">核心</span>
+        <h3>skills/</h3>
+        <p>7 大业务技能：质量管控、进度管理、报价调度、交付单、成本控制、需求评估、复盘。均继承 <code>BaseSkill</code>，风险元数据统一在 <code>SKILL_METADATA</code>。</p>
+      </div>
+
+      <div class="card">
+        <span class="card-tag tag-core">核心</span>
+        <h3>harness/</h3>
+        <p><code>AgentSession</code> 生命周期；附件管道（视觉预处理 + 文档解析）；知识规则处理器；运行时契约 <code>HarnessRuntime</code>。</p>
+      </div>
+
+      <div class="card">
+        <span class="card-tag tag-infra">基础设施</span>
+        <h3>providers/ · runtime/</h3>
+        <p><code>ModelGateway</code>：故障转移、响应缓存（按工作区隔离）、模型健康追踪。<code>AgentLoop</code>：工具调用、Token 预算、结构化审批。</p>
+      </div>
+
+      <div class="card">
+        <span class="card-tag tag-infra">基础设施</span>
+        <h3>memory/</h3>
+        <p>跨会话向量记忆（FAISS IVF/Flat 自适应）、对话压缩器、记忆注入器、情节存储、反馈存储。辅助 store 不再泄漏主 schema。</p>
+      </div>
+
+      <div class="card">
+        <span class="card-tag tag-infra">基础设施</span>
+        <h3>tenancy/ · security/</h3>
+        <p>请求级多租户隔离：<code>TenantContext</code>（frozen dataclass）、<code>WorkspaceStoreGuard</code> 拦截跨工作区写操作。<code>permission_preflight</code> 挂在工具调用前。</p>
+      </div>
+
+      <div class="card">
+        <span class="card-tag tag-infra">基础设施</span>
+        <h3>api/ · FastAPI</h3>
+        <p>REST 网关（port 8765）；语音会话、工作流、权限端点。依赖注入工厂模式；端口冲突时 Streamlit 独立运行不受影响。</p>
+      </div>
+
+      <div class="card">
+        <span class="card-tag tag-infra">基础设施</span>
+        <h3>plugins/ · workflows/</h3>
+        <p>基于 <code>artpm-plugin.json</code> manifest 的外部技能加载器（SHA-256 校验）。LangGraph 任务协调器 + 可视化工作流设计器。</p>
+      </div>
+
+      <div class="card">
+        <span class="card-tag tag-ui">UI</span>
+        <h3>views/ · voice/</h3>
+        <p>Streamlit 页面：chat（租户上下文 + 语音回复）、settings（框架 / MinerU / 插件管理）、observability（遥测 + 缓存命中率）。LiveKit 语音通道可选。</p>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ── TECH STACK ── -->
+<section id="stack" style="background:var(--surface)">
+  <div class="wrap">
+    <span class="section-label">技术栈 · 关键依赖</span>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr><th>层</th><th>库</th><th>版本约束</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="dim">UI</td><td>streamlit</td><td class="mono">≥1.59.0,&lt;1.60.0</td><td class="dim">小版本锁定，防止 API 漂移</td></tr>
+          <tr><td class="dim">REST</td><td>fastapi + uvicorn</td><td class="mono">0.135.x / 0.51.x</td><td class="dim">异步网关，语音/工作流/权限端点</td></tr>
+          <tr><td class="dim">AI 框架</td><td>langchain + langchain-core</td><td class="mono">1.3.x / 1.4.x</td><td class="dim">provider 桥接层，非主控制流</td></tr>
+          <tr><td class="dim">编排</td><td>langgraph</td><td class="mono">1.2.x</td><td class="dim">任务依赖图、审批暂停点</td></tr>
+          <tr><td class="dim">LLM</td><td>openai / anthropic</td><td class="mono">2.45+ / 0.96+</td><td class="dim">+ ZhiPu 兼容适配器</td></tr>
+          <tr><td class="dim">验证</td><td>pydantic</td><td class="mono">2.7.4+,&lt;3</td><td class="dim">TaskSpec / TenantContext / 插件 manifest</td></tr>
+          <tr><td class="dim">数据库</td><td>sqlalchemy + alembic</td><td class="mono">2.0+</td><td class="dim">WAL 模式，辅助库不共享主 schema</td></tr>
+          <tr><td class="dim">向量</td><td>faiss-cpu</td><td class="mono">1.14.x</td><td class="dim">IVF/Flat 自适应，数量不足时降级为 Flat</td></tr>
+          <tr><td class="dim">缓存</td><td>redis</td><td class="mono">5.0+</td><td class="dim">L2 响应缓存（可选），L1 内存始终可用</td></tr>
+          <tr><td class="dim">工具协议</td><td>mcp</td><td class="mono">1.12.x</td><td class="dim">stdio worker，close() 幂等，锁外 join</td></tr>
+          <tr><td class="dim">语音 (可选)</td><td>livekit-agents + 插件</td><td class="mono">1.6.6</td><td class="dim">精确锁定；Cartesia / MiniMax AI / Silero</td></tr>
+          <tr><td class="dim">文档转换 (可选)</td><td>mineru[pipeline]</td><td class="mono">3.4.4</td><td class="dim">本地 CLI 或 HTTP sidecar；fail-open</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ── DESIGN DECISIONS ── -->
+<section id="decisions">
+  <div class="wrap">
+    <span class="section-label">关键设计决策</span>
+    <div class="decision-grid">
+
+      <div class="decision-card">
+        <div class="num">D · 01</div>
+        <h3>多租户隔离：请求级而非进程级</h3>
+        <p><code>TenantContext</code> 是 frozen dataclass，通过 contextvars 绑定到请求。<code>WorkspaceStoreGuard</code> 在每次写操作前强制校验，违规抛 <code>WorkspaceAccessDenied</code>。<code>bind_inputs()</code> 覆写模型提供的 scope，信任根在服务端。现阶段是基础防护，完整 SaaS 级多租户标注为后续改进项。</p>
+        <div class="tag-row"><span class="pill">tenancy/</span><span class="pill">WorkspaceStoreGuard</span><span class="pill">TenantContext</span></div>
+      </div>
+
+      <div class="decision-card">
+        <div class="num">D · 02</div>
+        <h3>LangChain 作为适配器，非主控制流</h3>
+        <p>AgentLoop、审批门、记忆管道、provider 故障转移都是应用自有边界，LangChain 仅用于结构化 provider 桥接。LangGraph 处理有状态任务图编排。避免框架锁定；离线模式不受 LangChain 缺失影响。</p>
+        <div class="tag-row"><span class="pill">LangChainClient</span><span class="pill">LangGraphTaskOrchestrator</span><span class="pill">providers/</span></div>
+      </div>
+
+      <div class="decision-card">
+        <div class="num">D · 03</div>
+        <h3>插件系统：操作员可信代码，非沙箱</h3>
+        <p>插件通过 <code>artpm-plugin.json</code>（schema_version=1）声明，加载需 6 条件同时满足：启用标志、ID 在 allowlist、SHA-256 校验通过、risk 合法、read_only=false 时必须 requires_approval=true。<code>PluginManager</code> 由服务端创建注入 context，外部代码无法自注册。</p>
+        <div class="tag-row"><span class="pill">plugins/manifest.py</span><span class="pill">PluginPolicy</span><span class="pill">PluginManager</span></div>
+      </div>
+
+      <div class="decision-card">
+        <div class="num">D · 04</div>
+        <h3>MinerU：fail-open 可用性，fail-closed 安全性</h3>
+        <p>CLI 缺失、超时、JSON 非法 → 回落内置解析器（fail-open）。路径穿越、符号链接、超大 archive、输出溢出 → 拒绝不索引（fail-closed）。缓存键含输入 SHA-256 + 后端版本，升级自动失效。远端端点强制 HTTPS（loopback 除外）。</p>
+        <div class="tag-row"><span class="pill">mineru_adapter.py</span><span class="pill">artpm-mineru-v1</span></div>
+      </div>
+
+      <div class="decision-card" style="grid-column:1/-1">
+        <div class="num">D · 05</div>
+        <h3>响应缓存：按工作区隔离的规范化键</h3>
+        <p>旧实现用 <code>_norm()</code> 拼接字符串，两个不同对话可能碰撞同一键；图片以临时路径作键而非内容。新实现：键为 NFC 规范化 JSON（排序键、折叠 CRLF、history 只保留 role/content/name/tool_call_id），schema 标签 <code>response-v2</code>，namespace 从 TenantContext 派生（<code>tenant_id:workspace_id</code>），永不信任调用方传入的 scope。L1 有界内存缓存始终存在；Redis L2 可选；缓存层异常被吞掉，不中断正常回复。</p>
+        <div class="tag-row"><span class="pill">response_cache.py</span><span class="pill">response_cache_namespace()</span><span class="pill">response-v2</span></div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ── QUALITY ── -->
+<section id="quality" style="background:var(--surface)">
+  <div class="wrap">
+    <span class="section-label">质量 · 技术债</span>
+    <div class="two-col">
+
+      <div>
+        <h2 style="margin-bottom:16px;font-size:15px">测试状态</h2>
+        <div class="card" style="padding:0">
+          <div style="padding:4px 0">
+            <div class="stat-row" style="padding:10px 16px"><span style="color:var(--dim)">通过测试数</span><span class="stat-val">1 274</span></div>
+            <div class="stat-row" style="padding:10px 16px"><span style="color:var(--dim)">跳过（集成）</span><span class="stat-val" style="color:var(--dim)">2</span></div>
+            <div class="stat-row" style="padding:10px 16px"><span style="color:var(--dim)">覆盖率（实测）</span><span class="stat-val">72.6%</span></div>
+            <div class="stat-row" style="padding:10px 16px"><span style="color:var(--dim)">覆盖率门槛</span><span class="stat-val" style="color:var(--amber)">70% ✓</span></div>
+            <div class="stat-row" style="padding:10px 16px"><span style="color:var(--dim)">asyncio 模式</span><span class="stat-val" style="color:var(--dim);font-size:12px">auto</span></div>
+            <div class="stat-row" style="padding:10px 16px"><span style="color:var(--dim)">集成测试触发</span><span class="stat-val" style="color:var(--dim);font-size:11px;font-family:monospace">ART_ENABLE_INTEGRATION=1</span></div>
+            <div class="stat-row" style="padding:10px 16px"><span style="color:var(--dim)">性能基准 p95 最差</span><span class="stat-val" style="color:var(--green)">2.68 ms ✓</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h2 style="margin-bottom:16px;font-size:15px">技术债（technical_debt.md）</h2>
+        <div class="card" style="padding:12px 16px">
+          <div class="debt-item"><span class="debt-status status-fixed">已修</span><span>C001 数据库连接泄漏（telemetry _conn()）</span></div>
+          <div class="debt-item"><span class="debt-status status-fixed">已修</span><span>H001 响应缓存跨工作区键碰撞</span></div>
+          <div class="debt-item"><span class="debt-status status-fixed">已修</span><span>H002 辅助 store 泄漏主 schema</span></div>
+          <div class="debt-item"><span class="debt-status status-fixed">已修</span><span>H003 MCP stdio worker join 持锁</span></div>
+          <div class="debt-item"><span class="debt-status status-fixed">已修</span><span>M001 streaming_progress 错误路径误报 COMPLETE</span></div>
+          <div class="debt-item"><span class="debt-status status-fixed">已修</span><span>M002 load_dotenv override=True 覆盖部署密钥</span></div>
+          <div class="debt-item"><span class="debt-status status-open">待排期</span><span>全代码 async/await 迁移</span></div>
+          <div class="debt-item"><span class="debt-status status-open">待排期</span><span>Agent 类分解（当前 1300+ 行）</span></div>
+          <div class="debt-item"><span class="debt-status status-open">待排期</span><span>完整 SaaS 级多租户（RLS / 独立 schema）</span></div>
+          <div class="debt-item"><span class="debt-status status-open">待排期</span><span>FAISS 在网络文件系统 WAL 不稳定</span></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer style="background:var(--surface);border-top:1px solid var(--rim);padding:20px 0">
+  <div class="wrap" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+    <span style="font-size:12px;color:var(--muted)">ArtPM Agent · 分析时间 2026-08 · branch <code style="color:var(--dim)">chore/consolidate-uncommitted-work</code></span>
+    <span style="font-size:12px;color:var(--muted)">Python ≥ 3.10 &nbsp;·&nbsp; 23 主题提交 &nbsp;·&nbsp; 覆盖率 72.6%</span>
+  </div>
+</footer>

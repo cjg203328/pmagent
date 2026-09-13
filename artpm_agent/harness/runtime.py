@@ -15,7 +15,18 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, ContextManager, Mapping, Optional, Protocol, runtime_checkable
+from typing import (
+    Any,
+    ContextManager,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    cast,
+    runtime_checkable,
+)
+
+from artpm_agent.routing.service import IntentDecision
 
 
 class RuntimeCapabilityError(RuntimeError):
@@ -58,6 +69,8 @@ class HarnessRuntime(Protocol):
 
     def detect_intent(self, user_input: str) -> Optional[str]: ...
 
+    def detect_intent_decision(self, user_input: str) -> IntentDecision: ...
+
     def skill_names(self) -> set[str]: ...
 
     def skill_metadata(self, skill_name: str) -> Mapping[str, Any]: ...
@@ -91,7 +104,7 @@ class HarnessRuntime(Protocol):
 
     def vision_attachment_paths(
         self,
-        parsed_files: list[Mapping[str, Any]],
+        parsed_files: Sequence[Mapping[str, Any]],
         visual_semantics: bool,
     ) -> ContextManager[list[str]]: ...
 
@@ -99,7 +112,7 @@ class HarnessRuntime(Protocol):
         self,
         prompt: str,
         system_prompt: str,
-        history: list[Mapping[str, Any]],
+        history: Sequence[Mapping[str, Any]],
         *,
         image_paths: list[str],
     ) -> str: ...
@@ -118,11 +131,19 @@ class BaseHarnessRuntime:
 
     capabilities = RuntimeCapabilities()
     memory_manager: Any = None
-    model_available = False
+    tencentdb_memory: Any = None
     supports_response_cache_scope = False
+
+    @property
+    def model_available(self) -> bool:
+        return False
 
     def detect_intent(self, _user_input: str) -> Optional[str]:
         return None
+
+    def detect_intent_decision(self, user_input: str) -> IntentDecision:
+        result = self.detect_intent(user_input)
+        return _coerce_intent_decision(result, tier="legacy")
 
     def skill_names(self) -> set[str]:
         return set()
@@ -169,7 +190,7 @@ class BaseHarnessRuntime:
 
     def vision_attachment_paths(
         self,
-        _parsed_files: list[Mapping[str, Any]],
+        _parsed_files: Sequence[Mapping[str, Any]],
         _visual_semantics: bool,
     ) -> ContextManager[list[str]]:
         return nullcontext([])
@@ -178,7 +199,7 @@ class BaseHarnessRuntime:
         self,
         _prompt: str,
         _system_prompt: str,
-        _history: list[Mapping[str, Any]],
+        _history: Sequence[Mapping[str, Any]],
         *,
         image_paths: list[str],
     ) -> str:
@@ -245,6 +266,10 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
         return getattr(self.target, "memory", None)
 
     @property
+    def tencentdb_memory(self) -> Any:
+        return getattr(self.target, "tencentdb_memory", None)
+
+    @property
     def model_available(self) -> bool:
         # Preserve the legacy offline contract: a gateway object is created at
         # startup even without credentials, so only a live client means model
@@ -263,7 +288,14 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
         method = getattr(self.target, "_detect_intent", None)
         if not callable(method):
             return None
-        return method(user_input)
+        result = method(user_input)
+        return result if isinstance(result, str) else None
+
+    def detect_intent_decision(self, user_input: str) -> IntentDecision:
+        method = getattr(self.target, "_detect_intent_decision", None)
+        if callable(method):
+            return _coerce_intent_decision(method(user_input), tier="legacy")
+        return _coerce_intent_decision(self.detect_intent(user_input), tier="legacy")
 
     def skill_names(self) -> set[str]:
         skills = getattr(self._router, "skills", {})
@@ -279,6 +311,8 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
         except Exception:  # pragma: no cover - optional registry
             pass
         router = self._router
+        if router is None:
+            return {}
         try:
             for item in router.list_skills():
                 if isinstance(item, Mapping) and item.get("name") == skill_name:
@@ -301,7 +335,7 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
         method = getattr(self.target, "_skill_input_with_history", None)
         if not callable(method):
             raise RuntimeCapabilityError("legacy agent has no skill input builder")
-        return method(user_input, dict(context))
+        return str(method(user_input, dict(context)))
 
     def extract_skill_inputs(
         self,
@@ -360,19 +394,19 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
 
     def vision_attachment_paths(
         self,
-        parsed_files: list[Mapping[str, Any]],
+        parsed_files: Sequence[Mapping[str, Any]],
         visual_semantics: bool,
     ) -> ContextManager[list[str]]:
         method = getattr(self.target, "_vision_attachment_paths", None)
         if not callable(method):
             return nullcontext([])
-        return method(parsed_files, visual_semantics)
+        return cast(ContextManager[list[str]], method(list(parsed_files), visual_semantics))
 
     def chat_with_failover(
         self,
         prompt: str,
         system_prompt: str,
-        history: list[Mapping[str, Any]],
+        history: Sequence[Mapping[str, Any]],
         *,
         image_paths: list[str],
         cache_scope: str = "local:default",
@@ -384,7 +418,7 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
                 gateway_method(
                     prompt,
                     system_prompt,
-                    history,
+                    list(history),
                     image_paths=image_paths,
                     task_type=None,
                     cache_scope=cache_scope,
@@ -397,7 +431,7 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
             method(
                 prompt,
                 system_prompt,
-                history,
+                list(history),
                 image_paths=image_paths,
                 cache_scope=cache_scope,
             )
@@ -453,7 +487,7 @@ def adapt_runtime(runtime: Optional[Any] = None, agent: Optional[Any] = None) ->
     """
 
     if runtime is not None:
-        return runtime
+        return cast(HarnessRuntime, runtime)
     if agent is None:
         return None
     if isinstance(agent, HarnessRuntime):
@@ -463,3 +497,34 @@ def adapt_runtime(runtime: Optional[Any] = None, agent: Optional[Any] = None) ->
     if isinstance(agent, LegacyAgentRuntimeAdapter):
         return agent
     return LegacyAgentRuntimeAdapter(agent)
+
+
+def _coerce_intent_decision(value: Any, *, tier: str = "legacy") -> IntentDecision:
+    """Normalize modern and legacy intent results at the runtime boundary."""
+
+    if isinstance(value, IntentDecision):
+        return value
+    if isinstance(value, Mapping):
+        try:
+            candidates = value.get("candidates", ())
+            if isinstance(candidates, str):
+                candidates = (candidates,)
+            return IntentDecision(
+                intent=value.get("intent"),
+                confidence=value.get("confidence", 0.0),
+                tier=value.get("tier", tier),
+                candidates=tuple(candidates or ()),
+                margin=value.get("margin", 0.0),
+                clarification_required=value.get("clarification_required", False),
+            )
+        except (TypeError, ValueError):
+            return IntentDecision(tier="invalid", clarification_required=True)
+    if isinstance(value, str) and value.strip():
+        return IntentDecision(
+            intent=value,
+            confidence=1.0,
+            tier=tier,
+            candidates=(value,),
+            margin=1.0,
+        )
+    return IntentDecision(tier="none")

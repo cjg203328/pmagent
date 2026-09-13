@@ -14,7 +14,7 @@ from uuid import uuid4
 class ConversationStore:
     """Own an isolated SQLite database for chat conversations."""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
     BUSY_TIMEOUT_MS = 10_000
     DEFAULT_WORKSPACE_ID = "local-default"
     DEFAULT_PROFILE_ID = "local-default"
@@ -143,6 +143,24 @@ class ConversationStore:
                     (2, self._utc_now()),
                 )
 
+            if current_version < 3:
+                columns = {
+                    item[1] for item in conn.execute("PRAGMA table_info(workspaces)")
+                }
+                if "tenant_id" not in columns:
+                    conn.execute("ALTER TABLE workspaces ADD COLUMN tenant_id TEXT")
+                # Keep the built-in local workspace stable. Other legacy rows
+                # remain unbound and are claimed by their first trusted tenant.
+                conn.execute(
+                    "UPDATE workspaces SET tenant_id = ? "
+                    "WHERE id = ? AND (tenant_id IS NULL OR trim(tenant_id) = '')",
+                    ("local", self.DEFAULT_WORKSPACE_ID),
+                )
+                conn.execute(
+                    "INSERT INTO chat_schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (3, self._utc_now()),
+                )
+
             self._ensure_default_workspace(conn)
             violations = conn.execute("PRAGMA foreign_key_check").fetchall()
             if violations:
@@ -158,6 +176,9 @@ class ConversationStore:
                 id TEXT PRIMARY KEY,
                 profile_id TEXT NOT NULL CHECK(length(trim(profile_id)) > 0),
                 name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                -- A workspace is globally unique in storage. Binding it to a
+                -- tenant here prevents reuse under a different identity.
+                tenant_id TEXT,
                 settings_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -250,13 +271,14 @@ class ConversationStore:
         conn.execute(
             """
             INSERT OR IGNORE INTO workspaces(
-                id, profile_id, name, settings_json, created_at, updated_at
-            ) VALUES (?, ?, ?, '{}', ?, ?)
+                id, profile_id, name, tenant_id, settings_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, '{}', ?, ?)
             """,
             (
                 self.DEFAULT_WORKSPACE_ID,
                 self.DEFAULT_PROFILE_ID,
                 self.DEFAULT_WORKSPACE_NAME,
+                "local",
                 now,
                 now,
             ),
@@ -352,6 +374,38 @@ class ConversationStore:
                 (workspace_id,),
             ).fetchone()
         return self._workspace_from_row(row) if row is not None else None
+
+    def ensure_workspace_tenant(self, workspace_id: str, tenant_id: str) -> bool:
+        """Atomically bind a workspace to one tenant identity.
+
+        Existing unbound legacy workspaces are claimed by the first trusted
+        request. Once bound, another tenant can never reuse the workspace.
+        """
+        workspace_id = self._normalize_workspace_id(workspace_id)
+        tenant_id = self._validate_identifier(tenant_id, "tenant_id")
+        with self._connection(write=True) as conn:
+            row = conn.execute(
+                "SELECT tenant_id FROM workspaces WHERE id = ?",
+                (workspace_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            current = str(row["tenant_id"] or "").strip()
+            if current:
+                return current == tenant_id
+            cursor = conn.execute(
+                "UPDATE workspaces SET tenant_id = ?, updated_at = ? "
+                "WHERE id = ? AND (tenant_id IS NULL OR trim(tenant_id) = '')",
+                (tenant_id, self._utc_now(), workspace_id),
+            )
+            if cursor.rowcount:
+                return True
+            # A concurrent writer won the claim; read its committed owner.
+            owner = conn.execute(
+                "SELECT tenant_id FROM workspaces WHERE id = ?",
+                (workspace_id,),
+            ).fetchone()
+            return bool(owner is not None and owner["tenant_id"] == tenant_id)
 
     def list_workspaces(
         self,

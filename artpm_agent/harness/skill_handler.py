@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Optional
 
 from artpm_agent.security.access_mode import access_decision
+from artpm_agent.routing.service import IntentDecision
 
 if TYPE_CHECKING:
     from .turn_service import TurnContext, TurnResult
@@ -157,14 +158,19 @@ def _bind_tenant_inputs(
 
 def _permission_request(ctx: "TurnContext", intent: str, inputs: Mapping[str, Any], metadata: Mapping[str, Any]):
     """Create one idempotent, server-owned request for a sensitive Skill."""
-    store = ctx.extra.get("permission_store") if isinstance(ctx.extra, dict) else None
+    service_bundle = getattr(ctx, "services", None)
+    store = (
+        getattr(service_bundle, "permission_store", None)
+        if service_bundle is not None
+        else None
+    )
+    if store is None and isinstance(ctx.extra, dict):
+        store = ctx.extra.get("permission_store")
     if store is None or not callable(getattr(store, "create_request", None)):
         raise RuntimeError("permission store is unavailable for a protected Skill")
-    workspace_id = (
-        ctx.extra.get("workspace_id")
-        or getattr(store, "DEFAULT_WORKSPACE_ID", None)
-        or "local-default"
-    )
+    from .turn_service import get_turn_scope
+
+    workspace_id = get_turn_scope(ctx).workspace_id
     risk = str(metadata.get("risk") or "medium").casefold()
     if risk not in {"low", "medium", "high", "critical", "untrusted"}:
         risk = "untrusted"
@@ -230,16 +236,56 @@ def try_skill_routing(
     if runtime is None or not runtime.capabilities.skill_routing:
         return None
 
-    # Skip intent detection if attachments present
+    # The attachment gate is itself a routing decision. Keep it on the turn
+    # context so streaming/compatibility adapters do not classify the same
+    # prompt a second time later in the request.
     if has_attachments:
+        ctx.intent = None
+        ctx.intent_checked = True
         return None
 
-    # Try intent detection (three-tier: keyword → embedding → LLM)
-    try:
-        intent = runtime.detect_intent(ctx.user_input)
-    except Exception as error:
-        logger.warning(f"Intent detection failed: {error}")
-        return None
+    # Try intent detection (three-tier: keyword -> embedding -> LLM) once per
+    # turn. The cached value is also available to telemetry and UI adapters.
+    if ctx.intent_checked:
+        intent = ctx.intent
+        decision = ctx.intent_decision or IntentDecision(intent=intent, confidence=1.0)
+    else:
+        try:
+            detector = getattr(runtime, "detect_intent_decision", None)
+            decision = detector(ctx.user_input) if callable(detector) else None
+            if not isinstance(decision, IntentDecision):
+                intent = runtime.detect_intent(ctx.user_input)
+                decision = IntentDecision(
+                    intent=intent,
+                    confidence=1.0 if intent else 0.0,
+                    tier="legacy",
+                    candidates=(intent,) if intent else (),
+                )
+            else:
+                intent = decision.intent
+        except Exception as error:
+            logger.warning(f"Intent detection failed: {error}")
+            intent = None
+            decision = IntentDecision(tier="error", clarification_required=True)
+        ctx.intent = intent
+        ctx.intent_decision = decision
+        ctx.intent_checked = True
+
+    decision_metadata = {"intent_decision": decision.as_dict()}
+    if decision.clarification_required:
+        candidates = "、".join(decision.candidates[:2]) or "相关功能"
+        from .turn_service import TurnResult
+
+        return TurnResult(
+            response=f"我识别到可能涉及：{candidates}。请明确你希望执行的具体操作。",
+            success=True,
+            handled_by="intent_clarification",
+            metadata={
+                "turn_id": ctx.turn_id,
+                "conversation_id": ctx.conversation_id,
+                **decision_metadata,
+            },
+        )
 
     if not intent:
         return None
@@ -248,6 +294,8 @@ def try_skill_routing(
         return None
 
     # Intent matched, try executing the skill
+    tool_started = False
+    tool_finished = False
     try:
         # Build skill input with conversation history
         skill_input = runtime.build_skill_input(
@@ -302,6 +350,7 @@ def try_skill_routing(
                     "turn_id": ctx.turn_id,
                     "conversation_id": ctx.conversation_id,
                     "skill_name": intent,
+                    **decision_metadata,
                     "error_code": "workspace_access_denied",
                 },
             )
@@ -311,8 +360,14 @@ def try_skill_routing(
             inputs,
         )
         permission_required = _requires_permission(metadata)
+        access_context = dict(ctx.extra)
+        service_bundle = getattr(ctx, "services", None)
+        if service_bundle is not None:
+            permission_store = service_bundle.get("permission_store")
+            if permission_store is not None:
+                access_context["permission_store"] = permission_store
         mode_decision = access_decision(
-            ctx.extra,
+            access_context,
             read_only=metadata.get("read_only") is True,
             requires_approval=permission_required,
             risk=str(metadata.get("risk") or "untrusted"),
@@ -346,6 +401,7 @@ def try_skill_routing(
                         "turn_id": ctx.turn_id,
                         "conversation_id": ctx.conversation_id,
                         "skill_name": intent,
+                        **decision_metadata,
                         "permission_status": "persistence_failed",
                     },
                 )
@@ -364,6 +420,7 @@ def try_skill_routing(
                             "permission_request_id": request.id,
                             "permission_status": request.status,
                             "skill_name": intent,
+                            **decision_metadata,
                         },
                     )
                 if request.status in {"approved", "executing"}:
@@ -378,6 +435,7 @@ def try_skill_routing(
                             "permission_request_id": request.id,
                             "permission_status": request.status,
                             "skill_name": intent,
+                            **decision_metadata,
                         },
                     )
                 return TurnResult(
@@ -395,6 +453,7 @@ def try_skill_routing(
                         "permission_request_id": request.id,
                         "permission_status": request.status,
                         "skill_name": intent,
+                        **decision_metadata,
                     },
                 )
 
@@ -409,8 +468,38 @@ def try_skill_routing(
                 f"full-access:{ctx.conversation_id}:{ctx.turn_id}:{intent}",
             )
 
-        # Execute skill
+        # Execute skill through the same lifecycle recorder used by the turn
+        # service. Approval events are recorded separately; this pair means a
+        # tool actually crossed the execution boundary.
+        from artpm_agent.runtime.events import AgentEventType
+        from artpm_agent.runtime.turn_events import recorder_for_turn
+
+        recorder = recorder_for_turn(ctx)
+        audit_inputs = {
+            "keys": sorted(str(key) for key in inputs),
+            "skill_name": intent,
+        }
+        recorder.emit(
+            ctx,
+            AgentEventType.TOOL_EXECUTION_START,
+            tool_name=intent,
+            tool_arguments=audit_inputs,
+            metadata={"kind": "skill"},
+        )
+        tool_started = True
         result = runtime.execute_skill(intent, inputs)
+        recorder.emit(
+            ctx,
+            AgentEventType.TOOL_EXECUTION_END,
+            tool_name=intent,
+            tool_arguments=audit_inputs,
+            tool_result={
+                "success": bool(result.get("success")),
+                "error": str(result.get("error") or "")[:400],
+            },
+            metadata={"kind": "skill"},
+        )
+        tool_finished = True
 
         if not result.get("success"):
             # Skill execution failed, let it fall back to LLM
@@ -440,10 +529,25 @@ def try_skill_routing(
                 "conversation_id": ctx.conversation_id,
                 "skill_name": intent,
                 "skill_success": True,
+                **decision_metadata,
             },
         )
 
     except Exception as error:
+        if tool_started and not tool_finished:
+            try:
+                from artpm_agent.runtime.events import AgentEventType
+                from artpm_agent.runtime.turn_events import recorder_for_turn
+
+                recorder_for_turn(ctx).emit(
+                    ctx,
+                    AgentEventType.TOOL_EXECUTION_END,
+                    tool_name=intent,
+                    error=str(error) or error.__class__.__name__,
+                    metadata={"kind": "skill"},
+                )
+            except Exception:  # noqa: BLE001 - audit must not mask routing failure
+                logger.warning("Skill audit event failed", exc_info=True)
         logger.warning(
             f"Skill {intent} routing failed, will fallback to model: {error}"
         )

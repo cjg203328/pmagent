@@ -18,7 +18,7 @@ class SQLiteManager:
         "quotes": {"id", "project_id", "document_type", "file_path", "file_hash", "parsed_data", "profit_analysis", "confidence", "created_at"},
         "progress_updates": {"id", "task_id", "progress", "note", "updated_by", "updated_at"},
         "reminders": {"id", "task_id", "reminder_type", "content", "recipients", "channel", "sent_status", "scheduled_at", "sent_at"},
-        "documents": {"id", "document_type", "source", "file_path", "file_hash", "extracted_data", "raw_text", "confidence", "created_at"},
+        "documents": {"id", "tenant_id", "workspace_id", "document_type", "source", "file_path", "file_hash", "extracted_data", "raw_text", "confidence", "created_at"},
         "operation_logs": {"id", "operation", "skill_name", "inputs", "outputs", "success", "error", "created_at"},
     }
     _PRIMARY_SCHEMA_DROP_ORDER = (
@@ -179,6 +179,8 @@ class SQLiteManager:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS documents (
                     id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
+                    workspace_id TEXT NOT NULL DEFAULT 'local-default',
                     document_type TEXT,
                     source TEXT,
                     file_path TEXT,
@@ -189,6 +191,8 @@ class SQLiteManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            self._ensure_documents_workspace_scope(conn)
 
             # Operation logs table
             cursor.execute("""
@@ -206,6 +210,27 @@ class SQLiteManager:
 
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(project_id, status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(document_type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_documents_workspace_type ON documents(workspace_id, document_type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_documents_tenant_workspace_type ON documents(tenant_id, workspace_id, document_type)")
+
+    @staticmethod
+    def _ensure_documents_workspace_scope(conn: sqlite3.Connection) -> None:
+        """Migrate the legacy document store before accepting scoped queries."""
+
+        columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(documents)").fetchall()
+        }
+        if "workspace_id" not in columns:
+            conn.execute(
+                "ALTER TABLE documents ADD COLUMN workspace_id TEXT NOT NULL "
+                "DEFAULT 'local-default'"
+            )
+        if "tenant_id" not in columns:
+            conn.execute(
+                "ALTER TABLE documents ADD COLUMN tenant_id TEXT NOT NULL "
+                "DEFAULT 'local'"
+            )
 
     def remove_empty_primary_schema_scaffold(self) -> bool:
         """Remove the old auto-created business schema from an auxiliary DB.

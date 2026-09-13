@@ -2,11 +2,14 @@
 
 from pathlib import Path
 
+import pytest
+
 from artpm_agent.evolution.meta_memory import (
     MetaMemory,
     MetaMemoryStore,
     format_meta_memory_context,
 )
+from artpm_agent.tenancy import TenantContext, TenantContextManager, WorkspaceAccessDenied
 
 
 class _FakeKnowledgeStore:
@@ -117,6 +120,67 @@ def test_meta_store_persists_and_counts_gaps(tmp_path: Path):
     assert len(top) == 1
     assert top[0]["seen_count"] == 2
     assert top[0]["topic"] == "主题X"
+
+
+def test_meta_store_isolates_same_topic_by_tenant_workspace_and_principal(
+    tmp_path: Path,
+):
+    store = MetaMemoryStore(tmp_path / "meta-scoped.db")
+    from artpm_agent.evolution.meta_memory import KnowledgeGap
+
+    gap = KnowledgeGap("shared-topic", "unknown", "ask_user", "missing", 0.0)
+    store.record_gaps(
+        [gap],
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+        principal_id="user-a",
+    )
+    store.record_gaps(
+        [gap],
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+        principal_id="user-b",
+    )
+    store.record_gaps(
+        [gap],
+        tenant_id="tenant-b",
+        workspace_id="workspace-b",
+        principal_id="user-a",
+    )
+
+    user_a = store.top_gaps(
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+        principal_id="user-a",
+    )
+    user_b = store.top_gaps(
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+        principal_id="user-b",
+    )
+    other_tenant = store.top_gaps(
+        tenant_id="tenant-b",
+        workspace_id="workspace-b",
+        principal_id="user-a",
+    )
+
+    assert user_a[0]["seen_count"] == 1
+    assert user_b[0]["seen_count"] == 1
+    assert other_tenant[0]["seen_count"] == 1
+
+    with TenantContextManager.use(
+        TenantContext(
+            tenant_id="tenant-a",
+            workspace_id="workspace-a",
+            principal_id="user-a",
+        )
+    ):
+        with pytest.raises(WorkspaceAccessDenied):
+            store.top_gaps(
+                tenant_id="tenant-b",
+                workspace_id="workspace-b",
+                principal_id="user-a",
+            )
 
 
 def test_empty_input_returns_empty_report():

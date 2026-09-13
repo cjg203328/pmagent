@@ -9,6 +9,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      PYTEST_ADDOPTS: --timeout=120
     strategy:
       matrix:
         python-version: ['3.10', '3.11', '3.12']
@@ -32,23 +34,29 @@ jobs:
       run: mypy artpm_agent --ignore-missing-imports
       continue-on-error: true
 
-    # Coverage source, reports, and the fail-under gate all come from
-    # pytest.ini so local runs and CI cannot drift apart.
-    - name: Run tests with coverage
-      run: pytest -v
+    - name: Run offline tests
+      run: pytest -q --no-cov -m "not integration and not benchmark"
+
+    - name: Run focused coverage gate
+      run: python scripts/coverage_core.py
 
     - name: Run integration tests
-      run: pytest tests/integration/ -v
+      # Run every explicitly marked integration contract, including the live
+      # MCP probe that lives beside the unit tests.  Missing external
+      # credentials are handled as explicit skips by the test fixtures.
+      run: pytest tests/integration/ tests/test_mcp.py -v
       env:
         ART_ENABLE_INTEGRATION: "1"
-      continue-on-error: true
+
+    - name: Run benchmark tests
+      run: pytest tests/test_phase1_optimizations.py -m benchmark -v --no-cov
 
     - name: Run offline performance regression gate
       run: >-
         python -m benchmarks.core_performance
         --samples 12
         --warmups 2
-        --output artifacts/core-performance.json
+        --output artifacts/benchmarks/core-performance.json
         --enforce
 
     - name: Upload performance report
@@ -56,13 +64,13 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: core-performance-${{ matrix.python-version }}-${{ github.run_id }}
-        path: artifacts/core-performance.json
+        path: artifacts/benchmarks/core-performance.json
         if-no-files-found: warn
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
       with:
-        file: ./coverage.xml
+        file: ./artifacts/quality/coverage.xml
         flags: python-${{ matrix.python-version }}
         fail_ci_if_error: false
 
@@ -133,4 +141,3 @@ jobs:
         docker push "${{ secrets.DOCKER_USERNAME }}/artpm-agent:${{ github.sha }}"
         docker tag "${{ secrets.DOCKER_USERNAME }}/artpm-agent:${{ github.sha }}" "${{ secrets.DOCKER_USERNAME }}/artpm-agent:latest"
         docker push "${{ secrets.DOCKER_USERNAME }}/artpm-agent:latest"
-

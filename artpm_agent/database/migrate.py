@@ -4,8 +4,8 @@ Alembic 迁移运行器（程序化调用）
 
 在 DatabaseManager 初始化时安全接入 Alembic 迁移：
 
-- alembic 为可选依赖；未安装时 ensure_schema 抛 ImportError，由调用方回退 create_all
-- 已有业务表但无 alembic_version：仅 stamp head（绝不执行 DDL，零数据风险）
+- alembic 是受管数据库的运行时依赖；缺失时 ensure_schema 抛错
+- 已有业务表但无 alembic_version：从已验证的初始基线继续执行迁移
 - 全新库：执行 upgrade head 创建全部表并写入版本
 - 已标记版本：upgrade head 为幂等 no-op
 
@@ -20,16 +20,29 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+INITIAL_REVISION = "a177eb93a550"
+
 # alembic 脚手架位于仓库根的 alembic/ 目录
-ALEMBIC_DIR = Path(__file__).resolve().parents[2] / "alembic"
+def _alembic_dir() -> Path:
+    configured = os.environ.get("ARTPM_ALEMBIC_DIR", "").strip()
+    candidates = [
+        Path(configured).expanduser() if configured else None,
+        Path.cwd() / "alembic",
+        Path(__file__).resolve().parents[2] / "alembic",
+    ]
+    for candidate in candidates:
+        if candidate is not None and (candidate / "env.py").is_file():
+            return candidate.resolve()
+    raise RuntimeError("Alembic migration scripts are not available")
 
 
 def _make_config(engine=None):
     from alembic.config import Config
 
-    ini_path = ALEMBIC_DIR / "alembic.ini"
+    alembic_dir = _alembic_dir()
+    ini_path = alembic_dir.parent / "alembic.ini"
     cfg = Config(str(ini_path))
-    cfg.set_main_option("script_location", str(ALEMBIC_DIR))
+    cfg.set_main_option("script_location", str(alembic_dir))
     if engine is not None:
         # 让迁移作用于与 DatabaseManager 完全相同的库
         cfg.set_main_option("sqlalchemy.url", str(engine.url))
@@ -39,7 +52,7 @@ def _make_config(engine=None):
 
 
 def _require_alembic():
-    """alembic 为可选依赖；缺失时显式抛错，交由调用方回退 create_all。"""
+    """Require Alembic before touching a managed database schema."""
     import alembic  # noqa: F401
     return True
 
@@ -71,12 +84,19 @@ def stamp_head(engine=None):
     command.stamp(_make_config(engine), "head")
 
 
+def stamp_revision(revision: str, engine=None):
+    """Mark a verified legacy schema at a specific migration baseline."""
+    from alembic import command
+
+    command.stamp(_make_config(engine), revision)
+
+
 def ensure_schema(engine=None):
     """
     在 DatabaseManager 初始化时安全接入 Alembic。
 
-    - alembic 不可用 -> 抛 ImportError（调用方应回退 create_all）
-    - 已有业务表但无 alembic_version -> 仅 stamp head（不执行 DDL，零数据风险）
+    - alembic 不可用 -> 抛 ImportError
+    - 已有业务表但无 alembic_version -> 从初始基线继续执行剩余迁移
     - 否则执行 upgrade head
     """
     _require_alembic()
@@ -91,8 +111,12 @@ def ensure_schema(engine=None):
             existing & {table.name for table in _metadata().sorted_tables}
         )
         if not has_version and has_app_tables:
-            logger.info("检测到既有数据库，标记 Alembic 版本（不改动表结构）")
-            stamp_head(engine)
+            logger.info(
+                "检测到无版本标记的既有数据库，从初始基线 %s 继续迁移",
+                INITIAL_REVISION,
+            )
+            stamp_revision(INITIAL_REVISION, engine)
+            upgrade_head(engine)
             return
 
     upgrade_head(engine)

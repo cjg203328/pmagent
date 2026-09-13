@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 
-_CACHE_SCHEMA = "response-v2"
+_CACHE_SCHEMA = "response-v3"
 _DEFAULT_NAMESPACE = "local:default"
 _HISTORY_FIELDS = ("role", "content", "name", "tool_call_id")
 
@@ -100,7 +100,6 @@ class ResponseCache:
         self._store: "OrderedDict[str, _CacheEntry]" = OrderedDict()
         self._lock = threading.RLock()
         self._flights: dict[str, threading.Event] = {}
-        self._image_fingerprints: dict[tuple[str, int, int], str] = {}
         self._stats = {
             "lookups": 0,
             "hits": 0,
@@ -116,8 +115,14 @@ class ResponseCache:
             for key in ("sha256", "content_sha256", "digest"):
                 digest = _text(value.get(key))
                 if digest:
-                    return {"sha256": digest, "page": value.get("page")}
-            return _canonical(value)
+                    return {"sha256": digest.lower(), "page": value.get("page")}
+            content = value.get("content") or value.get("bytes")
+            if isinstance(content, bytes):
+                return {"sha256": hashlib.sha256(content).hexdigest()}
+            raise ValueError("image mappings require a content digest or bytes")
+
+        if isinstance(value, bytes):
+            return {"sha256": hashlib.sha256(value).hexdigest(), "size": len(value)}
 
         raw_path = _text(value)
         if not raw_path:
@@ -125,23 +130,16 @@ class ResponseCache:
         try:
             path = Path(raw_path)
             stat = path.stat()
-            marker = (str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns))
-            with self._lock:
-                cached = self._image_fingerprints.get(marker)
-            if cached:
-                return {"sha256": cached, "size": stat.st_size}
             digest = hashlib.sha256()
             with path.open("rb") as handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     digest.update(chunk)
             fingerprint = digest.hexdigest()
-            with self._lock:
-                self._image_fingerprints[marker] = fingerprint
-                if len(self._image_fingerprints) > self.max_size * 2:
-                    self._image_fingerprints.pop(next(iter(self._image_fingerprints)))
             return {"sha256": fingerprint, "size": stat.st_size}
-        except (OSError, ValueError):
-            return {"reference": raw_path}
+        except (OSError, ValueError) as error:
+            # A path is not image identity. Treat unreadable content as
+            # uncacheable so reused temporary paths can never collide.
+            raise ValueError("image content is unavailable for hashing") from error
 
     def _key(
         self,

@@ -68,7 +68,8 @@ def test_legacy_tables_migration_is_idempotent_on_existing_db(tmp_path):
             text("SELECT version_num FROM alembic_version")
         ).fetchone()[0]
     # 已升级到 0002（head）
-    assert version == "b1c2d3e4f506"
+    # Head now includes the tenant ownership and PostgreSQL RLS migration.
+    assert version == "c2d3e4f50617"
     # 6 张遗留表仍在，未被重建
     assert {
         "staff", "quotes", "reminders",

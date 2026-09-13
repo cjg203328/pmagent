@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from html import escape
 import logging
 import os
 import re
@@ -207,8 +208,22 @@ def render_error_callback(
             unsafe_allow_html=True,
         )
         severity = str(info.get("severity", "error")).casefold()
-        renderer = getattr(st, severity, st.error)
-        renderer(str(info.get("message", "请求处理失败，请稍后重试。")))
+        if severity not in {"error", "warning", "info", "success"}:
+            severity = "error"
+        message = escape(
+            str(info.get("message", "请求处理失败，请稍后重试。")),
+            quote=True,
+        )
+        st.markdown(
+            (
+                f'<div class="pm-error-summary pm-error-summary--{severity}" '
+                'role="alert" aria-live="polite">'
+                '<span class="pm-error-summary-icon" aria-hidden="true">!</span>'
+                f'<span class="pm-error-summary-copy">{message}</span>'
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
 
         suggestions = [
             str(item).strip()
@@ -216,7 +231,7 @@ def render_error_callback(
             if str(item).strip()
         ][:3]
         if suggestions:
-            with st.expander("处理建议", expanded=True):
+            with st.expander("查看处理建议", expanded=False):
                 for suggestion in suggestions:
                     st.markdown(f"- {suggestion}")
         st.caption(f"错误编号：{info.get('error_id', 'unknown')}")
@@ -236,13 +251,15 @@ def render_error_callback(
                     retry_label,
                     key=f"{key}_retry",
                     type="primary",
-                    width="stretch",
+                    icon=":material/refresh:",
+                    width="content",
                 ):
                     return "retry"
                 if action == "dismiss" and st.button(
                     dismiss_label,
                     key=f"{key}_dismiss",
-                    width="stretch",
+                    icon=":material/close:",
+                    width="content",
                 ):
                     st.session_state[dismissed_key] = True
                     return "dismiss"

@@ -139,7 +139,7 @@ Test completed!
 | 文档 | 用途 | 推荐度 |
 |------|------|-------|
 | [REAL_MCP_QUICKSTART.md](REAL_MCP_QUICKSTART.md) | 快速开始 | ⭐⭐⭐⭐⭐ |
-| [LOCAL_MCP_GUIDE.md](LOCAL_MCP_GUIDE.md) | 详细指南 | ⭐⭐⭐⭐ |
+| [LOCAL_MCP_GUIDE.md](../integrations/LOCAL_MCP_GUIDE.md) | 详细指南 | ⭐⭐⭐⭐ |
 
 ---
 

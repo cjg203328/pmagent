@@ -246,6 +246,37 @@ def test_inject_propagates_workspace_scope_to_retrieval():
     assert any(call.get("workspace_id") == "studio-b" for call in ks.calls)
 
 
+def test_inject_includes_accepted_workspace_rules():
+    class RuleStore:
+        DEFAULT_WORKSPACE_ID = "local-default"
+
+        def get_active_rules(self, *, workspace_id, limit):
+            assert workspace_id == "studio-b"
+            return [{"statement": "交付物必须带版本号"}][:limit]
+
+        def search(self, *_args, **_kwargs):
+            return []
+
+    empty_store = type("EmptyStore", (), {"active": lambda self: []})()
+    ctx = SimpleNamespace(
+        agent=None,
+        conversation_id="conversation-rules",
+        user_input="交付物有什么规则",
+        conversation_history=[],
+        knowledge_context="",
+        extra={"workspace_id": "studio-b"},
+    )
+
+    inject_memory_context(
+        ctx,
+        knowledge_store=RuleStore(),
+        feedback_store=empty_store,
+        strategy_store=empty_store,
+    )
+
+    assert "交付物必须带版本号" in ctx.knowledge_context
+
+
 def test_inject_with_feedback_and_strategy(tmp_path):
     fb = FeedbackStore(str(tmp_path / "fb.db"))
     fb.add("avoid", "别用 skill_x", scope="global")

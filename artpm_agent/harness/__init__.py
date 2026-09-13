@@ -8,7 +8,14 @@ and persistence coordination without embedding them in the UI or agent core.
 Refs: PI_ARCHITECTURE_ADOPTION.md Phase 3
 """
 
-from .turn_service import TurnContext, TurnResult, run_turn
+from .turn_service import (
+    TurnContext,
+    TurnResult,
+    TurnScope,
+    complete_turn_lifecycle,
+    get_turn_scope,
+    run_turn,
+)
 from .profile_handler import try_profile_proposal
 from .knowledge_handler import try_knowledge_ingestion, is_knowledge_ingestion_request
 from .knowledge_rule_handler import try_knowledge_rule_proposal
@@ -25,6 +32,7 @@ from .runtime import (
     RuntimeCapabilityError,
     adapt_runtime,
 )
+from artpm_agent.runtime.turn_events import TurnEventRecorder, recorder_for_turn
 from .attachment_pipeline import (
     parse_context_attachments,
     vision_attachment_paths,
@@ -33,6 +41,9 @@ from .attachment_pipeline import (
 __all__ = [
     "TurnContext",
     "TurnResult",
+    "TurnScope",
+    "get_turn_scope",
+    "complete_turn_lifecycle",
     "run_turn",
     "try_profile_proposal",
     "try_knowledge_ingestion",
@@ -50,6 +61,8 @@ __all__ = [
     "RuntimeCapabilities",
     "RuntimeCapabilityError",
     "adapt_runtime",
+    "TurnEventRecorder",
+    "recorder_for_turn",
     "parse_context_attachments",
     "vision_attachment_paths",
 ]

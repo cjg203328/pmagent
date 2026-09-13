@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from artpm_agent.memory.sqlite_manager import SQLiteManager
+from artpm_agent.tenancy import TenantContextManager, WorkspaceAccessDenied
 from artpm_agent.utils import generate_uuid
 
 
@@ -36,6 +37,9 @@ class FeedbackEntry:
     kind: str
     content: str
     scope: str = "global"          # global | handler name | skill name | client
+    tenant_id: str = "local"
+    workspace_id: str = "local-default"
+    principal_id: str = ""
     weight: float = 1.0
     active: bool = True
     id: str = ""
@@ -48,6 +52,9 @@ class FeedbackEntry:
             "kind": self.kind,
             "content": self.content,
             "scope": self.scope,
+            "tenant_id": self.tenant_id,
+            "workspace_id": self.workspace_id,
+            "principal_id": self.principal_id,
             "weight": float(self.weight),
             "active": int(bool(self.active)),
             "created_at": self.created_at or datetime.now(timezone.utc).isoformat(),
@@ -61,6 +68,9 @@ def _row_to_entry(row: sqlite3.Row) -> FeedbackEntry:
         kind=row["kind"],
         content=row["content"],
         scope=row["scope"] or "global",
+        tenant_id=row["tenant_id"] or "local",
+        workspace_id=row["workspace_id"] or "local-default",
+        principal_id=row["principal_id"] or "",
         weight=float(row["weight"]),
         active=bool(row["active"]),
         created_at=row["created_at"] or "",
@@ -86,6 +96,9 @@ class FeedbackStore:
                     kind TEXT,
                     content TEXT,
                     scope TEXT,
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
+                    workspace_id TEXT NOT NULL DEFAULT 'local-default',
+                    principal_id TEXT NOT NULL DEFAULT '',
                     weight REAL,
                     active INTEGER,
                     created_at TEXT,
@@ -93,12 +106,55 @@ class FeedbackStore:
                 )
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(feedback)").fetchall()
+            }
+            for name, definition in (
+                ("tenant_id", "TEXT NOT NULL DEFAULT 'local'"),
+                ("workspace_id", "TEXT NOT NULL DEFAULT 'local-default'"),
+                ("principal_id", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE feedback ADD COLUMN {name} {definition}")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_feedback_scope ON feedback(scope)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_feedback_active ON feedback(active)"
             )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_feedback_workspace "
+                "ON feedback(tenant_id, workspace_id, principal_id, active)"
+            )
+
+    @staticmethod
+    def _resolve_scope(
+        tenant_id: Optional[str],
+        workspace_id: Optional[str],
+        principal_id: Optional[str],
+    ) -> tuple[str, str, str]:
+        current = TenantContextManager.get_current()
+        if current is not None:
+            requested_tenant = str(tenant_id or "").strip()
+            requested_workspace = str(workspace_id or "").strip()
+            requested_principal = str(principal_id or "").strip()
+            if requested_tenant and requested_tenant != current.tenant_id:
+                raise WorkspaceAccessDenied("tenant does not match the authenticated context")
+            if requested_workspace and requested_workspace != current.workspace_id:
+                raise WorkspaceAccessDenied(
+                    "workspace does not match the authenticated context"
+                )
+            if requested_principal and requested_principal != current.principal_id:
+                raise WorkspaceAccessDenied(
+                    "principal does not match the authenticated context"
+                )
+            return current.tenant_id, current.workspace_id, current.principal_id
+        return (
+            str(tenant_id or "local").strip() or "local",
+            str(workspace_id or "local-default").strip() or "local-default",
+            str(principal_id or "").strip(),
+        )
 
     # ── writes ──
     def add(
@@ -107,14 +163,23 @@ class FeedbackStore:
         content: str,
         *,
         scope: str = "global",
+        tenant_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        principal_id: Optional[str] = None,
         weight: float = 1.0,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Persist a feedback/preference entry; returns its id."""
+        resolved_tenant, resolved_workspace, resolved_principal = self._resolve_scope(
+            tenant_id, workspace_id, principal_id
+        )
         entry = FeedbackEntry(
             kind=kind,
             content=content,
             scope=scope,
+            tenant_id=resolved_tenant,
+            workspace_id=resolved_workspace,
+            principal_id=resolved_principal,
             weight=weight,
             metadata=metadata or {},
         )
@@ -123,14 +188,19 @@ class FeedbackStore:
             conn.execute(
                 """
                 INSERT INTO feedback (
-                    id, kind, content, scope, weight, active, created_at, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    id, kind, content, scope,
+                    tenant_id, workspace_id, principal_id,
+                    weight, active, created_at, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["id"],
                     row["kind"],
                     row["content"],
                     row["scope"],
+                    row["tenant_id"],
+                    row["workspace_id"],
+                    row["principal_id"],
                     row["weight"],
                     row["active"],
                     row["created_at"],
@@ -155,7 +225,13 @@ class FeedbackStore:
 
     # ── reads ──
     def active(
-        self, *, kind: Optional[str] = None, scope: Optional[str] = None
+        self,
+        *,
+        kind: Optional[str] = None,
+        scope: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        principal_id: Optional[str] = None,
     ) -> List[FeedbackEntry]:
         """Return active entries, optionally filtered by kind / scope."""
         clauses = ["active = 1"]
@@ -166,6 +242,24 @@ class FeedbackStore:
         if scope:
             clauses.append("(scope = ? OR scope = 'global')")
             params.append(scope)
+        current = TenantContextManager.get_current()
+        scoped = current is not None or any(
+            value is not None for value in (tenant_id, workspace_id, principal_id)
+        )
+        if scoped:
+            resolved_tenant, resolved_workspace, resolved_principal = self._resolve_scope(
+                tenant_id, workspace_id, principal_id
+            )
+            clauses.extend(
+                [
+                    "tenant_id = ?",
+                    "workspace_id = ?",
+                    "(principal_id = ? OR principal_id = '')",
+                ]
+            )
+            params.extend(
+                [resolved_tenant, resolved_workspace, resolved_principal]
+            )
         sql = (
             "SELECT * FROM feedback WHERE "
             + " AND ".join(clauses)

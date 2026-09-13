@@ -61,6 +61,7 @@ def clean_test_cache(root_dir: Path) -> int:
         root_dir / ".pytest_cache",
         root_dir / ".ruff_cache",
         root_dir / "htmlcov",
+        root_dir / "artifacts" / "quality" / "htmlcov",
     ]
 
     for cache_dir in cache_dirs:
@@ -68,8 +69,15 @@ def clean_test_cache(root_dir: Path) -> int:
             shutil.rmtree(cache_dir)
             dirs_removed += 1
 
-    # 删除 coverage 文件
-    for coverage_file in [root_dir / ".coverage", root_dir / "coverage.xml"]:
+    # 删除 coverage 文件 from the root and the organized quality-artifact dir.
+    quality_dir = root_dir / "artifacts" / "quality"
+    for coverage_file in [
+        root_dir / ".coverage",
+        root_dir / "coverage.xml",
+        quality_dir / ".coverage",
+        quality_dir / "coverage.xml",
+        quality_dir / "coverage.json",
+    ]:
         if coverage_file.exists():
             coverage_file.unlink()
             dirs_removed += 1

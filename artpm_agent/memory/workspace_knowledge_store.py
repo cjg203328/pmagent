@@ -9,11 +9,15 @@ import json
 from pathlib import Path
 import sqlite3
 from threading import Lock, RLock
-from typing import Any, Iterable, Iterator, Mapping, Optional
+from typing import Any, Iterable, Iterator, Mapping, Optional, cast
 from uuid import uuid4
 
 from .embeddings import DeterministicEmbeddingProvider, EmbeddingProvider
 from .vector_store import VectorStore
+from artpm_agent.tenancy import (
+    TenantContextManager,
+    WorkspaceAccessDenied,
+)
 
 
 _VECTOR_LOCKS_GUARD = Lock()
@@ -33,7 +37,8 @@ class KnowledgeProposalConflictError(RuntimeError):
 class WorkspaceKnowledgeStore:
     """Store versioned knowledge without coupling ingestion to a parser or LLM."""
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 5
+    DEFAULT_TENANT_ID = "local"
     DEFAULT_WORKSPACE_ID = "local-default"
     MAX_SEARCHABLE_TEXT_CHARS = 2_000_000
     MAX_SEARCH_LIMIT = 100
@@ -82,6 +87,9 @@ class WorkspaceKnowledgeStore:
         )
         self._vector_lock = _vector_sync_lock(self.vector_store_path)
         self.last_search_mode = "not-searched"
+        self.sync_pending = bool(
+            self.vector_store is not None and self.vector_store.needs_rebuild
+        )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.db_path), timeout=10)
@@ -141,6 +149,7 @@ class WorkspaceKnowledgeStore:
                     """
                     CREATE TABLE knowledge_resources (
                         id TEXT PRIMARY KEY,
+                        tenant_id TEXT NOT NULL DEFAULT 'local',
                         workspace_id TEXT NOT NULL,
                         title TEXT NOT NULL CHECK(length(trim(title)) > 0),
                         resource_type TEXT NOT NULL,
@@ -153,11 +162,12 @@ class WorkspaceKnowledgeStore:
                         metadata_json TEXT NOT NULL DEFAULT '{}',
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
-                        UNIQUE(workspace_id, source_type, source_id)
+                        UNIQUE(tenant_id, workspace_id, source_type, source_id)
                     );
 
                     CREATE TABLE knowledge_versions (
                         resource_id TEXT NOT NULL,
+                        tenant_id TEXT NOT NULL DEFAULT 'local',
                         version INTEGER NOT NULL CHECK(version > 0),
                         content_hash TEXT NOT NULL,
                         searchable_text TEXT NOT NULL,
@@ -176,6 +186,7 @@ class WorkspaceKnowledgeStore:
 
                     CREATE TABLE knowledge_rules (
                         id TEXT PRIMARY KEY,
+                        tenant_id TEXT NOT NULL DEFAULT 'local',
                         workspace_id TEXT NOT NULL,
                         statement TEXT NOT NULL CHECK(length(trim(statement)) > 0),
                         scope TEXT NOT NULL,
@@ -216,6 +227,7 @@ class WorkspaceKnowledgeStore:
                     """
                     CREATE TABLE knowledge_ingestion_proposals (
                         id TEXT PRIMARY KEY,
+                        tenant_id TEXT NOT NULL DEFAULT 'local',
                         workspace_id TEXT NOT NULL,
                         conversation_id TEXT NOT NULL,
                         turn_id TEXT NOT NULL,
@@ -237,11 +249,12 @@ class WorkspaceKnowledgeStore:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         decided_at TEXT,
-                        UNIQUE(workspace_id, idempotency_key)
+                        UNIQUE(tenant_id, workspace_id, idempotency_key)
                     );
 
                     CREATE TABLE knowledge_ingestion_events (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        tenant_id TEXT NOT NULL DEFAULT 'local',
                         workspace_id TEXT NOT NULL,
                         proposal_id TEXT,
                         event_type TEXT NOT NULL,
@@ -275,6 +288,22 @@ class WorkspaceKnowledgeStore:
                     "INSERT INTO knowledge_schema_migrations(version, applied_at) "
                     "VALUES (?, ?)",
                     (3, self._utc_now()),
+                )
+
+            if current_version < 4:
+                self._ensure_tenant_scope_columns(connection)
+                connection.execute(
+                    "INSERT INTO knowledge_schema_migrations(version, applied_at) "
+                    "VALUES (?, ?)",
+                    (4, self._utc_now()),
+                )
+
+            if current_version < 5:
+                self._migrate_tenant_scope_constraints(connection)
+                connection.execute(
+                    "INSERT INTO knowledge_schema_migrations(version, applied_at) "
+                    "VALUES (?, ?)",
+                    (5, self._utc_now()),
                 )
 
     @staticmethod
@@ -328,10 +357,456 @@ class WorkspaceKnowledgeStore:
         )
 
     @staticmethod
+    def _ensure_tenant_scope_columns(connection: sqlite3.Connection) -> None:
+        """Add tenant scope columns to databases created before scope v4."""
+
+        tables = (
+            "knowledge_resources",
+            "knowledge_versions",
+            "knowledge_rules",
+            "knowledge_ingestion_proposals",
+            "knowledge_ingestion_events",
+        )
+        for table in tables:
+            columns = {
+                row["name"]
+                for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if "tenant_id" not in columns:
+                connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'local'"
+                )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_knowledge_resources_tenant_scope "
+            "ON knowledge_resources(tenant_id, workspace_id, status, updated_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_knowledge_rules_tenant_scope "
+            "ON knowledge_rules(tenant_id, workspace_id, status, updated_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_knowledge_ingestion_tenant_scope "
+            "ON knowledge_ingestion_proposals(tenant_id, workspace_id, status, created_at DESC)"
+        )
+
+    @staticmethod
+    def _has_unique_index(
+        connection: sqlite3.Connection,
+        table: str,
+        columns: tuple[str, ...],
+    ) -> bool:
+        """Return whether a table has a unique index with this exact shape."""
+
+        for index in connection.execute(
+            f"PRAGMA index_list({table})"
+        ).fetchall():
+            if not int(index["unique"]):
+                continue
+            index_name = str(index["name"]).replace('"', '""')
+            index_columns = tuple(
+                str(row["name"])
+                for row in connection.execute(
+                    f'PRAGMA index_info("{index_name}")'
+                ).fetchall()
+            )
+            if index_columns == columns:
+                return True
+        return False
+
+    @staticmethod
+    def _drop_indexes(
+        connection: sqlite3.Connection,
+        names: Iterable[str],
+    ) -> None:
+        for name in names:
+            connection.execute(f'DROP INDEX IF EXISTS "{name}"')
+
+    @classmethod
+    def _migrate_tenant_scope_constraints(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Replace pre-v4 workspace-only unique constraints.
+
+        v4 added tenant columns to existing databases, but SQLite keeps inline
+        UNIQUE constraints in the original table definition. Rebuilding only
+        the affected tables removes those stale constraints while preserving
+        all rows, foreign keys, and event IDs.
+        """
+
+        resources_need_rebuild = (
+            cls._has_unique_index(
+                connection,
+                "knowledge_resources",
+                ("workspace_id", "source_type", "source_id"),
+            )
+            or not cls._has_unique_index(
+                connection,
+                "knowledge_resources",
+                ("tenant_id", "workspace_id", "source_type", "source_id"),
+            )
+        )
+        proposals_need_rebuild = (
+            cls._has_unique_index(
+                connection,
+                "knowledge_ingestion_proposals",
+                ("workspace_id", "idempotency_key"),
+            )
+            or not cls._has_unique_index(
+                connection,
+                "knowledge_ingestion_proposals",
+                ("tenant_id", "workspace_id", "idempotency_key"),
+            )
+        )
+
+        if resources_need_rebuild:
+            cls._rebuild_resource_tables(connection)
+        if proposals_need_rebuild:
+            cls._rebuild_ingestion_tables(connection)
+
+    @classmethod
+    def _rebuild_resource_tables(cls, connection: sqlite3.Connection) -> None:
+        cls._drop_indexes(
+            connection,
+            (
+                "idx_knowledge_resources_workspace_updated",
+                "idx_knowledge_resources_consolidation",
+                "idx_knowledge_resources_tenant_scope",
+                "idx_knowledge_versions_hash",
+            ),
+        )
+        connection.execute(
+            "ALTER TABLE knowledge_versions RENAME TO knowledge_versions_scope_legacy"
+        )
+        connection.execute(
+            "ALTER TABLE knowledge_resources RENAME TO knowledge_resources_scope_legacy"
+        )
+        connection.executescript(
+            """
+            CREATE TABLE knowledge_resources_scope_new (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'local',
+                workspace_id TEXT NOT NULL,
+                title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+                resource_type TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_uri TEXT,
+                source_id TEXT,
+                status TEXT NOT NULL DEFAULT 'active'
+                    CHECK(status IN ('active', 'archived')),
+                current_version INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                consolidation_status TEXT NOT NULL DEFAULT 'active'
+                    CHECK(consolidation_status IN ('active', 'superseded', 'conflict')),
+                supersedes TEXT,
+                last_hit TEXT,
+                UNIQUE(tenant_id, workspace_id, source_type, source_id)
+            );
+
+            CREATE TABLE knowledge_versions_scope_new (
+                resource_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL DEFAULT 'local',
+                version INTEGER NOT NULL CHECK(version > 0),
+                content_hash TEXT NOT NULL,
+                searchable_text TEXT NOT NULL,
+                mime_type TEXT,
+                source_uri TEXT,
+                source_id TEXT,
+                structured_data_json TEXT NOT NULL DEFAULT 'null',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_by TEXT,
+                change_note TEXT,
+                created_at TEXT NOT NULL,
+                source_episode TEXT,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                PRIMARY KEY(resource_id, version),
+                FOREIGN KEY(resource_id) REFERENCES knowledge_resources_scope_new(id)
+                    ON DELETE CASCADE
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO knowledge_resources_scope_new(
+                id, tenant_id, workspace_id, title, resource_type, source_type,
+                source_uri, source_id, status, current_version, metadata_json,
+                created_at, updated_at, confidence, consolidation_status,
+                supersedes, last_hit
+            )
+            SELECT id, tenant_id, workspace_id, title, resource_type, source_type,
+                source_uri, source_id, status, current_version, metadata_json,
+                created_at, updated_at, confidence, consolidation_status,
+                supersedes, last_hit
+            FROM knowledge_resources_scope_legacy
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO knowledge_versions_scope_new(
+                resource_id, tenant_id, version, content_hash, searchable_text,
+                mime_type, source_uri, source_id, structured_data_json,
+                metadata_json, created_by, change_note, created_at,
+                source_episode, confidence
+            )
+            SELECT resource_id, tenant_id, version, content_hash, searchable_text,
+                mime_type, source_uri, source_id, structured_data_json,
+                metadata_json, created_by, change_note, created_at,
+                source_episode, confidence
+            FROM knowledge_versions_scope_legacy
+            """
+        )
+        connection.execute("DROP TABLE knowledge_versions_scope_legacy")
+        connection.execute("DROP TABLE knowledge_resources_scope_legacy")
+        connection.execute(
+            "ALTER TABLE knowledge_resources_scope_new RENAME TO knowledge_resources"
+        )
+        connection.execute(
+            "ALTER TABLE knowledge_versions_scope_new RENAME TO knowledge_versions"
+        )
+        connection.executescript(
+            """
+            CREATE INDEX idx_knowledge_resources_workspace_updated
+            ON knowledge_resources(workspace_id, status, updated_at DESC);
+            CREATE INDEX idx_knowledge_resources_tenant_scope
+            ON knowledge_resources(tenant_id, workspace_id, status, updated_at DESC);
+            CREATE INDEX idx_knowledge_resources_consolidation
+            ON knowledge_resources(workspace_id, consolidation_status);
+            CREATE INDEX idx_knowledge_versions_hash
+            ON knowledge_versions(resource_id, content_hash);
+            """
+        )
+
+    @classmethod
+    def _rebuild_ingestion_tables(cls, connection: sqlite3.Connection) -> None:
+        cls._drop_indexes(
+            connection,
+            (
+                "idx_knowledge_ingestion_pending",
+                "idx_knowledge_ingestion_events",
+                "idx_knowledge_ingestion_tenant_scope",
+            ),
+        )
+        connection.execute(
+            "ALTER TABLE knowledge_ingestion_events "
+            "RENAME TO knowledge_ingestion_events_scope_legacy"
+        )
+        connection.execute(
+            "ALTER TABLE knowledge_ingestion_proposals "
+            "RENAME TO knowledge_ingestion_proposals_scope_legacy"
+        )
+        connection.executescript(
+            """
+            CREATE TABLE knowledge_ingestion_proposals_scope_new (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'local',
+                workspace_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending', 'confirmed', 'rejected', 'conflict')),
+                state_version INTEGER NOT NULL DEFAULT 1 CHECK(state_version > 0),
+                payload_hash TEXT NOT NULL,
+                resources_json TEXT NOT NULL,
+                resource_count INTEGER NOT NULL,
+                payload_bytes INTEGER NOT NULL,
+                proposed_by TEXT NOT NULL,
+                actor TEXT,
+                confirmation_hash TEXT,
+                result_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                decided_at TEXT,
+                UNIQUE(tenant_id, workspace_id, idempotency_key)
+            );
+
+            CREATE TABLE knowledge_ingestion_events_scope_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL DEFAULT 'local',
+                workspace_id TEXT NOT NULL,
+                proposal_id TEXT,
+                event_type TEXT NOT NULL,
+                actor TEXT,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(proposal_id)
+                    REFERENCES knowledge_ingestion_proposals_scope_new(id)
+                    ON DELETE SET NULL
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO knowledge_ingestion_proposals_scope_new(
+                id, tenant_id, workspace_id, conversation_id, turn_id,
+                idempotency_key, status, state_version, payload_hash,
+                resources_json, resource_count, payload_bytes, proposed_by, actor,
+                confirmation_hash, result_json, created_at, updated_at, decided_at
+            )
+            SELECT id, tenant_id, workspace_id, conversation_id, turn_id,
+                idempotency_key, status, state_version, payload_hash,
+                resources_json, resource_count, payload_bytes, proposed_by, actor,
+                confirmation_hash, result_json, created_at, updated_at, decided_at
+            FROM knowledge_ingestion_proposals_scope_legacy
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO knowledge_ingestion_events_scope_new(
+                id, tenant_id, workspace_id, proposal_id, event_type, actor,
+                payload_json, created_at
+            )
+            SELECT id, tenant_id, workspace_id, proposal_id, event_type, actor,
+                payload_json, created_at
+            FROM knowledge_ingestion_events_scope_legacy
+            """
+        )
+        connection.execute("DROP TABLE knowledge_ingestion_events_scope_legacy")
+        connection.execute("DROP TABLE knowledge_ingestion_proposals_scope_legacy")
+        connection.execute(
+            "ALTER TABLE knowledge_ingestion_proposals_scope_new "
+            "RENAME TO knowledge_ingestion_proposals"
+        )
+        connection.execute(
+            "ALTER TABLE knowledge_ingestion_events_scope_new "
+            "RENAME TO knowledge_ingestion_events"
+        )
+        connection.executescript(
+            """
+            CREATE INDEX idx_knowledge_ingestion_pending
+            ON knowledge_ingestion_proposals(workspace_id, status, created_at DESC);
+            CREATE INDEX idx_knowledge_ingestion_tenant_scope
+            ON knowledge_ingestion_proposals(tenant_id, workspace_id, status, created_at DESC);
+            CREATE INDEX idx_knowledge_ingestion_events
+            ON knowledge_ingestion_events(workspace_id, proposal_id, id);
+            """
+        )
+
+    @staticmethod
     def _required_text(value: Any, field: str) -> str:
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{field} must be a non-empty string")
         return value.strip()
+
+    def _resolve_scope(
+        self,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """Resolve an explicit scope without allowing tenant context overrides."""
+
+        current = TenantContextManager.get_current()
+        if current is not None:
+            if tenant_id not in {None, "", current.tenant_id}:
+                raise WorkspaceAccessDenied(
+                    "tenant does not match the authenticated context"
+                )
+            resolved_workspace = current.require_workspace(workspace_id)
+            resolved_tenant = current.tenant_id
+            self._claim_legacy_scope(resolved_tenant, resolved_workspace)
+            return resolved_tenant, resolved_workspace
+        resolved_tenant = self._required_text(
+            tenant_id or self.DEFAULT_TENANT_ID, "tenant_id"
+        )
+        resolved_workspace = self._required_text(
+            workspace_id or self.DEFAULT_WORKSPACE_ID, "workspace_id"
+        )
+        return resolved_tenant, resolved_workspace
+
+    def _resolve_transition_scope(
+        self,
+        workspace_id: Optional[str],
+        tenant_id: Optional[str],
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Keep legacy id-only rule transitions working outside a request."""
+
+        if workspace_id is None and tenant_id is None:
+            current = TenantContextManager.get_current()
+            if current is None:
+                return None, None
+        resolved_tenant, resolved_workspace = self._resolve_scope(
+            workspace_id, tenant_id
+        )
+        return resolved_tenant, resolved_workspace
+
+    def _claim_legacy_scope(self, tenant_id: str, workspace_id: str) -> bool:
+        """Bind unowned pre-tenant rows only on a trusted first access.
+
+        Databases created before tenant support contain rows assigned to the
+        local compatibility tenant. A workspace with any explicit non-local
+        ownership is never claimed, preventing an ambiguous legacy row from
+        becoming visible in another tenant.
+        """
+        if tenant_id == self.DEFAULT_TENANT_ID:
+            return False
+        tables = (
+            "knowledge_resources",
+            "knowledge_rules",
+            "knowledge_ingestion_proposals",
+            "knowledge_ingestion_events",
+        )
+        claimed = False
+        with self._connection(write=True) as connection:
+            for table in tables:
+                row = connection.execute(
+                    f"""
+                    SELECT 1 FROM {table}
+                    WHERE workspace_id = ?
+                      AND tenant_id NOT IN (?, ?)
+                    LIMIT 1
+                    """,
+                    (workspace_id, self.DEFAULT_TENANT_ID, tenant_id),
+                ).fetchone()
+                if row is not None:
+                    return False
+
+            version_cursor = connection.execute(
+                """
+                UPDATE knowledge_versions
+                SET tenant_id = ?
+                WHERE tenant_id = ?
+                  AND resource_id IN (
+                      SELECT id FROM knowledge_resources
+                      WHERE tenant_id = ? AND workspace_id = ?
+                  )
+                """,
+                (
+                    tenant_id,
+                    self.DEFAULT_TENANT_ID,
+                    self.DEFAULT_TENANT_ID,
+                    workspace_id,
+                ),
+            )
+            for table in (
+                "knowledge_resources",
+                "knowledge_rules",
+                "knowledge_ingestion_proposals",
+                "knowledge_ingestion_events",
+            ):
+                cursor = connection.execute(
+                    f"""
+                    UPDATE {table}
+                    SET tenant_id = ?
+                    WHERE tenant_id = ? AND workspace_id = ?
+                    """,
+                    (tenant_id, self.DEFAULT_TENANT_ID, workspace_id),
+                )
+                claimed = claimed or cursor.rowcount > 0
+            claimed = claimed or version_cursor.rowcount > 0
+
+        if claimed and self.vector_store is not None:
+            self.sync_pending = True
+            try:
+                self._sync_vector_index()
+            except Exception as error:
+                self.vector_store.needs_rebuild = True
+                self.vector_store.last_error = (
+                    f"knowledge vector sync pending: {error}"
+                )
+        return claimed
 
     @staticmethod
     def _optional_text(value: Any, field: str) -> Optional[str]:
@@ -375,17 +850,17 @@ class WorkspaceKnowledgeStore:
             searchable_text = ""
         if not isinstance(searchable_text, str):
             raise ValueError("searchable_text must be a string")
-        searchable_text = searchable_text.strip()
-        if not searchable_text and structured_data_json != "null":
-            searchable_text = structured_data_json
-        if not searchable_text:
+        normalized_text: str = searchable_text.strip()
+        if not normalized_text and structured_data_json != "null":
+            normalized_text = structured_data_json
+        if not normalized_text:
             raise ValueError("searchable_text or structured_data is required")
-        if len(searchable_text) > cls.MAX_SEARCHABLE_TEXT_CHARS:
+        if len(normalized_text) > cls.MAX_SEARCHABLE_TEXT_CHARS:
             raise ValueError(
                 "searchable_text exceeds "
                 f"{cls.MAX_SEARCHABLE_TEXT_CHARS} characters"
             )
-        return searchable_text
+        return normalized_text
 
     @staticmethod
     def _content_hash(
@@ -405,7 +880,8 @@ class WorkspaceKnowledgeStore:
         searchable_text: str = "",
         resource_type: str = "document",
         source_type: str = "manual",
-        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         source_uri: Optional[str] = None,
         source_id: Optional[str] = None,
         mime_type: Optional[str] = None,
@@ -418,7 +894,7 @@ class WorkspaceKnowledgeStore:
     ) -> dict[str, Any]:
         """Create or version a resource, resolving identity by ID or source ID."""
         title = self._required_text(title, "title")
-        workspace_id = self._required_text(workspace_id, "workspace_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         resource_type = self._required_text(resource_type, "resource_type")
         source_type = self._required_text(source_type, "source_type")
         source_uri = self._optional_text(source_uri, "source_uri")
@@ -447,6 +923,7 @@ class WorkspaceKnowledgeStore:
                 searchable_text=searchable_text,
                 resource_type=resource_type,
                 source_type=source_type,
+                tenant_id=tenant_id,
                 workspace_id=workspace_id,
                 source_uri=source_uri,
                 source_id=source_id,
@@ -460,7 +937,11 @@ class WorkspaceKnowledgeStore:
                 content_hash=content_hash,
                 now=self._utc_now(),
             )
-        self._sync_vector_index_best_effort()
+        self._sync_vector_index_best_effort(
+            resource_ids=(result["id"],),
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
         return result
 
     def _ingest_prepared_resource(
@@ -471,6 +952,7 @@ class WorkspaceKnowledgeStore:
         searchable_text: str,
         resource_type: str,
         source_type: str,
+        tenant_id: str,
         workspace_id: str,
         source_uri: Optional[str],
         source_id: Optional[str],
@@ -487,21 +969,18 @@ class WorkspaceKnowledgeStore:
         resource_row = None
         if resource_id is not None:
             resource_row = connection.execute(
-                "SELECT * FROM knowledge_resources WHERE id = ?",
-                (resource_id,),
+                """SELECT * FROM knowledge_resources
+                WHERE id = ? AND tenant_id = ? AND workspace_id = ?""",
+                (resource_id, tenant_id, workspace_id),
             ).fetchone()
-            if (
-                resource_row is not None
-                and resource_row["workspace_id"] != workspace_id
-            ):
-                raise ValueError("resource_id belongs to a different workspace")
         elif source_id is not None:
             resource_row = connection.execute(
                 """
                 SELECT * FROM knowledge_resources
-                WHERE workspace_id = ? AND source_type = ? AND source_id = ?
+                WHERE tenant_id = ? AND workspace_id = ?
+                  AND source_type = ? AND source_id = ?
                 """,
-                (workspace_id, source_type, source_id),
+                (tenant_id, workspace_id, source_type, source_id),
             ).fetchone()
 
         if resource_row is None:
@@ -509,13 +988,14 @@ class WorkspaceKnowledgeStore:
             connection.execute(
                 """
                 INSERT INTO knowledge_resources(
-                    id, workspace_id, title, resource_type, source_type,
+                    id, tenant_id, workspace_id, title, resource_type, source_type,
                     source_uri, source_id, status, current_version,
                     metadata_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?)
                 """,
                 (
                     resource_id,
+                    tenant_id,
                     workspace_id,
                     title,
                     resource_type,
@@ -560,13 +1040,14 @@ class WorkspaceKnowledgeStore:
             connection.execute(
                 """
                 INSERT INTO knowledge_versions(
-                    resource_id, version, content_hash, searchable_text,
+                    resource_id, tenant_id, version, content_hash, searchable_text,
                     mime_type, source_uri, source_id, structured_data_json,
                     metadata_json, created_by, change_note, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     resource_id,
+                    tenant_id,
                     current_version,
                     content_hash,
                     searchable_text,
@@ -586,7 +1067,7 @@ class WorkspaceKnowledgeStore:
             UPDATE knowledge_resources
             SET title = ?, source_uri = ?, status = 'active',
                 current_version = ?, metadata_json = ?, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND tenant_id = ? AND workspace_id = ?
             """,
             (
                 title,
@@ -595,11 +1076,14 @@ class WorkspaceKnowledgeStore:
                 metadata_json,
                 now,
                 resource_id,
+                tenant_id,
+                workspace_id,
             ),
         )
         resource_row = connection.execute(
-            "SELECT * FROM knowledge_resources WHERE id = ?",
-            (resource_id,),
+            """SELECT * FROM knowledge_resources
+            WHERE id = ? AND tenant_id = ? AND workspace_id = ?""",
+            (resource_id, tenant_id, workspace_id),
         ).fetchone()
         version_row = connection.execute(
             """
@@ -619,19 +1103,19 @@ class WorkspaceKnowledgeStore:
         *,
         version: Optional[int] = None,
         workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         resource_id = self._required_text(resource_id, "resource_id")
-        if workspace_id is not None:
-            workspace_id = self._required_text(workspace_id, "workspace_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         if version is not None and (
             isinstance(version, bool) or not isinstance(version, int) or version <= 0
         ):
             raise ValueError("version must be a positive integer")
         with self._connection() as connection:
-            workspace_clause = "" if workspace_id is None else " AND workspace_id = ?"
             resource_row = connection.execute(
-                "SELECT * FROM knowledge_resources WHERE id = ?" + workspace_clause,
-                (resource_id,) if workspace_id is None else (resource_id, workspace_id),
+                """SELECT * FROM knowledge_resources
+                WHERE id = ? AND tenant_id = ? AND workspace_id = ?""",
+                (resource_id, tenant_id, workspace_id),
             ).fetchone()
             if resource_row is None:
                 return None
@@ -647,25 +1131,48 @@ class WorkspaceKnowledgeStore:
             return None
         return self._resource_record(resource_row, version_row)
 
+    def get_resource_by_source(
+        self,
+        *,
+        source_type: str,
+        source_id: str,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Find a resource by its stable external source identity."""
+        source_type = self._required_text(source_type, "source_type")
+        source_id = self._required_text(source_id, "source_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT id FROM knowledge_resources
+                WHERE tenant_id = ? AND workspace_id = ?
+                  AND source_type = ? AND source_id = ?
+                """,
+                (tenant_id, workspace_id, source_type, source_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return self.get_resource(
+            row["id"], workspace_id=workspace_id, tenant_id=tenant_id
+        )
+
     def list_versions(
         self,
         resource_id: str,
         *,
         workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         resource_id = self._required_text(resource_id, "resource_id")
-        if workspace_id is not None:
-            workspace_id = self._required_text(workspace_id, "workspace_id")
-        workspace_clause = "" if workspace_id is None else " AND r.workspace_id = ?"
-        parameters = (
-            (resource_id,) if workspace_id is None else (resource_id, workspace_id)
-        )
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
+        parameters = (resource_id, tenant_id, workspace_id)
         with self._connection() as connection:
             rows = connection.execute(
                 "SELECT v.* FROM knowledge_versions v "
                 "JOIN knowledge_resources r ON r.id = v.resource_id "
-                "WHERE v.resource_id = ?"
-                + workspace_clause
+                "WHERE v.resource_id = ? AND r.tenant_id = ? AND r.workspace_id = ?"
                 + " ORDER BY v.version DESC",
                 parameters,
             ).fetchall()
@@ -674,11 +1181,12 @@ class WorkspaceKnowledgeStore:
     def list_resources(
         self,
         *,
-        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         include_archived: bool = False,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        workspace_id = self._required_text(workspace_id, "workspace_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         limit = self._validate_limit(limit)
         status_clause = "" if include_archived else "AND r.status = 'active'"
         with self._connection() as connection:
@@ -694,11 +1202,11 @@ class WorkspaceKnowledgeStore:
                 FROM knowledge_resources r
                 JOIN knowledge_versions v
                     ON v.resource_id = r.id AND v.version = r.current_version
-                WHERE r.workspace_id = ? {status_clause}
+                WHERE r.tenant_id = ? AND r.workspace_id = ? {status_clause}
                 ORDER BY r.updated_at DESC, r.id DESC
                 LIMIT ?
                 """,
-                (workspace_id, limit),
+                (tenant_id, workspace_id, limit),
             ).fetchall()
         return [self._joined_resource_record(row) for row in rows]
 
@@ -707,24 +1215,28 @@ class WorkspaceKnowledgeStore:
         resource_id: str,
         *,
         workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> bool:
         resource_id = self._required_text(resource_id, "resource_id")
-        if workspace_id is not None:
-            workspace_id = self._required_text(workspace_id, "workspace_id")
-        workspace_clause = "" if workspace_id is None else " AND workspace_id = ?"
-        parameters: tuple[Any, ...] = (self._utc_now(), resource_id)
-        if workspace_id is not None:
-            parameters += (workspace_id,)
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
+        parameters: tuple[Any, ...] = (
+            self._utc_now(), resource_id, tenant_id, workspace_id
+        )
         with self._connection(write=True) as connection:
             cursor = connection.execute(
                 "UPDATE knowledge_resources "
                 "SET status = 'archived', updated_at = ? "
-                "WHERE id = ? AND status != 'archived'" + workspace_clause,
+                "WHERE id = ? AND tenant_id = ? AND workspace_id = ? "
+                "AND status != 'archived'",
                 parameters,
             )
         archived = cursor.rowcount > 0
         if archived:
-            self._sync_vector_index_best_effort()
+            self._sync_vector_index_best_effort(
+                resource_ids=(resource_id,),
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+            )
         return archived
 
     def propose_ingestion(
@@ -734,7 +1246,8 @@ class WorkspaceKnowledgeStore:
         resources: Iterable[Mapping[str, Any]],
         idempotency_key: str,
         *,
-        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         proposed_by: str = "agent",
     ) -> dict[str, Any]:
         """Persist an inert ingestion proposal without creating knowledge."""
@@ -747,7 +1260,7 @@ class WorkspaceKnowledgeStore:
         )
         if len(idempotency_key) > 200:
             raise ValueError("idempotency_key cannot exceed 200 characters")
-        workspace_id = self._required_text(workspace_id, "workspace_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         proposed_by = self._required_text(proposed_by, "proposed_by")
         normalized_resources = self._normalize_ingestion_resources(resources)
         request_json = self._json(
@@ -765,14 +1278,14 @@ class WorkspaceKnowledgeStore:
 
         with self._connection(write=True) as connection:
             self._validate_conversation_scope(
-                connection, conversation_id, workspace_id
+                connection, conversation_id, workspace_id, tenant_id
             )
             existing = connection.execute(
                 """
                 SELECT * FROM knowledge_ingestion_proposals
-                WHERE workspace_id = ? AND idempotency_key = ?
+                WHERE tenant_id = ? AND workspace_id = ? AND idempotency_key = ?
                 """,
-                (workspace_id, idempotency_key),
+                (tenant_id, workspace_id, idempotency_key),
             ).fetchone()
             if existing is not None:
                 if (
@@ -793,10 +1306,11 @@ class WorkspaceKnowledgeStore:
                     existing_resource = connection.execute(
                         """
                         SELECT * FROM knowledge_resources
-                        WHERE workspace_id = ? AND source_type = ?
+                        WHERE tenant_id = ? AND workspace_id = ? AND source_type = ?
                           AND source_id = ?
                         """,
                         (
+                            tenant_id,
                             workspace_id,
                             resource["source_type"],
                             resource["source_id"],
@@ -826,14 +1340,15 @@ class WorkspaceKnowledgeStore:
             connection.execute(
                 """
                 INSERT INTO knowledge_ingestion_proposals(
-                    id, workspace_id, conversation_id, turn_id,
+                    id, tenant_id, workspace_id, conversation_id, turn_id,
                     idempotency_key, status, state_version, payload_hash,
                     resources_json, resource_count, payload_bytes,
                     proposed_by, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     proposal_id,
+                    tenant_id,
                     workspace_id,
                     conversation_id,
                     turn_id,
@@ -849,6 +1364,7 @@ class WorkspaceKnowledgeStore:
             )
             self._ingestion_event(
                 connection,
+                tenant_id=tenant_id,
                 workspace_id=workspace_id,
                 proposal_id=proposal_id,
                 event_type="ingestion.proposed",
@@ -862,8 +1378,9 @@ class WorkspaceKnowledgeStore:
                 },
             )
             row = connection.execute(
-                "SELECT * FROM knowledge_ingestion_proposals WHERE id = ?",
-                (proposal_id,),
+                """SELECT * FROM knowledge_ingestion_proposals
+                WHERE id = ? AND tenant_id = ? AND workspace_id = ?""",
+                (proposal_id, tenant_id, workspace_id),
             ).fetchone()
         return self._ingestion_proposal_record(row)
 
@@ -873,7 +1390,8 @@ class WorkspaceKnowledgeStore:
         *,
         actor: str,
         confirmation_token: str,
-        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         expected_state_version: Optional[int] = None,
     ) -> dict[str, Any]:
         """CAS-confirm a proposal and atomically ingest all candidate resources."""
@@ -882,7 +1400,7 @@ class WorkspaceKnowledgeStore:
         confirmation_token = self._required_text(
             confirmation_token, "confirmation_token"
         )
-        workspace_id = self._required_text(workspace_id, "workspace_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         expected_state_version = self._optional_state_version(
             expected_state_version
         )
@@ -895,9 +1413,9 @@ class WorkspaceKnowledgeStore:
             row = connection.execute(
                 """
                 SELECT * FROM knowledge_ingestion_proposals
-                WHERE id = ? AND workspace_id = ?
+                WHERE id = ? AND tenant_id = ? AND workspace_id = ?
                 """,
-                (proposal_id, workspace_id),
+                (proposal_id, tenant_id, workspace_id),
             ).fetchone()
             if row is None:
                 raise KeyError("unknown ingestion proposal for workspace")
@@ -926,18 +1444,19 @@ class WorkspaceKnowledgeStore:
                     current_resource = connection.execute(
                         """
                         SELECT * FROM knowledge_resources
-                        WHERE id = ? AND workspace_id = ?
+                        WHERE id = ? AND tenant_id = ? AND workspace_id = ?
                         """,
-                        (expected_resource_id, workspace_id),
+                        (expected_resource_id, tenant_id, workspace_id),
                     ).fetchone()
                 elif resource.get("source_id"):
                     current_resource = connection.execute(
                         """
                         SELECT * FROM knowledge_resources
-                        WHERE workspace_id = ? AND source_type = ?
+                        WHERE tenant_id = ? AND workspace_id = ? AND source_type = ?
                           AND source_id = ?
                         """,
                         (
+                            tenant_id,
                             workspace_id,
                             resource["source_type"],
                             resource["source_id"],
@@ -980,6 +1499,7 @@ class WorkspaceKnowledgeStore:
                     )
                 self._ingestion_event(
                     connection,
+                    tenant_id=tenant_id,
                     workspace_id=workspace_id,
                     proposal_id=proposal_id,
                     event_type="ingestion.conflict",
@@ -1002,6 +1522,7 @@ class WorkspaceKnowledgeStore:
                         searchable_text=searchable_text,
                         resource_type=resource["resource_type"],
                         source_type=resource["source_type"],
+                        tenant_id=tenant_id,
                         workspace_id=workspace_id,
                         source_uri=resource.get("source_uri"),
                         source_id=resource.get("source_id"),
@@ -1061,6 +1582,7 @@ class WorkspaceKnowledgeStore:
                     )
                 self._ingestion_event(
                     connection,
+                    tenant_id=tenant_id,
                     workspace_id=workspace_id,
                     proposal_id=proposal_id,
                     event_type="ingestion.confirmed",
@@ -1070,24 +1592,33 @@ class WorkspaceKnowledgeStore:
 
         if conflict_reason is not None:
             raise KnowledgeProposalConflictError(conflict_reason)
-        self._sync_vector_index_best_effort()
-        result = self.get_ingestion_proposal(
-            proposal_id, workspace_id=workspace_id
+        self._sync_vector_index_best_effort(
+            resource_ids=(item["id"] for item in ingested),
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
         )
-        result["decision_created"] = True
-        return result
+        confirmed_result = self.get_ingestion_proposal(
+            proposal_id, workspace_id=workspace_id, tenant_id=tenant_id
+        )
+        if confirmed_result is None:
+            raise KnowledgeProposalConflictError(
+                "ingestion proposal disappeared after confirmation"
+            )
+        confirmed_result["decision_created"] = True
+        return confirmed_result
 
     def reject_ingestion(
         self,
         proposal_id: str,
         *,
         actor: str,
-        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         expected_state_version: Optional[int] = None,
     ) -> dict[str, Any]:
         proposal_id = self._required_text(proposal_id, "proposal_id")
         actor = self._required_text(actor, "actor")
-        workspace_id = self._required_text(workspace_id, "workspace_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         expected_state_version = self._optional_state_version(
             expected_state_version
         )
@@ -1096,9 +1627,9 @@ class WorkspaceKnowledgeStore:
             row = connection.execute(
                 """
                 SELECT * FROM knowledge_ingestion_proposals
-                WHERE id = ? AND workspace_id = ?
+                WHERE id = ? AND tenant_id = ? AND workspace_id = ?
                 """,
-                (proposal_id, workspace_id),
+                (proposal_id, tenant_id, workspace_id),
             ).fetchone()
             if row is None:
                 raise KeyError("unknown ingestion proposal for workspace")
@@ -1131,6 +1662,7 @@ class WorkspaceKnowledgeStore:
                 )
             self._ingestion_event(
                 connection,
+                tenant_id=tenant_id,
                 workspace_id=workspace_id,
                 proposal_id=proposal_id,
                 event_type="ingestion.rejected",
@@ -1138,8 +1670,9 @@ class WorkspaceKnowledgeStore:
                 payload={},
             )
             row = connection.execute(
-                "SELECT * FROM knowledge_ingestion_proposals WHERE id = ?",
-                (proposal_id,),
+                """SELECT * FROM knowledge_ingestion_proposals
+                WHERE id = ? AND tenant_id = ? AND workspace_id = ?""",
+                (proposal_id, tenant_id, workspace_id),
             ).fetchone()
         return self._ingestion_proposal_record(row)
 
@@ -1147,29 +1680,31 @@ class WorkspaceKnowledgeStore:
         self,
         proposal_id: str,
         *,
-        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         proposal_id = self._required_text(proposal_id, "proposal_id")
-        workspace_id = self._required_text(workspace_id, "workspace_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT * FROM knowledge_ingestion_proposals
-                WHERE id = ? AND workspace_id = ?
+                WHERE id = ? AND tenant_id = ? AND workspace_id = ?
                 """,
-                (proposal_id, workspace_id),
+                (proposal_id, tenant_id, workspace_id),
             ).fetchone()
         return self._ingestion_proposal_record(row) if row is not None else None
 
     def list_ingestion_proposals(
         self,
         *,
-        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         status: Optional[str] = None,
         conversation_id: Optional[str] = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        workspace_id = self._required_text(workspace_id, "workspace_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         allowed_statuses = {"pending", "confirmed", "rejected", "conflict"}
         if status is not None and status not in allowed_statuses:
             raise ValueError(f"Unsupported ingestion proposal status: {status}")
@@ -1177,8 +1712,8 @@ class WorkspaceKnowledgeStore:
             conversation_id, "conversation_id"
         )
         limit = self._validate_limit(limit)
-        clauses = ["workspace_id = ?"]
-        parameters: list[Any] = [workspace_id]
+        clauses = ["tenant_id = ?", "workspace_id = ?"]
+        parameters: list[Any] = [tenant_id, workspace_id]
         if status is not None:
             clauses.append("status = ?")
             parameters.append(status)
@@ -1200,15 +1735,16 @@ class WorkspaceKnowledgeStore:
     def list_ingestion_events(
         self,
         *,
-        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         proposal_id: Optional[str] = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        workspace_id = self._required_text(workspace_id, "workspace_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         proposal_id = self._optional_text(proposal_id, "proposal_id")
         limit = self._validate_limit(limit)
         proposal_clause = "AND proposal_id = ?" if proposal_id else ""
-        parameters: list[Any] = [workspace_id]
+        parameters: list[Any] = [tenant_id, workspace_id]
         if proposal_id:
             parameters.append(proposal_id)
         parameters.append(limit)
@@ -1216,7 +1752,7 @@ class WorkspaceKnowledgeStore:
             rows = connection.execute(
                 f"""
                 SELECT * FROM knowledge_ingestion_events
-                WHERE workspace_id = ? {proposal_clause}
+                WHERE tenant_id = ? AND workspace_id = ? {proposal_clause}
                 ORDER BY id ASC LIMIT ?
                 """,
                 parameters,
@@ -1322,6 +1858,7 @@ class WorkspaceKnowledgeStore:
         connection: sqlite3.Connection,
         conversation_id: str,
         workspace_id: str,
+        tenant_id: Optional[str] = None,
     ) -> None:
         table = connection.execute(
             """
@@ -1339,11 +1876,15 @@ class WorkspaceKnowledgeStore:
         }
         if "workspace_id" not in columns:
             return
+        tenant_clause = ""
+        parameters: list[Any] = [conversation_id, workspace_id]
+        if tenant_id and "tenant_id" in columns:
+            tenant_clause = " AND tenant_id = ?"
+            parameters.append(tenant_id)
         conversation = connection.execute(
-            """
-            SELECT 1 FROM conversations WHERE id = ? AND workspace_id = ?
-            """,
-            (conversation_id, workspace_id),
+            "SELECT 1 FROM conversations "
+            "WHERE id = ? AND workspace_id = ?" + tenant_clause,
+            parameters,
         ).fetchone()
         if conversation is None:
             raise KeyError("conversation does not belong to the workspace")
@@ -1352,6 +1893,7 @@ class WorkspaceKnowledgeStore:
         self,
         connection: sqlite3.Connection,
         *,
+        tenant_id: str,
         workspace_id: str,
         proposal_id: str,
         event_type: str,
@@ -1364,11 +1906,12 @@ class WorkspaceKnowledgeStore:
         connection.execute(
             """
             INSERT INTO knowledge_ingestion_events(
-                workspace_id, proposal_id, event_type, actor,
+                tenant_id, workspace_id, proposal_id, event_type, actor,
                 payload_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                tenant_id,
                 workspace_id,
                 proposal_id,
                 event_type,
@@ -1382,7 +1925,8 @@ class WorkspaceKnowledgeStore:
         self,
         statement: str,
         *,
-        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         scope: str = "workspace",
         proposed_by: str = "agent",
         source_conversation_id: Optional[str] = None,
@@ -1391,7 +1935,7 @@ class WorkspaceKnowledgeStore:
         rule_id: Optional[str] = None,
     ) -> dict[str, Any]:
         statement = self._required_text(statement, "statement")
-        workspace_id = self._required_text(workspace_id, "workspace_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         scope = self._required_text(scope, "scope")
         proposed_by = self._required_text(proposed_by, "proposed_by")
         source_conversation_id = self._optional_text(
@@ -1407,8 +1951,9 @@ class WorkspaceKnowledgeStore:
         now = self._utc_now()
         with self._connection(write=True) as connection:
             existing = connection.execute(
-                "SELECT * FROM knowledge_rules WHERE id = ?",
-                (rule_id,),
+                """SELECT * FROM knowledge_rules
+                WHERE id = ? AND tenant_id = ? AND workspace_id = ?""",
+                (rule_id, tenant_id, workspace_id),
             ).fetchone()
             if existing is not None:
                 if (
@@ -1422,13 +1967,14 @@ class WorkspaceKnowledgeStore:
             connection.execute(
                 """
                 INSERT INTO knowledge_rules(
-                    id, workspace_id, statement, scope, status, proposed_by,
+                    id, tenant_id, workspace_id, statement, scope, status, proposed_by,
                     source_conversation_id, source_message_id, metadata_json,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     rule_id,
+                    tenant_id,
                     workspace_id,
                     statement,
                     scope,
@@ -1441,7 +1987,9 @@ class WorkspaceKnowledgeStore:
                 ),
             )
             row = connection.execute(
-                "SELECT * FROM knowledge_rules WHERE id = ?", (rule_id,)
+                """SELECT * FROM knowledge_rules
+                WHERE id = ? AND tenant_id = ? AND workspace_id = ?""",
+                (rule_id, tenant_id, workspace_id),
             ).fetchone()
         return self._rule_record(row)
 
@@ -1449,11 +1997,16 @@ class WorkspaceKnowledgeStore:
         self,
         rule_id: str,
         *,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         confirmed_by: str,
         confirmation_token: str,
         confirmer_type: str = "user",
     ) -> dict[str, Any]:
         rule_id = self._required_text(rule_id, "rule_id")
+        tenant_id, workspace_id = self._resolve_transition_scope(
+            workspace_id, tenant_id
+        )
         confirmed_by = self._required_text(confirmed_by, "confirmed_by")
         confirmation_token = self._required_text(
             confirmation_token, "confirmation_token"
@@ -1465,8 +2018,14 @@ class WorkspaceKnowledgeStore:
         ).hexdigest()
         now = self._utc_now()
         with self._connection(write=True) as connection:
+            scope_clause = "id = ?"
+            scope_parameters: list[Any] = [rule_id]
+            if tenant_id is not None and workspace_id is not None:
+                scope_clause += " AND tenant_id = ? AND workspace_id = ?"
+                scope_parameters.extend((tenant_id, workspace_id))
             row = connection.execute(
-                "SELECT * FROM knowledge_rules WHERE id = ?", (rule_id,)
+                f"SELECT * FROM knowledge_rules WHERE {scope_clause}",
+                scope_parameters,
             ).fetchone()
             if row is None:
                 raise KeyError(f"Unknown rule: {rule_id}")
@@ -1477,16 +2036,17 @@ class WorkspaceKnowledgeStore:
             if row["status"] != "proposed":
                 raise ValueError(f"Rule cannot be accepted from {row['status']}")
             connection.execute(
-                """
+                f"""
                 UPDATE knowledge_rules
                 SET status = 'accepted', decision_by = ?, decision_at = ?,
                     confirmation_hash = ?, updated_at = ?
-                WHERE id = ?
+                WHERE {scope_clause}
                 """,
-                (confirmed_by, now, confirmation_hash, now, rule_id),
+                [confirmed_by, now, confirmation_hash, now, *scope_parameters],
             )
             row = connection.execute(
-                "SELECT * FROM knowledge_rules WHERE id = ?", (rule_id,)
+                f"SELECT * FROM knowledge_rules WHERE {scope_clause}",
+                scope_parameters,
             ).fetchone()
         result = self._rule_record(row)
         result["decision_created"] = True
@@ -1496,11 +2056,15 @@ class WorkspaceKnowledgeStore:
         self,
         rule_id: str,
         *,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         rejected_by: str,
         confirmer_type: str = "user",
     ) -> dict[str, Any]:
         return self._decide_rule(
             rule_id,
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
             status="rejected",
             decided_by=rejected_by,
             confirmer_type=confirmer_type,
@@ -1510,34 +2074,46 @@ class WorkspaceKnowledgeStore:
         self,
         rule_id: str,
         *,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         revoked_by: str,
         confirmation_token: str,
         confirmer_type: str = "user",
     ) -> dict[str, Any]:
         rule_id = self._required_text(rule_id, "rule_id")
+        tenant_id, workspace_id = self._resolve_transition_scope(
+            workspace_id, tenant_id
+        )
         revoked_by = self._required_text(revoked_by, "revoked_by")
         self._required_text(confirmation_token, "confirmation_token")
         if confirmer_type not in self.CONFIRMER_TYPES:
             raise ValueError("confirmer_type must be user or admin")
         now = self._utc_now()
         with self._connection(write=True) as connection:
+            scope_clause = "id = ?"
+            scope_parameters: list[Any] = [rule_id]
+            if tenant_id is not None and workspace_id is not None:
+                scope_clause += " AND tenant_id = ? AND workspace_id = ?"
+                scope_parameters.extend((tenant_id, workspace_id))
             row = connection.execute(
-                "SELECT * FROM knowledge_rules WHERE id = ?", (rule_id,)
+                f"SELECT * FROM knowledge_rules WHERE {scope_clause}",
+                scope_parameters,
             ).fetchone()
             if row is None:
                 raise KeyError(f"Unknown rule: {rule_id}")
             if row["status"] != "accepted":
                 raise ValueError(f"Rule cannot be revoked from {row['status']}")
             connection.execute(
-                """
+                f"""
                 UPDATE knowledge_rules
                 SET status = 'revoked', revoked_by = ?, revoked_at = ?, updated_at = ?
-                WHERE id = ?
+                WHERE {scope_clause}
                 """,
-                (revoked_by, now, now, rule_id),
+                [revoked_by, now, now, rule_id, *scope_parameters[1:]],
             )
             row = connection.execute(
-                "SELECT * FROM knowledge_rules WHERE id = ?", (rule_id,)
+                f"SELECT * FROM knowledge_rules WHERE {scope_clause}",
+                scope_parameters,
             ).fetchone()
         return self._rule_record(row)
 
@@ -1545,51 +2121,64 @@ class WorkspaceKnowledgeStore:
         self,
         rule_id: str,
         *,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         status: str,
         decided_by: str,
         confirmer_type: str,
     ) -> dict[str, Any]:
         rule_id = self._required_text(rule_id, "rule_id")
+        tenant_id, workspace_id = self._resolve_transition_scope(
+            workspace_id, tenant_id
+        )
         decided_by = self._required_text(decided_by, "decided_by")
         if confirmer_type not in self.CONFIRMER_TYPES:
             raise ValueError("confirmer_type must be user or admin")
         now = self._utc_now()
         with self._connection(write=True) as connection:
+            scope_clause = "id = ?"
+            scope_parameters: list[Any] = [rule_id]
+            if tenant_id is not None and workspace_id is not None:
+                scope_clause += " AND tenant_id = ? AND workspace_id = ?"
+                scope_parameters.extend((tenant_id, workspace_id))
             row = connection.execute(
-                "SELECT * FROM knowledge_rules WHERE id = ?", (rule_id,)
+                f"SELECT * FROM knowledge_rules WHERE {scope_clause}",
+                scope_parameters,
             ).fetchone()
             if row is None:
                 raise KeyError(f"Unknown rule: {rule_id}")
             if row["status"] != "proposed":
                 raise ValueError(f"Rule cannot be {status} from {row['status']}")
             connection.execute(
-                """
+                f"""
                 UPDATE knowledge_rules
                 SET status = ?, decision_by = ?, decision_at = ?, updated_at = ?
-                WHERE id = ?
+                WHERE {scope_clause}
                 """,
-                (status, decided_by, now, now, rule_id),
+                [status, decided_by, now, now, *scope_parameters],
             )
             row = connection.execute(
-                "SELECT * FROM knowledge_rules WHERE id = ?", (rule_id,)
+                f"SELECT * FROM knowledge_rules WHERE {scope_clause}",
+                scope_parameters,
             ).fetchone()
         return self._rule_record(row)
 
     def list_rules(
         self,
         *,
-        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         status: Optional[str] = None,
         scope: Optional[str] = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        workspace_id = self._required_text(workspace_id, "workspace_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         if status is not None and status not in self.RULE_STATUSES:
             raise ValueError(f"Unsupported rule status: {status}")
         scope = self._optional_text(scope, "scope")
         limit = self._validate_limit(limit)
-        clauses = ["workspace_id = ?"]
-        parameters: list[Any] = [workspace_id]
+        clauses = ["tenant_id = ?", "workspace_id = ?"]
+        parameters: list[Any] = [tenant_id, workspace_id]
         if status is not None:
             clauses.append("status = ?")
             parameters.append(status)
@@ -1611,12 +2200,14 @@ class WorkspaceKnowledgeStore:
     def get_active_rules(
         self,
         *,
-        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         scope: Optional[str] = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         return self.list_rules(
             workspace_id=workspace_id,
+            tenant_id=tenant_id,
             status="accepted",
             scope=scope,
             limit=limit,
@@ -1628,23 +2219,38 @@ class WorkspaceKnowledgeStore:
         {"active", "superseded", "conflict"}
     )
 
-    def record_hit(self, resource_id: str) -> bool:
+    def record_hit(
+        self,
+        resource_id: str,
+        *,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> bool:
         """Stamp ``last_hit`` for decay/reinforcement bookkeeping."""
         resource_id = self._required_text(resource_id, "resource_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         with self._connection(write=True) as connection:
             cursor = connection.execute(
                 """
                 UPDATE knowledge_resources
                 SET last_hit = ?, updated_at = updated_at
-                WHERE id = ?
+                WHERE id = ? AND tenant_id = ? AND workspace_id = ?
                 """,
-                (self._utc_now(), resource_id),
+                (self._utc_now(), resource_id, tenant_id, workspace_id),
             )
         return cursor.rowcount > 0
 
-    def set_confidence(self, resource_id: str, confidence: float) -> bool:
+    def set_confidence(
+        self,
+        resource_id: str,
+        confidence: float,
+        *,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> bool:
         """Set a resource's quality confidence in [0, 1]."""
         resource_id = self._required_text(resource_id, "resource_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
             raise ValueError("confidence must be a number")
         confidence = max(0.0, min(1.0, float(confidence)))
@@ -1653,17 +2259,23 @@ class WorkspaceKnowledgeStore:
                 """
                 UPDATE knowledge_resources
                 SET confidence = ?, updated_at = updated_at
-                WHERE id = ?
+                WHERE id = ? AND tenant_id = ? AND workspace_id = ?
                 """,
-                (confidence, resource_id),
+                (confidence, resource_id, tenant_id, workspace_id),
             )
         return cursor.rowcount > 0
 
     def mark_consolidation_status(
-        self, resource_id: str, status: str
+        self,
+        resource_id: str,
+        status: str,
+        *,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> bool:
         """Mark a resource as active / superseded / conflict."""
         resource_id = self._required_text(resource_id, "resource_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         status = self._required_text(status, "status")
         if status not in self.CONSOLIDATION_STATUSES:
             raise ValueError(
@@ -1674,26 +2286,32 @@ class WorkspaceKnowledgeStore:
                 """
                 UPDATE knowledge_resources
                 SET consolidation_status = ?, updated_at = updated_at
-                WHERE id = ?
+                WHERE id = ? AND tenant_id = ? AND workspace_id = ?
                 """,
-                (status, resource_id),
+                (status, resource_id, tenant_id, workspace_id),
             )
         return cursor.rowcount > 0
 
     def set_supersedes(
-        self, resource_id: str, superseded_id: Optional[str]
+        self,
+        resource_id: str,
+        superseded_id: Optional[str],
+        *,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> bool:
         """Link a newer resource to the one it supersedes."""
         resource_id = self._required_text(resource_id, "resource_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         superseded_id = self._optional_text(superseded_id, "superseded_id")
         with self._connection(write=True) as connection:
             cursor = connection.execute(
                 """
                 UPDATE knowledge_resources
                 SET supersedes = ?, updated_at = updated_at
-                WHERE id = ?
+                WHERE id = ? AND tenant_id = ? AND workspace_id = ?
                 """,
-                (superseded_id, resource_id),
+                (superseded_id, resource_id, tenant_id, workspace_id),
             )
         return cursor.rowcount > 0
 
@@ -1702,15 +2320,20 @@ class WorkspaceKnowledgeStore:
         resource_id: str,
         episode_id: str,
         version: Optional[int] = None,
+        *,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> bool:
         """Tag a version with the episode that produced/confirmed it."""
         resource_id = self._required_text(resource_id, "resource_id")
         episode_id = self._required_text(episode_id, "episode_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         with self._connection() as connection:
             if version is None:
                 row = connection.execute(
-                    "SELECT current_version FROM knowledge_resources WHERE id = ?",
-                    (resource_id,),
+                    """SELECT current_version FROM knowledge_resources
+                    WHERE id = ? AND tenant_id = ? AND workspace_id = ?""",
+                    (resource_id, tenant_id, workspace_id),
                 ).fetchone()
                 if row is None:
                     return False
@@ -1720,21 +2343,22 @@ class WorkspaceKnowledgeStore:
                 """
                 UPDATE knowledge_versions
                 SET source_episode = ?
-                WHERE resource_id = ? AND version = ?
+                WHERE resource_id = ? AND tenant_id = ? AND version = ?
                 """,
-                (episode_id, resource_id, version),
+                (episode_id, resource_id, tenant_id, version),
             )
         return cursor.rowcount > 0
 
     def iter_active_resources(
         self,
         *,
-        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         consolidation_status: Optional[str] = None,
         limit: int = 5000,
     ) -> Iterator[dict[str, Any]]:
         """Yield current versions of resources for consolidation scanning."""
-        workspace_id = self._required_text(workspace_id, "workspace_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         if (
             isinstance(limit, bool)
             or not isinstance(limit, int)
@@ -1744,8 +2368,12 @@ class WorkspaceKnowledgeStore:
         # Consolidation scans the whole base; allow a larger ceiling than the
         # public search limit but keep it bounded.
         limit = min(limit, self.MAX_SEARCH_LIMIT * 50)
-        clauses = ["r.workspace_id = ?", "r.status = 'active'"]
-        params: list[Any] = [workspace_id]
+        clauses = [
+            "r.tenant_id = ?",
+            "r.workspace_id = ?",
+            "r.status = 'active'",
+        ]
+        params: list[Any] = [tenant_id, workspace_id]
         if consolidation_status is not None:
             if consolidation_status not in self.CONSOLIDATION_STATUSES:
                 raise ValueError("unsupported consolidation_status")
@@ -1755,7 +2383,7 @@ class WorkspaceKnowledgeStore:
         with self._connection() as connection:
             rows = connection.execute(
                 f"""
-                SELECT r.id, r.title, r.resource_type, r.source_type,
+                SELECT r.id, r.tenant_id, r.title, r.resource_type, r.source_type,
                     r.current_version, r.confidence, r.consolidation_status,
                     r.supersedes, r.last_hit, r.metadata_json, r.updated_at,
                     v.content_hash, v.searchable_text, v.source_episode
@@ -1770,6 +2398,7 @@ class WorkspaceKnowledgeStore:
         for row in rows:
             yield {
                 "id": row["id"],
+                "tenant_id": row["tenant_id"],
                 "title": row["title"],
                 "resource_type": row["resource_type"],
                 "source_type": row["source_type"],
@@ -1792,16 +2421,22 @@ class WorkspaceKnowledgeStore:
                 "available": False,
                 "count": 0,
                 "last_search_mode": self.last_search_mode,
+                "sync_pending": False,
                 "last_error": "vector search disabled",
             }
         status = self.vector_store.status()
         status["last_search_mode"] = self.last_search_mode
+        status["sync_pending"] = self.sync_pending
         return status
+
+    def sync_vector_index(self, *, force: bool = False) -> dict[str, Any]:
+        """Synchronize the derived index from committed knowledge state."""
+        self._sync_vector_index(force=force)
+        return self.vector_status()
 
     def rebuild_vector_index(self) -> dict[str, Any]:
         """Rebuild all active current-version resource chunks."""
-        self._sync_vector_index(force=True)
-        return self.vector_status()
+        return self.sync_vector_index(force=True)
 
     def _sync_vector_index(self, *, force: bool = False) -> None:
         vector_store = self.vector_store
@@ -1815,7 +2450,7 @@ class WorkspaceKnowledgeStore:
             with self._connection() as connection:
                 rows = connection.execute(
                     """
-                    SELECT r.id, r.workspace_id, r.title, r.resource_type,
+                    SELECT r.id, r.tenant_id, r.workspace_id, r.title, r.resource_type,
                         r.source_type, r.current_version, v.content_hash,
                         v.searchable_text, v.structured_data_json
                     FROM knowledge_resources r
@@ -1823,7 +2458,7 @@ class WorkspaceKnowledgeStore:
                       ON v.resource_id = r.id AND v.version = r.current_version
                     WHERE r.status = 'active'
                       AND r.consolidation_status = 'active'
-                    ORDER BY r.workspace_id, r.id
+                    ORDER BY r.tenant_id, r.workspace_id, r.id
                     """
                 ).fetchall()
             specs = self._vector_specs(rows)
@@ -1832,6 +2467,7 @@ class WorkspaceKnowledgeStore:
                 vector_store.replace(
                     [self._embedded_vector_entry(item) for item in specs]
                 )
+                self.sync_pending = False
                 return
 
             changed = [
@@ -1844,11 +2480,103 @@ class WorkspaceKnowledgeStore:
                     [self._embedded_vector_entry(item) for item in changed],
                     delete_ids=removed_ids,
                 )
+            self.sync_pending = False
 
-    def _sync_vector_index_best_effort(self) -> None:
+    def _sync_vector_resources(
+        self,
+        resource_ids: Iterable[str],
+        *,
+        tenant_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+    ) -> None:
+        """Update only resources changed by the just-committed transaction."""
+        vector_store = self.vector_store
+        if vector_store is None or not vector_store.available:
+            return
+        normalized_ids = {
+            self._required_text(resource_id, "resource_id")
+            for resource_id in resource_ids
+        }
+        if not normalized_ids:
+            self.sync_pending = False
+            return
+        with self._vector_lock:
+            if vector_store.needs_rebuild:
+                raise RuntimeError(
+                    "vector index requires a full rebuild before incremental sync"
+                )
+            current_entries = vector_store.list_entries()
+            current = {
+                item["id"]: item["metadata"]
+                for item in current_entries
+                if (item.get("metadata") or {}).get("resource_id")
+                in normalized_ids
+                and (
+                    tenant_id is None
+                    or (item.get("metadata") or {}).get("tenant_id") == tenant_id
+                )
+                and (
+                    workspace_id is None
+                    or (item.get("metadata") or {}).get("workspace_id")
+                    == workspace_id
+                )
+            }
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            scope_clauses = [f"r.id IN ({placeholders})"]
+            scope_parameters: list[Any] = list(normalized_ids)
+            if tenant_id is not None:
+                scope_clauses.append("r.tenant_id = ?")
+                scope_parameters.append(tenant_id)
+            if workspace_id is not None:
+                scope_clauses.append("r.workspace_id = ?")
+                scope_parameters.append(workspace_id)
+            with self._connection() as connection:
+                rows = connection.execute(
+                    f"""
+                    SELECT r.id, r.tenant_id, r.workspace_id, r.title,
+                        r.resource_type, r.source_type, r.current_version,
+                        v.content_hash, v.searchable_text, v.structured_data_json
+                    FROM knowledge_resources r
+                    JOIN knowledge_versions v
+                      ON v.resource_id = r.id AND v.version = r.current_version
+                    WHERE {' AND '.join(scope_clauses)}
+                      AND r.status = 'active'
+                      AND r.consolidation_status = 'active'
+                    """,
+                    tuple(scope_parameters),
+                ).fetchall()
+            specs = self._vector_specs(rows)
+            desired = {item["id"]: item["metadata"] for item in specs}
+            changed = [
+                item for item in specs
+                if current.get(item["id"]) != item["metadata"]
+            ]
+            removed_ids = set(current) - set(desired)
+            if changed or removed_ids:
+                vector_store.sync(
+                    [self._embedded_vector_entry(item) for item in changed],
+                    delete_ids=removed_ids,
+                )
+            self.sync_pending = False
+
+    def _sync_vector_index_best_effort(
+        self,
+        *,
+        resource_ids: Optional[Iterable[str]] = None,
+        tenant_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+    ) -> None:
         """Keep committed knowledge authoritative when the derived index fails."""
+        self.sync_pending = self.vector_store is not None
         try:
-            self._sync_vector_index()
+            if resource_ids is None:
+                self._sync_vector_index()
+            else:
+                self._sync_vector_resources(
+                    resource_ids,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                )
         except Exception as error:
             if self.vector_store is not None:
                 self.vector_store.needs_rebuild = True
@@ -1876,11 +2604,12 @@ class WorkspaceKnowledgeStore:
             chunks = self._chunk_vector_text(body)
             for chunk_index, chunk_text in enumerate(chunks):
                 logical_id = (
-                    f"knowledge:{row['workspace_id']}:{row['id']}:"
+                    f"knowledge:{row['tenant_id']}:{row['workspace_id']}:{row['id']}:"
                     f"v{int(row['current_version'])}:c{chunk_index}"
                 )
                 metadata = {
                     "resource_id": row["id"],
+                    "tenant_id": row["tenant_id"],
                     "workspace_id": row["workspace_id"],
                     "current_version": int(row["current_version"]),
                     "content_hash": row["content_hash"],
@@ -1915,7 +2644,7 @@ class WorkspaceKnowledgeStore:
         )
         if not normalized:
             return []
-        chunks = []
+        chunks: list[str] = []
         start = 0
         while start < len(normalized) and len(chunks) < cls.MAX_VECTOR_CHUNKS_PER_RESOURCE:
             end = min(len(normalized), start + cls.VECTOR_CHUNK_CHARS)
@@ -1937,6 +2666,7 @@ class WorkspaceKnowledgeStore:
         self,
         query: str,
         *,
+        tenant_id: str,
         workspace_id: str,
         limit: int,
         resource_types: frozenset[str],
@@ -1945,8 +2675,10 @@ class WorkspaceKnowledgeStore:
         vector_store = self.vector_store
         if vector_store is None or not vector_store.available:
             return []
-        self._sync_vector_index()
-        filters: dict[str, Any] = {"workspace_id": workspace_id}
+        filters: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "workspace_id": workspace_id,
+        }
         if resource_types:
             filters["resource_type"] = resource_types
         if source_types:
@@ -1965,7 +2697,7 @@ class WorkspaceKnowledgeStore:
                 if (item.get("metadata") or {}).get("resource_id")
             }
             if len(resource_ids) >= limit or candidate_k >= vector_store.count:
-                return matches
+                return cast(list[dict[str, Any]], matches)
             candidate_k = min(vector_store.count, candidate_k * 2)
         return []
 
@@ -1973,7 +2705,8 @@ class WorkspaceKnowledgeStore:
         self,
         query: str,
         *,
-        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         limit: int = 10,
         resource_types: Optional[Iterable[str]] = None,
         source_types: Optional[Iterable[str]] = None,
@@ -1984,7 +2717,7 @@ class WorkspaceKnowledgeStore:
     ) -> list[dict[str, Any]]:
         """Search current active resource versions and accepted rules."""
         query = self._required_text(query, "query")
-        workspace_id = self._required_text(workspace_id, "workspace_id")
+        tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         limit = self._validate_limit(limit)
         if (
             isinstance(max_text_chars, bool)
@@ -2014,11 +2747,11 @@ class WorkspaceKnowledgeStore:
             FROM knowledge_resources r
             JOIN knowledge_versions v
                 ON v.resource_id = r.id AND v.version = r.current_version
-            WHERE r.workspace_id = ?
+            WHERE r.tenant_id = ? AND r.workspace_id = ?
                 AND r.status = 'active'
                 AND r.consolidation_status = 'active'
         """
-        resource_params: list[Any] = [workspace_id]
+        resource_params: list[Any] = [tenant_id, workspace_id]
         if resource_type_filter:
             placeholders = ", ".join("?" for _ in resource_type_filter)
             resource_sql += f" AND r.resource_type IN ({placeholders})"
@@ -2033,9 +2766,9 @@ class WorkspaceKnowledgeStore:
             resource_rows = connection.execute(resource_sql, resource_params).fetchall()
             rule_sql = (
                 "SELECT * FROM knowledge_rules "
-                "WHERE workspace_id = ? AND status = 'accepted'"
+                "WHERE tenant_id = ? AND workspace_id = ? AND status = 'accepted'"
             )
-            rule_params: list[Any] = [workspace_id]
+            rule_params: list[Any] = [tenant_id, workspace_id]
             # Pre-filter accepted rules by a literal query match so the LIMIT
             # applies to already-relevant rows instead of silently dropping
             # older-but-matching rules (the Python scorer only keeps
@@ -2085,6 +2818,7 @@ class WorkspaceKnowledgeStore:
             try:
                 vector_hits = self._search_vectors(
                     query,
+                    tenant_id=tenant_id,
                     workspace_id=workspace_id,
                     limit=limit,
                     resource_types=resource_type_filter,
@@ -2104,6 +2838,8 @@ class WorkspaceKnowledgeStore:
         for hit in vector_hits:
             metadata = hit.get("metadata") or {}
             resource_id = metadata.get("resource_id")
+            if not isinstance(resource_id, str) or not resource_id:
+                continue
             row = eligible_rows.get(resource_id)
             if row is None:
                 continue
@@ -2267,6 +3003,7 @@ class WorkspaceKnowledgeStore:
     def _ingestion_proposal_record(cls, row: sqlite3.Row) -> dict[str, Any]:
         return {
             "id": row["id"],
+            "tenant_id": row["tenant_id"],
             "workspace_id": row["workspace_id"],
             "conversation_id": row["conversation_id"],
             "turn_id": row["turn_id"],
@@ -2305,6 +3042,7 @@ class WorkspaceKnowledgeStore:
     ) -> dict[str, Any]:
         return {
             "id": resource_row["id"],
+            "tenant_id": resource_row["tenant_id"],
             "workspace_id": resource_row["workspace_id"],
             "title": resource_row["title"],
             "resource_type": resource_row["resource_type"],
@@ -2329,6 +3067,7 @@ class WorkspaceKnowledgeStore:
     def _joined_resource_record(cls, row: sqlite3.Row) -> dict[str, Any]:
         return {
             "id": row["id"],
+            "tenant_id": row["tenant_id"],
             "workspace_id": row["workspace_id"],
             "title": row["title"],
             "resource_type": row["resource_type"],
@@ -2393,6 +3132,7 @@ class WorkspaceKnowledgeStore:
     def _rule_record(cls, row: sqlite3.Row) -> dict[str, Any]:
         return {
             "id": row["id"],
+            "tenant_id": row["tenant_id"],
             "workspace_id": row["workspace_id"],
             "statement": row["statement"],
             "scope": row["scope"],

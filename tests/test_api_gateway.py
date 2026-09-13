@@ -286,6 +286,14 @@ def test_failed_chat_outcome_is_structured_and_does_not_leak_provider_error(gate
     assert response.json()["error"]["code"] == "chat_failed"
     assert "secret provider stack trace" not in response.text
     assert response.headers["x-request-id"] == response.json()["error"]["request_id"]
+    conversation = services.conversations.list_conversations(
+        workspace_id="local-default", limit=1
+    )[0]
+    messages = services.conversations.list_messages(
+        conversation["id"], workspace_id="local-default"
+    )
+    assert messages[-1]["metadata"]["error"] == "chat_failed"
+    assert "secret provider" not in str(messages[-1]["metadata"])
 
 
 def test_chat_handler_exception_persists_a_safe_error_callback(gateway):
@@ -314,6 +322,26 @@ def test_chat_handler_exception_persists_a_safe_error_callback(gateway):
     assert messages[-1]["status"] == "error"
     assert messages[-1]["content"] == "请求处理失败，请稍后重试。"
     assert "secret provider" not in str(messages[-1])
+
+
+def test_async_chat_handler_is_supported_by_the_gateway(gateway):
+    client, services, _ = gateway
+
+    async def async_chat(command):
+        return ChatOutcome(
+            response=f"async:{command.message}",
+            handled_by="async-test-adapter",
+        )
+
+    services.chat_async_handler = async_chat
+    response = client.post(
+        "/v1/chat",
+        headers=_headers(),
+        json={"message": "hello async"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["response"] == "async:hello async"
 
 
 def test_validation_errors_do_not_echo_sensitive_request_values(gateway):
@@ -368,6 +396,33 @@ def test_chat_is_persisted_and_workspace_scoped(gateway):
     assert crossed.json()["items"] == []
 
 
+def test_same_workspace_cannot_be_reused_by_another_tenant(gateway):
+    client, services, _ = gateway
+    _add_workspace(services.conversations, "shared-workspace")
+    tenant_a = {
+        **_headers("shared-workspace", actor="alice"),
+        "x-tenant-id": "tenant-a",
+    }
+    tenant_b = {
+        **_headers("shared-workspace", actor="bob"),
+        "x-tenant-id": "tenant-b",
+    }
+
+    created = client.post("/v1/chat", headers=tenant_a, json={"message": "private"})
+    assert created.status_code == 200
+
+    crossed = client.post(
+        "/v1/chat",
+        headers=tenant_b,
+        json={
+            "message": "cross-tenant access",
+            "conversation_id": created.json()["conversation_id"],
+        },
+    )
+    assert crossed.status_code == 403
+    assert crossed.json()["error"]["code"] == "workspace_tenant_mismatch"
+
+
 def test_default_runtime_excludes_current_user_message_from_history(monkeypatch):
     import threading
     from unittest.mock import Mock
@@ -406,6 +461,111 @@ def test_default_runtime_excludes_current_user_message_from_history(monkeypatch)
         before_message_id=42,
         workspace_id="workspace-a",
     )
+
+
+def test_default_runtime_records_scoped_episode(monkeypatch):
+    import threading
+    from unittest.mock import Mock
+
+    import artpm_agent.harness as harness
+    from artpm_agent.harness import BaseHarnessRuntime, TurnResult
+    from artpm_agent.harness.outcome_recorder import default_episode_db_path
+    from artpm_agent.memory.episode_store import EpisodeStore
+
+    runtime = object.__new__(DefaultGatewayRuntime)
+    runtime._lock = threading.RLock()
+    runtime.conversations = Mock()
+    runtime.permissions = Mock()
+    runtime.conversations.build_context.return_value = []
+    agent = BaseHarnessRuntime()
+    monkeypatch.setattr(runtime, "_ensure_agent", lambda: agent)
+    monkeypatch.setattr(runtime, "_ensure_workflow_runtime", lambda _tenant: (None, None))
+    monkeypatch.setattr(
+        harness,
+        "run_turn",
+        lambda *_args, **_kwargs: TurnResult(response="ok", handled_by="test"),
+    )
+    principal = RequestPrincipal(
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+        actor_id="alice",
+    )
+    command = ChatCommand(
+        principal=principal,
+        conversation_id="conversation-a",
+        turn_id="turn-a",
+        message="current question",
+        tenant_context=principal.tenant_context(),
+    )
+
+    assert runtime.chat(command).response == "ok"
+
+    episodes = EpisodeStore(default_episode_db_path()).recent(
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+        principal_id="alice",
+    )
+    assert [(episode.turn_id, episode.handler) for episode in episodes] == [
+        ("turn-a", "test")
+    ]
+
+
+def test_default_runtime_uses_tenant_scoped_harness_adapter(monkeypatch):
+    import threading
+    from unittest.mock import Mock
+
+    import artpm_agent.harness as harness
+    from artpm_agent.harness.runtime import LegacyAgentRuntimeAdapter
+    from artpm_agent.harness import TurnResult
+
+    class Router:
+        skills = {}
+
+        def __init__(self):
+            self.bound = None
+
+        def for_tenant(self, context):
+            scoped = Router()
+            scoped.bound = context
+            return scoped
+
+    class Agent:
+        def __init__(self):
+            self.router = Router()
+
+    runtime = object.__new__(DefaultGatewayRuntime)
+    runtime._lock = threading.RLock()
+    runtime.conversations = Mock()
+    runtime.permissions = Mock()
+    runtime.conversations.build_context.return_value = []
+    agent = Agent()
+    monkeypatch.setattr(runtime, "_ensure_agent", lambda: agent)
+    monkeypatch.setattr(runtime, "_ensure_workflow_runtime", lambda _tenant: (None, None))
+    captured = {}
+
+    def capture(ctx, **_kwargs):
+        captured["ctx"] = ctx
+        return TurnResult(response="ok", handled_by="test")
+
+    monkeypatch.setattr(harness, "run_turn", capture)
+    principal = RequestPrincipal(
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+        actor_id="alice",
+    )
+    command = ChatCommand(
+        principal=principal,
+        conversation_id="conversation-a",
+        turn_id="turn-a",
+        message="current question",
+        tenant_context=principal.tenant_context(),
+    )
+
+    assert runtime.chat(command).response == "ok"
+    context = captured["ctx"]
+    assert context.agent is None
+    assert isinstance(context.runtime, LegacyAgentRuntimeAdapter)
+    assert context.runtime._router.bound == principal.tenant_context()
 
 
 def test_capabilities_are_available_without_initializing_agent(gateway):

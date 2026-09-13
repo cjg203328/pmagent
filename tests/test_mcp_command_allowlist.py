@@ -39,11 +39,12 @@ async def test_allowlist_permits_listed_executable(tmp_path):
     assert "ok" in result["stdout"]
 
 
-async def test_empty_allowlist_allows_any_command_when_enabled(tmp_path):
+async def test_empty_allowlist_blocks_command_even_when_enabled(tmp_path):
     client = EnhancedMCPClient(str(tmp_path), allow_commands=True)
     client.command_allowlist = frozenset()
     result = await client.call_tool("execute_command", {"command": _PY})
-    assert result["success"] is True
+    assert result["success"] is False
+    assert "non-empty" in result["error"]
 
 
 def test_allowlist_parsed_from_env(monkeypatch, tmp_path):

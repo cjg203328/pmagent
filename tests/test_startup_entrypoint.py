@@ -119,6 +119,48 @@ def test_api_readiness_requires_strict_ready_payload(monkeypatch):
     assert start_with_checks._api_health_url().endswith("/ready")
 
 
+def test_config_checker_failure_blocks_startup(monkeypatch, capsys):
+    def broken_check():
+        raise RuntimeError("validator crashed")
+
+    monkeypatch.setattr(
+        "artpm_agent.tools.check_config.main",
+        broken_check,
+    )
+
+    assert start_with_checks.run_config_check() is False
+    assert "Startup is blocked" in capsys.readouterr().out
+
+
+def test_check_only_does_not_start_stack(monkeypatch):
+    monkeypatch.setattr(start_with_checks, "run_config_check", lambda: True)
+    start = Mock()
+    monkeypatch.setattr(start_with_checks, "start_stack", start)
+
+    start_with_checks.main(["--check-only"])
+
+    start.assert_not_called()
+
+
+def test_startup_help_exits_before_running_checks_or_stack(monkeypatch, capsys):
+    monkeypatch.setattr(
+        start_with_checks,
+        "run_config_check",
+        lambda: pytest.fail("--help must not run configuration checks"),
+    )
+    monkeypatch.setattr(
+        start_with_checks,
+        "start_stack",
+        lambda: pytest.fail("--help must not start the stack"),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        start_with_checks.main(["--help"])
+
+    assert error.value.code == 0
+    assert "--check-only" in capsys.readouterr().out
+
+
 def test_windows_restart_stops_identified_api_before_starting():
     script = Path("restart.bat").read_text(encoding="utf-8")
 

@@ -1,61 +1,63 @@
-"""
-测试 MCP 连接
-"""
-import sys
-from pathlib import Path
+"""Live MCP transport contract.
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+The test is intentionally opt-in because it starts the configured MCP
+transport and may require npm/network access.  Run it with
+``ART_ENABLE_INTEGRATION=1`` and a valid ``SKILLS_FORGE_KEY``.
+"""
 
-from artpm_agent.core.mcp_client import get_mcp_client
-import asyncio
+from __future__ import annotations
+
+import os
+import shutil
+
 import pytest
+from dotenv import load_dotenv
+
+from artpm_agent.core.mcp_client import MCPClient
+from artpm_agent.core.mcp_client_stdio import (
+    SKILLS_FORGE_ALLOWED_TOOLS,
+    StdioMCPClient,
+)
+from artpm_agent.utils.llm_client import is_valid_api_key
 
 
 @pytest.mark.integration
-def test_mcp_connection():
-    """测试 MCP 连接"""
-    print("=" * 60)
-    print("MCP Connection Test")
-    print("=" * 60)
+def test_mcp_connection() -> None:
+    """Verify one real MCP handshake and the read-only tool boundary."""
 
-    # 获取 MCP 客户端
-    client = get_mcp_client()
+    # Local deployments keep integration credentials in .env; CI can provide
+    # the same values through the process environment instead.
+    load_dotenv()
+    if os.getenv("MCP_ENABLED", "false").lower() != "true":
+        pytest.skip("set MCP_ENABLED=true for a live MCP integration run")
 
-    print(f"\nMCP Enabled: {client.enabled}")
+    api_key = os.getenv("SKILLS_FORGE_KEY", "").strip()
+    if not is_valid_api_key(api_key):
+        pytest.skip("SKILLS_FORGE_KEY is not configured for the integration run")
 
-    if client.enabled:
-        # 列出技能
-        skills = client.list_skills()
-        print(f"\nAvailable Skills ({len(skills)}):")
-        for skill in skills:
-            print(f"  - {skill['name']}: {skill['description']}")
-
-        # 测试调用技能
-        print("\n" + "=" * 60)
-        print("Testing Skill Call")
-        print("=" * 60)
-
-        async def test_call():
-            result = await client.call_skill("web_search", {"query": "test"})
-            print("\nResult:")
-            print(f"  Success: {result['success']}")
-            if result['success']:
-                print(f"  Message: {result['result']}")
-                print(f"  Data: {result['data']}")
-            else:
-                print(f"  Error: {result.get('error')}")
-
-        asyncio.run(test_call())
-
+    transport = os.getenv("MCP_TRANSPORT", "stdio").strip().lower()
+    client: StdioMCPClient | MCPClient
+    if transport == "stdio":
+        if shutil.which("npx") is None:
+            pytest.skip("npx is required for the stdio MCP integration")
+        client = StdioMCPClient(api_key=api_key, enabled=True)
+    elif transport == "http":
+        if not os.getenv("SKILLS_FORGE_URL", "").strip():
+            pytest.skip("SKILLS_FORGE_URL is required for HTTP MCP integration")
+        client = MCPClient(api_key=api_key)
     else:
-        print("\nWARNING: MCP is disabled. Check your .env configuration:")
-        print("  - SKILLS_FORGE_KEY=sk_live_...")
-        print("  - MCP_ENABLED=true")
+        pytest.fail(f"unsupported MCP_TRANSPORT: {transport}")
 
-    print("\n" + "=" * 60)
-    print("Test Complete")
-    print("=" * 60)
+    try:
+        ok, message = client.ping()
+        assert ok, message
 
-
-if __name__ == "__main__":
-    test_mcp_connection()
+        skills = client.list_skills()
+        names = {str(item.get("name")) for item in skills}
+        assert names, "MCP handshake returned no tools"
+        assert names <= set(SKILLS_FORGE_ALLOWED_TOOLS), (
+            "MCP exposed a tool outside the read-only allowlist: "
+            + ", ".join(sorted(names - set(SKILLS_FORGE_ALLOWED_TOOLS)))
+        )
+    finally:
+        client.close()

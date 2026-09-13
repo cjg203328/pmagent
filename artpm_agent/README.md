@@ -1,14 +1,26 @@
-# ArtPM Agent 源码目录
+# ArtPM Agent 源码包
 
-项目的权威启动、配置、架构和测试说明位于上级目录 [README.md](../README.md)。
+项目的启动、配置、架构和测试说明统一位于仓库根目录：
+[`README.md`](../README.md)。本文件只说明包内职责，避免在源码目录重复维护产品文档。
 
-主要入口：
+## 入口
 
-- `app.py`：Streamlit Web 应用。
-- `main.py`：命令行交互入口。
-- `agent.py`：意图识别与 Skill 调度。
-- `skills/`：当前业务实现。
+- `app.py`：Streamlit Web 应用入口。
+- `main.py`：命令行入口。
+- `api/`：FastAPI 网关及 API 模型。
+- `agent.py`：兼容 facade 和业务 Agent 组装。
+- `harness/`、`runtime/`：请求主链、回合运行时和工具流水线。
 
-`app_old.py`、`app_backup.py`、`app_simple.py` 仅保留为历史参考，不是受支持的启动入口。
+## 主要模块
 
-`core/chat_agent.py`、`core/llm_client.py`、`core/rag_system.py`、`core/tools.py`、`core/skills.py`、`core/mcp_skills.py` 属于早期实验架构，当前应用不会导入；当前实现以 `agent.py`、`skills/`、`memory/` 为准。
+- `skills/`：业务技能和技能路由。
+- `memory/`：会话、记忆、向量和 workspace 知识存储。
+- `providers/`：模型 provider、故障转移、结构化输出和响应缓存。
+- `database/`：数据库模型、连接和迁移适配。
+- `security/`、`tenancy/`：权限审批和租户上下文。
+- `views/`：Streamlit 页面；`ui_*.py`：共享 UI 状态、样式和反馈。
+- `core/`、`utils/`：基础设施客户端和通用工具。
+
+新增业务代码应进入对应子包，不要在包根目录新增产品文档、脚本或运行产物。
+历史说明保存在 [`docs/archive/`](../docs/archive/)，当前文档入口见
+[`docs/INDEX.md`](../docs/INDEX.md)。

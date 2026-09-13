@@ -1,6 +1,8 @@
 # Runtime dependencies are managed by pyproject.toml as the single source.
 # Recommended installation:
 #   pip install -e .
+#   pip install -e ".[production]" # API + PostgreSQL + Qdrant + Redis + observability
+#   pip install -e ".[api]"        # FastAPI gateway only
 #   pip install -e ".[ocr,vector]"   # Optional OCR and vector extras.
 #   pip install -e ".[mineru]"      # Optional pinned MinerU pipeline runtime.
 #   pip install -e ".[mineru-client]" # Lightweight remote MinerU client.

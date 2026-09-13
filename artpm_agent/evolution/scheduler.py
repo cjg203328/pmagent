@@ -20,6 +20,7 @@ from artpm_agent.memory.episode_store import EpisodeStore
 from artpm_agent.memory.feedback_store import FeedbackStore
 from artpm_agent.evolution.strategy_store import StrategyStore
 from artpm_agent.evolution.reflection import ReflectionReport, run_reflection
+from artpm_agent.tenancy import TenantContextManager, WorkspaceAccessDenied
 
 
 class ReflectionScheduler:
@@ -36,18 +37,70 @@ class ReflectionScheduler:
                 """
                 CREATE TABLE IF NOT EXISTS reflection_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
+                    workspace_id TEXT NOT NULL DEFAULT 'local-default',
                     ran_at TEXT,
                     episode_count INTEGER
                 )
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(reflection_runs)"
+                ).fetchall()
+            }
+            for name, definition in (
+                ("tenant_id", "TEXT NOT NULL DEFAULT 'local'"),
+                ("workspace_id", "TEXT NOT NULL DEFAULT 'local-default'"),
+            ):
+                if name not in columns:
+                    conn.execute(
+                        f"ALTER TABLE reflection_runs ADD COLUMN {name} {definition}"
+                    )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reflection_runs_scope "
+                "ON reflection_runs(tenant_id, workspace_id, id)"
+            )
 
-    def last_run(self) -> tuple[Optional[str], int]:
+    @staticmethod
+    def _resolve_scope(
+        tenant_id: Optional[str], workspace_id: Optional[str]
+    ) -> tuple[str, str]:
+        current = TenantContextManager.get_current()
+        if current is not None:
+            requested_tenant = str(tenant_id or "").strip()
+            requested_workspace = str(workspace_id or "").strip()
+            if requested_tenant and requested_tenant != current.tenant_id:
+                raise WorkspaceAccessDenied(
+                    "tenant does not match the authenticated context"
+                )
+            if requested_workspace and requested_workspace != current.workspace_id:
+                raise WorkspaceAccessDenied(
+                    "workspace does not match the authenticated context"
+                )
+            return current.tenant_id, current.workspace_id
+        return (
+            str(tenant_id or "local").strip() or "local",
+            str(workspace_id or "local-default").strip() or "local-default",
+        )
+
+    def last_run(
+        self,
+        *,
+        tenant_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+    ) -> tuple[Optional[str], int]:
         """Return (last_ran_at_iso, episode_count_at_that_time)."""
+        resolved_tenant, resolved_workspace = self._resolve_scope(
+            tenant_id, workspace_id
+        )
         with self.db.get_connection() as conn:
             row = conn.execute(
                 "SELECT ran_at, episode_count FROM reflection_runs "
-                "ORDER BY id DESC LIMIT 1"
+                "WHERE tenant_id = ? AND workspace_id = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (resolved_tenant, resolved_workspace),
             ).fetchone()
         if not row:
             return None, 0
@@ -59,8 +112,13 @@ class ReflectionScheduler:
         interval_minutes: int = 30,
         min_new_episodes: int = 5,
         current_episode_count: int = 0,
+        tenant_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
     ) -> bool:
-        ran_at, last_count = self.last_run()
+        ran_at, last_count = self.last_run(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
         if ran_at is None:
             return True
         try:
@@ -72,11 +130,27 @@ class ReflectionScheduler:
             return False
         return (current_episode_count - last_count) >= min_new_episodes
 
-    def mark_run(self, episode_count: int) -> None:
+    def mark_run(
+        self,
+        episode_count: int,
+        *,
+        tenant_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+    ) -> None:
+        resolved_tenant, resolved_workspace = self._resolve_scope(
+            tenant_id, workspace_id
+        )
         with self.db.get_connection() as conn:
             conn.execute(
-                "INSERT INTO reflection_runs (ran_at, episode_count) VALUES (?, ?)",
-                (datetime.now(timezone.utc).isoformat(), episode_count),
+                "INSERT INTO reflection_runs "
+                "(tenant_id, workspace_id, ran_at, episode_count) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    resolved_tenant,
+                    resolved_workspace,
+                    datetime.now(timezone.utc).isoformat(),
+                    episode_count,
+                ),
             )
 
     def run_if_due(
@@ -87,15 +161,30 @@ class ReflectionScheduler:
         *,
         interval_minutes: int = 30,
         min_new_episodes: int = 5,
+        tenant_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        all_principals: bool = True,
         **reflection_kw,
     ) -> Optional[ReflectionReport]:
         """Run reflection only when due; otherwise return None."""
-        ran_at, _ = self.last_run()
-        current = episode_store.count()
+        resolved_tenant, resolved_workspace = self._resolve_scope(
+            tenant_id, workspace_id
+        )
+        ran_at, _ = self.last_run(
+            tenant_id=resolved_tenant,
+            workspace_id=resolved_workspace,
+        )
+        current = episode_store.count(
+            tenant_id=resolved_tenant,
+            workspace_id=resolved_workspace,
+            all_principals=all_principals,
+        )
         if not self.should_run(
             interval_minutes=interval_minutes,
             min_new_episodes=min_new_episodes,
             current_episode_count=current,
+            tenant_id=resolved_tenant,
+            workspace_id=resolved_workspace,
         ):
             return None
         # A scheduler run is an incremental checkpoint.  Passing the previous
@@ -104,13 +193,20 @@ class ReflectionScheduler:
         # run intentionally keeps ``since=None`` and analyzes the backlog.
         if ran_at:
             reflection_kw["since"] = ran_at
+        reflection_kw.setdefault("tenant_id", resolved_tenant)
+        reflection_kw.setdefault("workspace_id", resolved_workspace)
+        reflection_kw.setdefault("all_principals", all_principals)
         report = run_reflection(
             episode_store,
             feedback_store,
             strategy_store,
             **reflection_kw,
         )
-        self.mark_run(current)
+        self.mark_run(
+            current,
+            tenant_id=resolved_tenant,
+            workspace_id=resolved_workspace,
+        )
         return report
 
 

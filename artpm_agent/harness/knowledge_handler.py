@@ -8,6 +8,8 @@ Migrated from pages/chat.py lines 268-310.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
+from inspect import Parameter, signature
 from typing import TYPE_CHECKING, Any, List, Optional
 
 from artpm_agent.utils.mineru_adapter import MINERU_IMAGE_SUFFIXES
@@ -97,18 +99,26 @@ def try_knowledge_ingestion(
         if ctx.runtime is None or not ctx.runtime.capabilities.document_parsing:
             raise RuntimeError("document parsing runtime is unavailable")
         resources = _build_knowledge_ingestion_resources(
-            ctx.runtime, attachments, file_paths, ctx.user_input
+            ctx.runtime,
+            attachments,
+            file_paths,
+            ctx.user_input,
+            parsed_files=ctx.extra.get("parsed_files"),
         )
 
         if knowledge_store is None:
             raise RuntimeError("资料库存储未就绪")
 
-        # Create approval proposal
-        knowledge_store.propose_ingestion(
+        # Create an approval proposal in the authenticated workspace. Legacy
+        # local hosts without a tenant context retain the store's default.
+        scope = _trusted_scope(ctx)
+        _propose_ingestion(
+            knowledge_store,
             request_conversation_id,
             ctx.turn_id,
             resources,
-            f"knowledge-turn-{ctx.turn_id}",
+            workspace_id=scope.workspace_id,
+            tenant_id=scope.tenant_id,
         )
 
         names = "、".join(resource["title"] for resource in resources)
@@ -140,8 +150,81 @@ def try_knowledge_ingestion(
         )
 
 
+def _trusted_scope(ctx: "TurnContext") -> Any:
+    """Resolve the host-authenticated scope for ingestion persistence."""
+
+    from .turn_service import get_turn_scope
+
+    return get_turn_scope(ctx)
+
+
+def _trusted_workspace_id(ctx: "TurnContext") -> Optional[str]:
+    """Resolve a host-authenticated workspace for compatibility callers."""
+
+    return _trusted_scope(ctx).workspace_id
+
+
+def _supports_workspace_keyword(method: Any) -> bool:
+    try:
+        parameters = signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "workspace_id"
+        or parameter.kind is Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _propose_ingestion(
+    knowledge_store: Any,
+    conversation_id: str,
+    turn_id: str,
+    resources: list[dict],
+    *,
+    workspace_id: str,
+    tenant_id: str,
+) -> None:
+    method = knowledge_store.propose_ingestion
+    args = (
+        conversation_id,
+        turn_id,
+        resources,
+        f"knowledge-turn-{turn_id}",
+    )
+    kwargs: dict[str, Any] = {}
+    if _supports_workspace_keyword(method):
+        kwargs["workspace_id"] = workspace_id
+    elif workspace_id != "local-default":
+        raise TypeError(
+            "knowledge store must support workspace-scoped ingestion"
+        )
+    if _supports_keyword(method, "tenant_id"):
+        kwargs["tenant_id"] = tenant_id
+    elif tenant_id != "local":
+        raise TypeError("knowledge store must support tenant-scoped ingestion")
+    method(*args, **kwargs)
+
+
+def _supports_keyword(method: Any, name: str) -> bool:
+    try:
+        parameters = signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == name
+        or parameter.kind is Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
 def _build_knowledge_ingestion_resources(
-    runtime: Any, attachments: List[Any], file_paths: List[str], prompt: str
+    runtime: Any,
+    attachments: List[Any],
+    file_paths: List[str],
+    prompt: str,
+    *,
+    parsed_files: Optional[List[Any]] = None,
 ) -> List[dict]:
     """
     Parse conversation files into bounded, parser-neutral knowledge payloads.
@@ -169,8 +252,13 @@ def _build_knowledge_ingestion_resources(
     if len(attachments) != len(file_paths):
         raise ValueError("附件元数据与文件路径数量不一致")
 
-    for attachment, file_path in zip(attachments, file_paths):
-        result = runtime.process_document(file_path, prompt)
+    cached = parsed_files if isinstance(parsed_files, list) else None
+    for index, (attachment, file_path) in enumerate(zip(attachments, file_paths)):
+        result = (
+            cached[index]
+            if cached is not None and index < len(cached) and isinstance(cached[index], Mapping)
+            else runtime.process_document(file_path, prompt)
+        )
         name = str(attachment.get("name") or Path(file_path).name)
 
         if not result.get("success"):

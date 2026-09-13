@@ -449,4 +449,4 @@ AI:       Anthropic Claude / OpenAI GPT / Zhipu GLM
 - [架构图](docs/ARCHITECTURE.md)
 - [优化计划](.claude/optimization_plan.md)
 - [部署指南](DEPLOY.md)
-- [快速开始](artpm_agent/QUICKSTART.md)
+- [快速开始](../guides/QUICKSTART.md)

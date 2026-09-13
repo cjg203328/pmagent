@@ -5,7 +5,7 @@
 #     安装 wheel 及其预编译依赖，不保留 build-essential，镜像更小更安全
 #   • 所有库/缓存落在 DATA_ROOT（默认 /app/data），由 compose 挂卷持久化
 #   • Streamlit 以 headless 模式运行，适配容器
-#   • 健康检查走 Streamlit /healthz，不启动完整 Agent，开销极低
+#   • 健康检查走 Streamlit 的原生 /_stcore/health，不启动完整 Agent，开销极低
 #   • 不把 .env 烤进镜像，密钥由 compose 挂载
 
 # ───────────────────────── 阶段 1：构建 wheel ─────────────────────────
@@ -47,7 +47,8 @@ RUN groupadd --system --gid 10001 appuser \
 
 # 安装项目 wheel（pip 同时拉取其依赖的预编译 wheel；runtime 无 build-essential）
 COPY --from=builder /wheels /wheels
-RUN python -m pip install --no-cache-dir /wheels/*.whl \
+RUN wheel=$(echo /wheels/*.whl) \
+    && python -m pip install --no-cache-dir "${wheel}[production]" \
     && rm -rf /wheels
 
 # 运行期数据/日志目录（实际由卷挂载覆盖，这里仅作兜底并修正属主）
@@ -55,12 +56,15 @@ RUN mkdir -p /app/data /app/logs \
     && chown -R appuser:appuser /app
 
 COPY .env.example /app/.env.example
+COPY alembic /app/alembic
+COPY alembic.ini /app/alembic.ini
+COPY scripts/migrate_postgres.py /app/scripts/migrate_postgres.py
 
-EXPOSE 8501
+EXPOSE 8501 8765
 
 # 轻量健康检查：仅探测 Streamlit 健康端点，不初始化完整 Agent
 HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
-    CMD python -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:8501/healthz', timeout=4); sys.exit(0)" || exit 1
+    CMD python -c "import urllib.request,sys; response=urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=4); sys.exit(0 if response.status == 200 and response.read(32).strip() == b'ok' else 1)" || exit 1
 
 USER appuser
 

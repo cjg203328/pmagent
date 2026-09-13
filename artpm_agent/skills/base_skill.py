@@ -68,6 +68,26 @@ class BaseSkill(ABC):
         """
         pass
 
+    async def execute_async(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """Canonical non-blocking skill entry point.
+
+        Existing synchronous skills run in the default worker pool. Native
+        async skills are awaited directly, giving every skill one interface
+        without blocking the API event loop.
+        """
+        execute = self.execute
+        if inspect.iscoroutinefunction(execute):
+            result = await execute(inputs)
+        else:
+            result = await asyncio.to_thread(execute, inputs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    async def run_async(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """Run the complete legacy lifecycle outside the caller's event loop."""
+        return await asyncio.to_thread(self.run, inputs)
+
     def validate(self, inputs: Dict[str, Any]) -> Tuple[bool, str]:
         """
         Validate input parameters (can be overridden)

@@ -5,7 +5,11 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
-from .context import TenantContext, WorkspaceAccessDenied
+from .context import (
+    TenantContext,
+    TenantContextManager,
+    WorkspaceAccessDenied,
+)
 
 
 class UnsafeStoreOperation(WorkspaceAccessDenied):
@@ -37,4 +41,21 @@ class WorkspaceStoreGuard:
             )
         requested = kwargs.get("workspace_id")
         kwargs["workspace_id"] = self.context.require_workspace(requested)
-        return method(*args, **kwargs)
+        tenant_parameter = signature.parameters.get("tenant_id")
+        if tenant_parameter is not None or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        ):
+            requested_tenant = kwargs.get("tenant_id")
+            if requested_tenant not in {None, "", self.context.tenant_id}:
+                raise WorkspaceAccessDenied(
+                    "tenant_id does not match the authenticated context"
+                )
+            kwargs["tenant_id"] = self.context.tenant_id
+        current = TenantContextManager.get_current()
+        if current is not None and current != self.context:
+            raise WorkspaceAccessDenied(
+                "store guard context conflicts with authenticated context"
+            )
+        with TenantContextManager.use(self.context):
+            return method(*args, **kwargs)

@@ -9,11 +9,19 @@ from typing import Dict, Any, List, Optional
 from artpm_agent.memory.embeddings import DeterministicEmbeddingProvider, EmbeddingProvider
 from artpm_agent.memory.sqlite_manager import SQLiteManager
 from artpm_agent.memory.vector_store import VectorStore
+from artpm_agent.tenancy import (
+    TenantContext,
+    TenantContextManager,
+    WorkspaceAccessDenied,
+)
 from artpm_agent.utils import generate_uuid
 
 
 class MemoryManager:
     """Memory Manager for ArtPM Agent"""
+
+    DEFAULT_TENANT_ID = "local"
+    DEFAULT_WORKSPACE_ID = "local-default"
 
     def __init__(
         self,
@@ -42,47 +50,137 @@ class MemoryManager:
         self.llm_client = llm_client
         self._sync_vector_index()
 
-    def save_document(self, doc_data: Dict[str, Any]) -> str:
+    def save_document(
+        self,
+        doc_data: Dict[str, Any],
+        *,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        tenant_context: Optional[TenantContext] = None,
+    ) -> str:
         """
         Save document to long-term memory
 
         Args:
             doc_data: Document data with extracted information
+            workspace_id: Optional explicit workspace boundary. When a tenant
+                context is active it must match that context.
+            tenant_context: Optional server-owned tenant context.
 
         Returns:
             Document ID
         """
-        doc_id = doc_data.get("id") or generate_uuid()
+        if not isinstance(doc_data, dict):
+            raise TypeError("doc_data must be a mapping")
+
+        requested_document_workspace = doc_data.get("workspace_id")
+        requested_document_tenant = doc_data.get("tenant_id")
+        if (
+            requested_document_workspace is not None
+            and not str(requested_document_workspace).strip()
+        ):
+            requested_document_workspace = None
+        if workspace_id is not None:
+            if (
+                requested_document_workspace is not None
+                and str(requested_document_workspace).strip()
+                != str(workspace_id).strip()
+            ):
+                raise WorkspaceAccessDenied("workspace_id values conflict")
+            requested_document_workspace = workspace_id
+        if tenant_id is not None:
+            if (
+                requested_document_tenant is not None
+                and str(requested_document_tenant).strip()
+                != str(tenant_id).strip()
+            ):
+                raise WorkspaceAccessDenied("tenant_id values conflict")
+            requested_document_tenant = tenant_id
+
+        current_context = TenantContextManager.get_current()
+        if (
+            tenant_context is not None
+            and current_context is not None
+            and (
+                tenant_context.tenant_id != current_context.tenant_id
+                or tenant_context.workspace_id != current_context.workspace_id
+            )
+        ):
+            raise WorkspaceAccessDenied("tenant contexts conflict")
+        context = tenant_context or current_context
+        if context is not None:
+            if not isinstance(context, TenantContext):
+                raise TypeError("tenant_context must be a TenantContext")
+            resolved_workspace = context.require_workspace(
+                requested_document_workspace
+            )
+            if (
+                requested_document_tenant is not None
+                and str(requested_document_tenant).strip()
+                != context.tenant_id
+            ):
+                raise WorkspaceAccessDenied("tenant_id values conflict")
+            resolved_tenant = context.tenant_id
+        else:
+            resolved_tenant = str(
+                requested_document_tenant or self.DEFAULT_TENANT_ID
+            ).strip()
+            if not resolved_tenant:
+                resolved_tenant = self.DEFAULT_TENANT_ID
+            resolved_workspace = str(
+                requested_document_workspace or self.DEFAULT_WORKSPACE_ID
+            ).strip()
+            if not resolved_workspace:
+                resolved_workspace = self.DEFAULT_WORKSPACE_ID
+
+        # Keep one trusted copy for every persistence backend. This prevents a
+        # caller-provided workspace value from diverging between SQLite and the
+        # vector metadata after the boundary has been resolved.
+        document = dict(doc_data)
+        document["tenant_id"] = resolved_tenant
+        document["workspace_id"] = resolved_workspace
+        doc_id = document.get("id") or generate_uuid()
 
         # Save to structured database
         self.db.insert("documents", {
             "id": doc_id,
-            "document_type": doc_data.get("document_type", "unknown"),
-            "source": doc_data.get("source", "local"),
-            "file_path": doc_data.get("file_path", ""),
-            "file_hash": doc_data.get("file_hash", ""),
-            "extracted_data": json.dumps(doc_data.get("extracted_data", {}), ensure_ascii=False),
-            "raw_text": doc_data.get("raw_text", "")[:10000],  # Truncate
-            "confidence": doc_data.get("confidence", 0.0)
+            "tenant_id": resolved_tenant,
+            "workspace_id": resolved_workspace,
+            "document_type": document.get("document_type", "unknown"),
+            "source": document.get("source", "local"),
+            "file_path": document.get("file_path", ""),
+            "file_hash": document.get("file_hash", ""),
+            "extracted_data": json.dumps(document.get("extracted_data", {}), ensure_ascii=False),
+            "raw_text": document.get("raw_text", "")[:10000],  # Truncate
+            "confidence": document.get("confidence", 0.0)
         })
 
         # Generate embedding and save to vector store
         if self.vector_db.available:
             try:
-                embedding_text = self._build_embedding_text(doc_data)
+                embedding_text = self._build_embedding_text(document)
                 embedding = self._get_embedding(embedding_text)
 
                 self.vector_db.add(
                     id=doc_id,
                     vector=embedding,
-                    metadata=self._vector_metadata(doc_data, embedding_text),
+                    metadata=self._vector_metadata(document, embedding_text),
                 )
             except Exception as e:
                 print(f"[Warning] Failed to create vector embedding: {e}")
 
         return doc_id
 
-    def retrieve(self, query: str, filters: Optional[Dict[str, Any]] = None, top_k: int = 5) -> List[Dict]:
+    def retrieve(
+        self,
+        query: str,
+        filters: Optional[Dict[str, Any]] = None,
+        top_k: int = 5,
+        *,
+        workspace_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        tenant_context: Optional[TenantContext] = None,
+    ) -> List[Dict]:
         """
         Retrieve documents from memory
 
@@ -94,33 +192,61 @@ class MemoryManager:
         Returns:
             List of matching documents
         """
+        tenant_scope, scope, scoped_filters = self._resolve_retrieval_scope(
+            filters,
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            tenant_context=tenant_context,
+        )
+        authenticated_scope = tenant_context or TenantContextManager.get_current()
+        if (
+            authenticated_scope is not None
+            and tenant_scope != self.DEFAULT_TENANT_ID
+            and self._claim_legacy_scope(tenant_scope, scope)
+        ):
+            self._sync_vector_index()
         results = []
 
         # Vector search if available
         if self.vector_db.available:
             try:
                 query_embedding = self._get_embedding(query)
-                vector_results = self.vector_db.search(query_embedding, top_k=top_k * 2)
+                try:
+                    vector_results = self.vector_db.search(
+                        query_embedding,
+                        top_k=top_k * 2,
+                        filters=scoped_filters,
+                    )
+                except TypeError:
+                    # Keep compatibility with injected vector stores that only
+                    # implement the historical ``search(vector, top_k)`` API.
+                    vector_results = self.vector_db.search(
+                        query_embedding,
+                        top_k=top_k * 2,
+                    )
 
-                # Apply filters
-                if filters:
-                    filtered = []
-                    for r in vector_results:
-                        meta = r["metadata"]
-                        match = True
-                        for key, value in filters.items():
-                            if meta.get(key) != value:
-                                match = False
-                                break
-                        if match:
-                            filtered.append(r)
-                    vector_results = filtered
+                # Apply filters again after the vector backend.  This protects
+                # against stale/malformed metadata and keeps compatibility
+                # backends from returning an unscoped row.
+                filtered = []
+                for r in vector_results:
+                    meta = r.get("metadata") or {}
+                    if all(
+                        meta.get(key) == value
+                        for key, value in scoped_filters.items()
+                    ):
+                        filtered.append(r)
+                vector_results = filtered
 
                 # Get full document data
                 for r in vector_results[:top_k]:
                     doc_id = r["id"]
                     doc_record = self.db.get_by_id("documents", doc_id)
-                    if doc_record:
+                    if (
+                        doc_record
+                        and doc_record.get("tenant_id") == tenant_scope
+                        and doc_record.get("workspace_id") == scope
+                    ):
                         results.append({
                             "id": doc_id,
                             "score": r["score"],
@@ -135,7 +261,7 @@ class MemoryManager:
         # whitespace/punctuation-separated terms so a long conversational query
         # does not become an all-or-nothing substring lookup.
         if not results:
-            docs = self.db.query("documents", filters or {})
+            docs = self.db.query("documents", scoped_filters)
             query_text = " ".join(str(query or "").split()).casefold()
             if query_text:
                 terms = [
@@ -168,6 +294,104 @@ class MemoryManager:
             ]
 
         return results
+
+    def _claim_legacy_scope(self, tenant_id: str, workspace_id: str) -> bool:
+        """Bind unowned legacy documents on the first trusted workspace read."""
+        if tenant_id == self.DEFAULT_TENANT_ID:
+            return False
+        with self.db.get_connection() as connection:
+            explicit = connection.execute(
+                """
+                SELECT 1 FROM documents
+                WHERE workspace_id = ? AND tenant_id NOT IN (?, ?)
+                LIMIT 1
+                """,
+                (workspace_id, self.DEFAULT_TENANT_ID, tenant_id),
+            ).fetchone()
+            if explicit is not None:
+                return False
+            cursor = connection.execute(
+                """
+                UPDATE documents
+                SET tenant_id = ?
+                WHERE tenant_id = ? AND workspace_id = ?
+                """,
+                (tenant_id, self.DEFAULT_TENANT_ID, workspace_id),
+            )
+            return cursor.rowcount > 0
+
+    def _resolve_retrieval_scope(
+        self,
+        filters: Optional[Dict[str, Any]],
+        *,
+        workspace_id: Optional[str],
+        tenant_id: Optional[str],
+        tenant_context: Optional[TenantContext],
+    ) -> tuple[str, str, Dict[str, Any]]:
+        """Resolve trusted tenant and workspace boundaries for retrieval.
+
+        The old API accepted arbitrary filters and, when omitted, searched the
+        entire shared memory database.  A request-scoped ``TenantContext`` is
+        authoritative whenever one exists; explicit workspace values are only
+        accepted when they match that context.  Calls outside a request retain
+        the historical local workspace default.
+        """
+
+        requested_filters = dict(filters or {})
+        requested_workspace = requested_filters.get("workspace_id")
+        requested_tenant = requested_filters.get("tenant_id")
+        if workspace_id is not None:
+            if (
+                requested_workspace is not None
+                and str(requested_workspace).strip()
+                and str(requested_workspace).strip() != str(workspace_id).strip()
+            ):
+                raise WorkspaceAccessDenied("workspace_id filters conflict")
+            requested_workspace = workspace_id
+        if tenant_id is not None:
+            if (
+                requested_tenant is not None
+                and str(requested_tenant).strip()
+                and str(requested_tenant).strip() != str(tenant_id).strip()
+            ):
+                raise WorkspaceAccessDenied("tenant_id filters conflict")
+            requested_tenant = tenant_id
+
+        current_context = TenantContextManager.get_current()
+        if (
+            tenant_context is not None
+            and current_context is not None
+            and (
+                tenant_context.tenant_id != current_context.tenant_id
+                or tenant_context.workspace_id != current_context.workspace_id
+            )
+        ):
+            raise WorkspaceAccessDenied("tenant contexts conflict")
+        context = tenant_context or current_context
+        if context is not None:
+            if not isinstance(context, TenantContext):
+                raise TypeError("tenant_context must be a TenantContext")
+            scope = context.require_workspace(requested_workspace)
+            if (
+                requested_tenant is not None
+                and str(requested_tenant).strip()
+                and str(requested_tenant).strip() != context.tenant_id
+            ):
+                raise WorkspaceAccessDenied("tenant_id filters conflict")
+            tenant_scope = context.tenant_id
+        else:
+            tenant_scope = str(
+                requested_tenant or self.DEFAULT_TENANT_ID
+            ).strip()
+            if not tenant_scope:
+                tenant_scope = self.DEFAULT_TENANT_ID
+            scope = str(requested_workspace or self.DEFAULT_WORKSPACE_ID).strip()
+            if not scope:
+                scope = self.DEFAULT_WORKSPACE_ID
+
+        requested_filters["tenant_id"] = tenant_scope
+        requested_filters["workspace_id"] = scope
+        return tenant_scope, scope, requested_filters
 
     def get_avg_profit_rate(self, client_name: str) -> float:
         """
@@ -328,6 +552,8 @@ class MemoryManager:
             else {}
         )
         return {
+            "tenant_id": str(doc_data.get("tenant_id") or "local"),
+            "workspace_id": str(doc_data.get("workspace_id") or "local-default"),
             "document_type": doc_data.get("document_type", "unknown"),
             "project_name": project_info.get("project_name", ""),
             "client_name": project_info.get("client_name", ""),

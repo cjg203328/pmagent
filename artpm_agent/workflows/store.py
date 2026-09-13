@@ -309,6 +309,24 @@ class WorkflowStore:
             )
         return definition
 
+    def ensure_builtins(
+        self,
+        *,
+        workspace_id: str = "local-default",
+        profile_id: str = "local-default",
+    ) -> None:
+        """Install the immutable built-in catalog in one workspace scope."""
+
+        for definition in get_builtin_workflows():
+            scoped = WorkflowDefinition.model_validate(
+                {
+                    **definition.model_dump(mode="python"),
+                    "workspace_id": workspace_id,
+                    "profile_id": profile_id,
+                }
+            )
+            self.put_definition(scoped)
+
     def set_override(self, override: WorkflowOverride) -> WorkflowOverride:
         """Upsert activation/priority settings without changing definition content."""
         now = self._now()

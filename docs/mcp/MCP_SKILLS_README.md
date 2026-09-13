@@ -44,8 +44,8 @@ python quick_verify.py
 |-----|--------|------|---------|
 | 1 | [快速启动指南](MCP_SKILLS_QUICKSTART.md) | 快速上手使用MCP Skills | ⭐⭐⭐⭐⭐ |
 | 2 | [完成报告](MCP_SKILLS_COMPLETION_REPORT.md) | 详细的功能说明和应用场景 | ⭐⭐⭐⭐⭐ |
-| 3 | [交付清单](DELIVERY_CHECKLIST.md) | 完整的交付文件和质量指标 | ⭐⭐⭐⭐ |
-| 4 | [项目结构](PROJECT_STRUCTURE.md) | 项目文件结构说明 | ⭐⭐⭐ |
+| 3 | [交付清单](../archive/DELIVERY_CHECKLIST.md) | 完整的交付文件和质量指标 | ⭐⭐⭐⭐ |
+| 4 | [项目结构](../architecture/PROJECT_STRUCTURE.md) | 项目文件结构说明 | ⭐⭐⭐ |
 | 5 | [开发计划](MCP_SKILLS_DEVELOPMENT_PLAN.md) | 架构设计和技术方案 | ⭐⭐⭐ |
 
 ### 阅读顺序建议
@@ -55,7 +55,7 @@ python quick_verify.py
 2. [完成报告](MCP_SKILLS_COMPLETION_REPORT.md) - 查看应用场景部分
 
 **开发者 (想了解实现)**:
-1. [项目结构](PROJECT_STRUCTURE.md)
+1. [项目结构](../architecture/PROJECT_STRUCTURE.md)
 2. [开发计划](MCP_SKILLS_DEVELOPMENT_PLAN.md)
 3. [完成报告](MCP_SKILLS_COMPLETION_REPORT.md) - 查看技术实现部分
 4. 阅读源代码:
@@ -63,7 +63,7 @@ python quick_verify.py
    - `artpm_agent/skills/mcp_skills.py`
 
 **项目经理 (想了解价值)**:
-1. [交付清单](DELIVERY_CHECKLIST.md)
+1. [交付清单](../archive/DELIVERY_CHECKLIST.md)
 2. [完成报告](MCP_SKILLS_COMPLETION_REPORT.md) - 查看核心亮点和应用场景
 
 ---
@@ -205,8 +205,8 @@ python test_mcp_enhanced.py
 ### 想了解更多?
 
 - **完整报告**: [MCP_SKILLS_COMPLETION_REPORT.md](MCP_SKILLS_COMPLETION_REPORT.md)
-- **项目结构**: [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md)
-- **交付清单**: [DELIVERY_CHECKLIST.md](DELIVERY_CHECKLIST.md)
+- **项目结构**: [PROJECT_STRUCTURE.md](../architecture/PROJECT_STRUCTURE.md)
+- **交付清单**: [DELIVERY_CHECKLIST.md](../archive/DELIVERY_CHECKLIST.md)
 
 ---
 

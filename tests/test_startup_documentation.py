@@ -7,8 +7,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_documented_startup_commands_exist() -> None:
-    quickstart = (ROOT / "QUICKSTART.md").read_text(encoding="utf-8")
-    troubleshooting = (ROOT / "docs" / "TROUBLESHOOTING.md").read_text(
+    quickstart = (ROOT / "docs" / "guides" / "QUICKSTART.md").read_text(
+        encoding="utf-8"
+    )
+    troubleshooting = (ROOT / "docs" / "operations" / "TROUBLESHOOTING.md").read_text(
         encoding="utf-8"
     )
 

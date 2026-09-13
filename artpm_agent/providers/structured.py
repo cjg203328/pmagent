@@ -697,7 +697,7 @@ def create_structured_provider_adapter(
         return LangChainStructuredAdapter(llm_client, provider_name=normalized)
     if normalized == "anthropic":
         return AnthropicStructuredAdapter(llm_client, provider_name=normalized)
-    if normalized in {"openai", "custom", "zhipu"}:
+    if normalized in {"openai", "custom", "zhipu", "deepseek"}:
         return OpenAIStructuredAdapter(llm_client, provider_name=normalized)
     raise ValueError(f"unsupported structured provider: {normalized or 'unknown'}")
 

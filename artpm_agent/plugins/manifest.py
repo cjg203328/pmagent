@@ -151,6 +151,98 @@ class PluginSkillManifest:
 
 
 @dataclass(frozen=True, slots=True)
+class PluginEntryManifest:
+    """One generic capability entry (tool / handler / provider) exported by a
+    plugin module. Mirrors the skill entry contract so every capability gets
+    the same risk/approval metadata even though only skills are write-capable
+    today."""
+
+    name: str
+    class_name: str
+    description: str
+    version: str
+    risk: str
+    read_only: bool
+    requires_approval: bool
+    required_role: str = "user"
+    capabilities: tuple[str, ...] = ()
+
+    @classmethod
+    def from_mapping(
+        cls, value: Any, *, field: str, index: int
+    ) -> "PluginEntryManifest":
+        if not isinstance(value, Mapping):
+            raise PluginManifestError(f"{field}[{index}] must be an object")
+        prefix = f"{field}[{index}]"
+        name = _required_text(value.get("name"), f"{prefix}.name", pattern=_IDENTIFIER)
+        class_name = _required_text(
+            value.get("class"), f"{prefix}.class", pattern=_CLASS_NAME
+        )
+        description = _required_text(
+            value.get("description"), f"{prefix}.description"
+        )
+        version = _required_text(
+            value.get("version"), f"{prefix}.version", pattern=_VERSION
+        )
+        risk = _required_text(value.get("risk"), f"{prefix}.risk").casefold()
+        if risk not in _RISKS:
+            raise PluginManifestError(f"{prefix}.risk is unsupported")
+        read_only = _required_bool(value.get("read_only"), f"{prefix}.read_only")
+        requires_approval = _required_bool(
+            value.get("requires_approval"), f"{prefix}.requires_approval"
+        )
+        if not read_only and not requires_approval:
+            raise PluginManifestError(
+                f"{prefix} is write-capable and must require approval"
+            )
+        required_role = str(value.get("required_role") or "user").strip().casefold()
+        if required_role not in {"user", "admin"}:
+            raise PluginManifestError(f"{prefix}.required_role is unsupported")
+        capability_values = value.get("capabilities", [])
+        if not isinstance(capability_values, list) or len(capability_values) > 32:
+            raise PluginManifestError(
+                f"{prefix}.capabilities must be an array of at most 32 identifiers"
+            )
+        capabilities = tuple(
+            _required_text(
+                item,
+                f"{prefix}.capabilities[{capability_index}]",
+                pattern=_IDENTIFIER,
+            )
+            for capability_index, item in enumerate(capability_values)
+        )
+        if len(capabilities) != len(set(capabilities)):
+            raise PluginManifestError(f"{prefix}.capabilities must be unique")
+        return cls(
+            name=name,
+            class_name=class_name,
+            description=description,
+            version=version,
+            risk=risk,
+            read_only=read_only,
+            requires_approval=requires_approval,
+            required_role=required_role,
+            capabilities=capabilities,
+        )
+
+    def capability_metadata(self, plugin_id: str) -> Mapping[str, Any]:
+        return MappingProxyType(
+            {
+                "description": self.description,
+                "version": self.version,
+                "requires_llm": False,
+                "risk": self.risk,
+                "read_only": self.read_only,
+                "requires_approval": self.requires_approval,
+                "required_role": self.required_role,
+                "capabilities": self.capabilities,
+                "plugin_id": plugin_id,
+                "is_plugin_skill": False,
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PluginManifest:
     """Fully validated plugin manifest and immutable module binding."""
 
@@ -161,6 +253,14 @@ class PluginManifest:
     module_path: Path
     module_sha256: str | None
     skills: tuple[PluginSkillManifest, ...]
+    tools: tuple[PluginEntryManifest, ...] = ()
+    handlers: tuple[PluginEntryManifest, ...] = ()
+    providers: tuple[PluginEntryManifest, ...] = ()
+
+    @property
+    def capabilities(self) -> tuple[PluginEntryManifest, ...]:
+        """All non-skill capability entries, in declaration order."""
+        return self.tools + self.handlers + self.providers
 
     def read_verified_module(self, *, require_hash: bool = True) -> bytes:
         """Read the exact source bytes that will be compiled and verify its digest."""
@@ -252,17 +352,48 @@ def load_plugin_manifest(
             max_length=64,
         )
     skill_values = raw.get("skills")
-    if not isinstance(skill_values, list) or not skill_values:
-        raise PluginManifestError("skills must be a non-empty array")
-    if len(skill_values) > 64:
-        raise PluginManifestError("a plugin cannot export more than 64 skills")
-    skills = tuple(
-        PluginSkillManifest.from_mapping(value, index=index)
-        for index, value in enumerate(skill_values)
-    )
+    if skill_values is None:
+        skills: tuple[PluginSkillManifest, ...] = ()
+    else:
+        if not isinstance(skill_values, list) or not skill_values:
+            raise PluginManifestError("skills must be a non-empty array")
+        if len(skill_values) > 64:
+            raise PluginManifestError("a plugin cannot export more than 64 skills")
+        skills = tuple(
+            PluginSkillManifest.from_mapping(value, index=index)
+            for index, value in enumerate(skill_values)
+        )
     names = [skill.name for skill in skills]
     if len(names) != len(set(names)):
         raise PluginManifestError("skill names must be unique within a plugin")
+
+    def _parse_entries(field: str, limit: int) -> tuple[PluginEntryManifest, ...]:
+        values = raw.get(field)
+        if values is None:
+            return ()
+        if not isinstance(values, list) or not values:
+            raise PluginManifestError(f"{field} must be a non-empty array")
+        if len(values) > limit:
+            raise PluginManifestError(
+                f"a plugin cannot export more than {limit} {field}"
+            )
+        entries = tuple(
+            PluginEntryManifest.from_mapping(value, field=field, index=index)
+            for index, value in enumerate(values)
+        )
+        entry_names = [entry.name for entry in entries]
+        if len(entry_names) != len(set(entry_names)):
+            raise PluginManifestError(f"{field} names must be unique within a plugin")
+        return entries
+
+    tools = _parse_entries("tools", limit=64)
+    handlers = _parse_entries("handlers", limit=64)
+    providers = _parse_entries("providers", limit=16)
+
+    if not (skills or tools or handlers or providers):
+        raise PluginManifestError(
+            "a plugin must declare at least one skill, tool, handler, or provider"
+        )
     return PluginManifest(
         plugin_id=plugin_id,
         version=version,
@@ -271,4 +402,7 @@ def load_plugin_manifest(
         module_path=module_path,
         module_sha256=module_sha256,
         skills=skills,
+        tools=tools,
+        handlers=handlers,
+        providers=providers,
     )

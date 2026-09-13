@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import pytest
 
@@ -27,10 +28,13 @@ def isolate_state_and_disable_llm(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_API_KEY", "")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("ZHIPU_API_KEY", "")
-    # Unit tests must never start the external stdio MCP process. Tests that
-    # exercise that transport opt in explicitly after this fixture runs.
-    monkeypatch.setenv("MCP_ENABLED", "false")
-    monkeypatch.setenv("SKILLS_FORGE_KEY", "")
+    # Unit tests must never start the external stdio MCP process. The explicit
+    # integration run keeps the caller's MCP settings so the live contract can
+    # exercise the configured transport instead of being silently disabled by
+    # this fixture.
+    if os.getenv("ART_ENABLE_INTEGRATION") != "1":
+        monkeypatch.setenv("MCP_ENABLED", "false")
+        monkeypatch.setenv("SKILLS_FORGE_KEY", "")
 
     # ── Single data root: everything else defaults underneath it ──
     monkeypatch.setenv("DATA_ROOT", str(tmp_path))
@@ -109,15 +113,32 @@ def _reset_singletons() -> None:
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip integration tests by default.
+    """Apply suite boundaries and skip external tests by default.
 
     Integration tests need a live MCP server / network / API keys and would
     hang or fail in CI. Enable them with ART_ENABLE_INTEGRATION=1.
     """
+    slow_modules = {
+        "test_model_sync.py",
+        "test_permission_mode_streamlit.py",
+        "test_permission_streamlit.py",
+        "test_streamlit_app.py",
+        "test_workflow_designer_streamlit.py",
+    }
     if os.getenv("ART_ENABLE_INTEGRATION") == "1":
-        return
+        integration_enabled = True
+    else:
+        integration_enabled = False
     for item in items:
-        if item.get_closest_marker("integration") is not None:
+        path = Path(str(item.fspath))
+        if "integration" in path.parts:
+            item.add_marker(pytest.mark.integration)
+        if path.name in slow_modules:
+            item.add_marker(pytest.mark.slow)
+        if (
+            not integration_enabled
+            and item.get_closest_marker("integration") is not None
+        ):
             item.add_marker(
                 pytest.mark.skip(
                     reason="integration test skipped (set ART_ENABLE_INTEGRATION=1 to run)"

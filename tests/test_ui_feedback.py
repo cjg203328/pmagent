@@ -19,11 +19,13 @@ class _FakeStreamlit:
         self.clicked = clicked
         self.messages = []
         self.buttons = []
+        self.expanders = []
 
     def container(self, **_kwargs):
         return _Block()
 
-    def expander(self, *_args, **_kwargs):
+    def expander(self, label, **kwargs):
+        self.expanders.append((label, kwargs))
         return _Block()
 
     def columns(self, count, **_kwargs):
@@ -79,6 +81,23 @@ def test_error_callback_returns_retry_action_without_rendering_raw_exception(mon
 
     assert action == "retry"
     assert "do not show this" not in " ".join(map(str, fake.messages))
+    assert fake.expanders == [("查看处理建议", {"expanded": False})]
+    assert ("重试", "callback_retry") in fake.buttons
+
+
+def test_error_callback_escapes_untrusted_message_markup(monkeypatch):
+    fake = _FakeStreamlit()
+    monkeypatch.setattr(ui_feedback, "st", fake)
+
+    ui_feedback.render_error_callback(
+        {"message": '<img src=x onerror="alert(1)">', "error_id": "abc123"},
+        key="callback",
+        dismissible=False,
+    )
+
+    rendered = " ".join(map(str, fake.messages))
+    assert "&lt;img" in rendered
+    assert '<img src=x onerror="alert(1)">' not in rendered
 
 
 def test_error_callback_dismissal_is_persisted(monkeypatch):
@@ -114,7 +133,7 @@ def test_new_error_occurrence_is_visible_after_previous_one_was_closed(monkeypat
         key="callback",
     )
 
-    assert "第二次失败" in fake.messages
+    assert any("第二次失败" in item for item in fake.messages)
     assert fake.session_state.get("callback_dismissed") is not True
 
 

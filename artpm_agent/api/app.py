@@ -201,6 +201,23 @@ def _require_workspace(
         raise GatewayError(503, "workspace_store_unavailable", "workspace store is unavailable") from error
     if workspace is None:
         raise GatewayError(404, "workspace_not_found", "workspace was not found")
+    bind_tenant = getattr(services.conversations, "ensure_workspace_tenant", None)
+    if callable(bind_tenant):
+        try:
+            if not bind_tenant(principal.workspace_id, principal.tenant_id):
+                raise GatewayError(
+                    403,
+                    "workspace_tenant_mismatch",
+                    "workspace is not assigned to this tenant",
+                )
+        except GatewayError:
+            raise
+        except Exception as error:  # noqa: BLE001 - fail closed on scope errors
+            raise GatewayError(
+                503,
+                "workspace_scope_unavailable",
+                "workspace scope could not be verified",
+            ) from error
     return workspace
 
 
@@ -428,6 +445,9 @@ def create_app(
         redoc_url="/redoc",
         lifespan=lifespan,
     )
+    from artpm_agent.observability import instrument_fastapi
+
+    instrument_fastapi(app)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_cors_origins(),
@@ -600,7 +620,7 @@ def create_app(
         )
 
     @app.post("/v1/chat", tags=["chat"])
-    def chat(request: Request, payload: ChatRequest):
+    async def chat(request: Request, payload: ChatRequest):
         principal = _principal(request)
         _require_workspace(services, principal, request)
         if payload.conversation_id:
@@ -640,12 +660,7 @@ def create_app(
                     else None
                 ),
             )
-            outcome = services.chat_handler(command)
-            if inspect.isawaitable(outcome):
-                close = getattr(outcome, "close", None)
-                if callable(close):
-                    close()
-                raise GatewayServiceError("async chat handlers require an async gateway adapter")
+            outcome = await services.chat_async(command)
             if isinstance(outcome, Mapping):
                 outcome = ChatOutcome(**dict(outcome))
             if not isinstance(outcome, ChatOutcome):
@@ -664,7 +679,9 @@ def create_app(
                     "awaiting_approval": outcome.awaiting_approval,
                     "metadata": _json_safe(outcome.metadata),
                     "artifacts": _json_safe(outcome.artifacts),
-                    "error": outcome.error,
+                    # Provider details stay in server logs/telemetry. Never
+                    # persist raw exception text in a user-visible transcript.
+                    "error": "chat_failed" if outcome.error else None,
                 },
             )
         except GatewayError:

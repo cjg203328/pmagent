@@ -126,6 +126,7 @@ def check_missing_required_keys() -> List[str]:
         "openai": "OPENAI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
         "zhipu": "ZHIPU_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
     }
 
     required_key = key_map.get(provider)
@@ -142,6 +143,47 @@ def check_missing_required_keys() -> List[str]:
             f"❌ {required_key} 是占位符，需要替换为真实的 API key"
         )
 
+    return issues
+
+
+def check_vision_pairing() -> List[str]:
+    """Check the optional vision pairing ("eyes model") configuration."""
+    issues = []
+
+    vision_provider = os.getenv("LLM_VISION_PROVIDER", "").strip().lower()
+    vision_model = os.getenv("LLM_VISION_MODEL", "").strip()
+    if not vision_model:
+        # Vision pairing disabled; nothing to check.
+        return []
+    if not vision_provider:
+        issues.append(
+            "⚠️  LLM_VISION_MODEL 已设置，但缺少 LLM_VISION_PROVIDER（视觉搭配不会生效）"
+        )
+        return issues
+
+    if vision_provider == "custom":
+        resolved_provider = "openai"
+    else:
+        resolved_provider = vision_provider
+    key_map = {
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "zhipu": "ZHIPU_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+    }
+    provider_key = key_map.get(resolved_provider)
+    key_value = os.getenv("LLM_VISION_API_KEY", "").strip() or (
+        os.getenv(provider_key, "").strip() if provider_key else ""
+    )
+    if not key_value:
+        issues.append(
+            f"⚠️  视觉搭配 provider={vision_provider} 缺少 API key"
+            f"（LLM_VISION_API_KEY 或 {provider_key or '对应 provider key'}），图片识别将失败"
+        )
+    elif key_value.startswith("sk-your-") or "your-key-here" in key_value:
+        issues.append(
+            "⚠️  LLM_VISION_API_KEY 是占位符，需要替换为真实的 API key"
+        )
     return issues
 
 
@@ -204,6 +246,7 @@ def main():
         ("API Keys 检查", check_api_keys),
         ("Provider/Model 对齐检查", check_provider_model_alignment),
         ("必需 Keys 检查", check_missing_required_keys),
+        ("视觉搭配检查", check_vision_pairing),
         ("数据路径检查", check_data_paths),
     ]
 

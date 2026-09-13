@@ -871,9 +871,10 @@ def chat_page():
                             "file_path": file_paths[0] if file_paths else None,
                             "file_paths": file_paths,
                             "agent_profile": get_current_profile(),
-                            "knowledge_context": (
-                                "" if local_fast else build_knowledge_context(prompt)
-                            ),
+                            # Workspace knowledge is assembled by the Harness
+                            # so API and UI follow the same retrieval boundary.
+                            "knowledge_context": "",
+                            "turn_mode": "fast" if local_fast else "standard",
                             # 用户临时选择的模型（如果有）
                             "permission_store": get_permission_store(),
                             "permission_mode": normalize_access_mode(
@@ -907,91 +908,115 @@ def chat_page():
                         )
                         with progress_context:
                             harness_result = None
-                            # v0.2 单一回合主链：统一 harness（run_turn）为唯一非极速路径；
-                            # 原先散落在 chat.py 内的知识规则/工件/工作流/直接模型 fallback
-                            # 分支已全部移除，每回合只走一条可预测主链。
-                            if local_fast:
-                                # Fast mode: bypass harness for performance
-                                response = normalize_agent_response(
-                                    agent.chat(prompt, context=agent_context)
-                                )
-                            else:
 
-                                def respond_from_public_agent_api(_turn_ctx):
-                                    # ``run_turn`` enriches the context before the
-                                    # response handler runs (workspace RAG,
-                                    # preferences, reflection strategies and
-                                    # meta-memory).  Build the public API context
-                                    # from that enriched snapshot; reusing the
-                                    # pre-harness closure here silently discarded
-                                    # every block injected by Step 0.
-                                    response_context = {
-                                        **agent_context,
-                                        **(
-                                            _turn_ctx.extra
-                                            if isinstance(_turn_ctx.extra, dict)
-                                            else {}
-                                        ),
-                                        "conversation_id": _turn_ctx.conversation_id,
-                                        "turn_id": _turn_ctx.turn_id,
-                                        "conversation_history": (
-                                            _turn_ctx.conversation_history
-                                        ),
-                                        "agent_profile": _turn_ctx.agent_profile,
-                                        "knowledge_context": (
-                                            _turn_ctx.knowledge_context
-                                        ),
-                                    }
-                                    if callable(getattr(agent, "stream_chat", None)):
-                                        return (
-                                            stream_agent_response(
-                                                agent,
-                                                prompt,
-                                                response_context,
-                                            ),
-                                            True,
-                                        )
+                            def respond_from_public_agent_api(_turn_ctx):
+                                # Normal turns receive the memory-enriched
+                                # snapshot from run_turn(). Fast meta intents
+                                # deliberately retain empty history and
+                                # knowledge context while sharing the same
+                                # TurnResult and error contract.
+                                response_context = {
+                                    **agent_context,
+                                    **(
+                                        _turn_ctx.extra
+                                        if isinstance(_turn_ctx.extra, dict)
+                                        else {}
+                                    ),
+                                    "conversation_id": _turn_ctx.conversation_id,
+                                    "turn_id": _turn_ctx.turn_id,
+                                    "conversation_history": (
+                                        _turn_ctx.conversation_history
+                                    ),
+                                    "agent_profile": _turn_ctx.agent_profile,
+                                    "knowledge_context": (
+                                        _turn_ctx.knowledge_context
+                                    ),
+                                    "intent": _turn_ctx.intent,
+                                    "intent_checked": _turn_ctx.intent_checked,
+                                    "harness_managed": True,
+                                }
+                                turn_runtime = getattr(_turn_ctx, "runtime", None)
+                                if local_fast:
                                     return (
                                         normalize_agent_response(
-                                            agent.chat(
+                                            turn_runtime.chat(
                                                 prompt,
                                                 context=response_context,
                                             )
                                         ),
                                         False,
                                     )
-
-                                # Use harness for unified turn execution
-                                (
-                                    response,
-                                    awaiting_approval,
-                                    harness_metadata,
-                                    harness_result,
-                                ) = execute_turn_with_harness(
-                                    agent,
-                                    prompt,
-                                    pending_request["turn_id"],
-                                    request_conversation_id,
-                                    agent_context,
-                                    attachments,
-                                    file_paths,
-                                    get_profile_store(),
-                                    get_knowledge_store(),
-                                    get_artifact_coordinator(),
-                                    knowledge_rule_extractor=extract_knowledge_rule,
-                                    workflow_coordinator=get_workflow_coordinator(),
-                                    workflow_formatter=format_workflow_result,
-                                    response_handler=respond_from_public_agent_api,
+                                if callable(getattr(agent, "stream_chat", None)):
+                                    return (
+                                        stream_agent_response(
+                                            agent,
+                                            prompt,
+                                            response_context,
+                                        ),
+                                        True,
+                                    )
+                                return (
+                                    normalize_agent_response(
+                                        turn_runtime.chat(
+                                            prompt,
+                                            context=response_context,
+                                        )
+                                    ),
+                                    False,
                                 )
-                                # Merge harness metadata into workflow_metadata
-                                workflow_metadata.update(harness_metadata)
-                                response_rendered = bool(
-                                    getattr(
-                                        harness_result,
-                                        "response_rendered",
-                                        False,
+
+                            # All turns use the Harness. Its fast mode is
+                            # independently revalidated before it skips memory,
+                            # workflows, and skills.
+                            (
+                                response,
+                                awaiting_approval,
+                                harness_metadata,
+                                harness_result,
+                            ) = execute_turn_with_harness(
+                                agent,
+                                prompt,
+                                pending_request["turn_id"],
+                                request_conversation_id,
+                                agent_context,
+                                attachments,
+                                file_paths,
+                                get_profile_store(),
+                                get_knowledge_store(),
+                                get_artifact_coordinator(),
+                                knowledge_rule_extractor=extract_knowledge_rule,
+                                workflow_coordinator=get_workflow_coordinator(),
+                                workflow_formatter=format_workflow_result,
+                                response_handler=respond_from_public_agent_api,
+                                session_store=get_session_store(),
+                            )
+                            if (
+                                harness_result is not None
+                                and not getattr(harness_result, "success", True)
+                            ):
+                                error_kind = str(
+                                    getattr(harness_result, "metadata", {}).get(
+                                        "error_kind", ""
                                     )
                                 )
+                                error_markers = {
+                                    "empty_response": "模型服务未返回有效回答",
+                                    "timeout": "provider read timed out",
+                                    "busy": "ResourceExhausted: Worker local total request limit",
+                                }
+                                if error_kind in error_markers:
+                                    response = _chat_error_message(
+                                        RuntimeError(error_markers[error_kind]),
+                                        _current_model_id(agent),
+                                    )
+                            workflow_metadata.update(harness_metadata)
+                            response_rendered = bool(
+                                getattr(
+                                    harness_result,
+                                    "response_rendered",
+                                    False,
+                                )
+                            )
 
                         if not response_rendered:
                             st.markdown(response)
@@ -1459,15 +1484,26 @@ def _render_turn_feedback(msg: dict, index: int, active_id) -> None:
         return
 
     user_prompt = _preceding_user_prompt(index)
+    tenant_context = st.session_state.get("tenant_context") or TenantContext.local()
+    feedback_store = st.session_state.get("feedback_store")
+    episode_store = st.session_state.get("episode_store")
 
     up_col, down_col, _ = st.columns([1, 1, 8], gap="small")
     with up_col:
-        if st.button("👍", key=f"fb_up_{message_id}", help="这个回答有帮助"):
+        if st.button(
+            "",
+            key=f"fb_up_{message_id}",
+            icon=":material/thumb_up:",
+            help="这个回答有帮助",
+        ):
             feedback_result = record_turn_feedback(
                 turn_id,
                 True,
                 user_prompt=user_prompt,
                 assistant_content=str(msg.get("content", "")),
+                tenant_context=tenant_context,
+                feedback_store=feedback_store,
+                episode_store=episode_store,
             )
             if _feedback_was_saved(feedback_result):
                 st.session_state.setdefault("feedback_given", {})[message_id] = "up"
@@ -1476,7 +1512,12 @@ def _render_turn_feedback(msg: dict, index: int, active_id) -> None:
             else:
                 st.error("反馈未能保存，请稍后重试。")
     with down_col:
-        if st.button("👎", key=f"fb_down_{message_id}", help="这个回答有问题"):
+        if st.button(
+            "",
+            key=f"fb_down_{message_id}",
+            icon=":material/thumb_down:",
+            help="这个回答有问题",
+        ):
             st.session_state.setdefault("feedback_pending", {})[message_id] = True
             st.rerun()
 
@@ -1520,6 +1561,9 @@ def _render_turn_feedback(msg: dict, index: int, active_id) -> None:
                         assistant_content=str(msg.get("content", "")),
                         correction=reason,
                         category=category,
+                        tenant_context=tenant_context,
+                        feedback_store=feedback_store,
+                        episode_store=episode_store,
                     )
                     if _feedback_was_saved(feedback_result):
                         st.session_state.setdefault("feedback_given", {})[

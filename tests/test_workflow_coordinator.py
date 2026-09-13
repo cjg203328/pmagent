@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
@@ -81,6 +82,44 @@ def make_coordinator(tmp_path, agent=None):
     workflow_store = WorkflowStore(db_path)
     agent = agent or WorkflowAgent()
     return conversation, workflow_store, agent, WorkflowCoordinator(workflow_store, agent)
+
+
+def test_non_default_workspace_uses_its_own_builtin_catalog(tmp_path):
+    db_path = tmp_path / "conversations.db"
+    conversations = ConversationStore(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    with conversations._connection(write=True) as connection:  # noqa: SLF001
+        connection.execute(
+            """
+            INSERT INTO workspaces(
+                id, profile_id, name, tenant_id, settings_json, created_at, updated_at
+            ) VALUES ('workspace-b', 'local-default', 'Workspace B', 'tenant-b', '{}', ?, ?)
+            """,
+            (now, now),
+        )
+    conversation = conversations.create_conversation(
+        "非默认工作区", workspace_id="workspace-b"
+    )
+    store = WorkflowStore(db_path)
+    agent = WorkflowAgent()
+    coordinator = WorkflowCoordinator(
+        store,
+        agent,
+        workspace_id="workspace-b",
+        profile_id="local-default",
+    )
+
+    outcome = coordinator.process(
+        "报价10万成本6万，评估利润",
+        conversation_id=conversation["id"],
+        turn_id="turn-workspace-b",
+        agent_context={"conversation_history": []},
+    )
+
+    assert outcome.matched
+    assert outcome.execution.run.workspace_id == "workspace-b"
+    assert store.list_definitions(workspace_id="local-default")
+    assert store.list_definitions(workspace_id="workspace-b")
 
 
 def test_quote_workflow_executes_once_and_persists_the_run(tmp_path):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import replace
 from typing import Any, Optional
 
 from artpm_agent.memory.session_store import SessionStore
@@ -70,15 +71,36 @@ class AgentSession:
             run_id=run_id,
             turn_id=turn_id,
         )
+        event_bus = context.get("event_bus") if isinstance(context, Mapping) else None
 
         def persisted_events() -> Iterator[AgentEvent]:
             try:
                 for event in events:
+                    scope_metadata = {
+                        key: str(context[key]).strip()
+                        for key in (
+                            "tenant_id",
+                            "workspace_id",
+                            "actor_id",
+                        )
+                        if isinstance(context, Mapping)
+                        and str(context.get(key) or "").strip()
+                    }
+                    if scope_metadata:
+                        event = replace(
+                            event,
+                            metadata={**dict(event.metadata), **scope_metadata},
+                        )
                     self.store.append_event(
                         conversation_id.strip(),
                         event,
                         workspace_id=workspace_id,
                     )
+                    if event_bus is not None:
+                        try:
+                            event_bus.publish(event)
+                        except Exception:
+                            pass
                     yield event
             finally:
                 close = getattr(events, "close", None)

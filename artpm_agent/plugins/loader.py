@@ -30,8 +30,49 @@ class PluginSkillRegistration:
 
 
 @dataclass(frozen=True, slots=True)
+class PluginToolRegistration:
+    """A tool class exported by a plugin (AgentTool subclass)."""
+
+    name: str
+    tool_class: type
+    metadata: Mapping[str, Any]
+    plugin_id: str
+    plugin_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class PluginHandlerRegistration:
+    """A harness handler class exported by a plugin (duck-typed)."""
+
+    name: str
+    handler_class: type
+    metadata: Mapping[str, Any]
+    plugin_id: str
+    plugin_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class PluginProviderRegistration:
+    """An LLM provider factory exported by a plugin.
+
+    ``provider_class`` is expected to be a callable ``(config) -> BaseLLMClient``
+    or a class with that constructor shape; type identity is validated only
+    against the callable contract so providers can be factories.
+    """
+
+    name: str
+    provider_class: type
+    metadata: Mapping[str, Any]
+    plugin_id: str
+    plugin_version: str
+
+
+@dataclass(frozen=True, slots=True)
 class PluginLoadReport:
     registrations: tuple[PluginSkillRegistration, ...] = ()
+    tool_registrations: tuple[PluginToolRegistration, ...] = ()
+    handler_registrations: tuple[PluginHandlerRegistration, ...] = ()
+    provider_registrations: tuple[PluginProviderRegistration, ...] = ()
     loaded_plugin_ids: tuple[str, ...] = ()
     skipped_plugin_ids: tuple[str, ...] = ()
     failures: tuple[PluginFailure, ...] = ()
@@ -120,6 +161,84 @@ class PluginManager:
             local_names.add(declaration.name)
         return tuple(registrations)
 
+    @staticmethod
+    def _claim(
+        declaration: Any,
+        local_names: set[str],
+        reserved_names: set[str] | frozenset[str],
+    ) -> None:
+        if declaration.name in reserved_names or declaration.name in local_names:
+            raise ValueError(f"duplicate or reserved capability name: {declaration.name}")
+        local_names.add(declaration.name)
+
+    def _capability_registrations(
+        self,
+        manifest: PluginManifest,
+        module: ModuleType,
+        *,
+        reserved_names: set[str] | frozenset[str],
+    ) -> tuple[
+        tuple[PluginToolRegistration, ...],
+        tuple[PluginHandlerRegistration, ...],
+        tuple[PluginProviderRegistration, ...],
+    ]:
+        """Collect non-skill capability exports (tools/handlers/providers).
+
+        Each export must be callable (a class or factory function). Tools and
+        handlers are expected to be host-integrated by the operator before use;
+        the loader only validates and reports, it never mutates a global
+        registry — mirroring the skill loader's isolation contract.
+        """
+        local_names: set[str] = set()
+
+        def _build(
+            declaration: Any,
+            registration_type: type,
+            kind: str,
+            expected: set[str] | None,
+        ) -> Any:
+            self._claim(declaration, local_names, reserved_names)
+            candidate = getattr(module, declaration.class_name, None)
+            if not callable(candidate):
+                raise TypeError(
+                    f"{kind} {declaration.name} must reference a callable "
+                    f"class or factory: {declaration.class_name}"
+                )
+            if expected and declaration.name in expected:
+                raise TypeError(f"{kind} name collides with a reserved capability")
+            metadata = dict(declaration.capability_metadata(manifest.plugin_id))
+            metadata["plugin_version"] = manifest.version
+            metadata["kind"] = kind
+            return registration_type(
+                name=declaration.name,
+                **(
+                    {"tool_class": candidate}
+                    if registration_type is PluginToolRegistration
+                    else (
+                        {"handler_class": candidate}
+                        if registration_type is PluginHandlerRegistration
+                        else {"provider_class": candidate}
+                    )
+                ),
+                metadata=MappingProxyType(metadata),
+                plugin_id=manifest.plugin_id,
+                plugin_version=manifest.version,
+            )
+
+        tool_registrations = tuple(
+            _build(declaration, PluginToolRegistration, "tool", None)
+            for declaration in manifest.tools
+        )
+        handler_registrations = tuple(
+            _build(declaration, PluginHandlerRegistration, "handler", None)
+            for declaration in manifest.handlers
+        )
+        provider_registrations = tuple(
+            _build(declaration, PluginProviderRegistration, "provider", None)
+            for declaration in manifest.providers
+        )
+        return tool_registrations, handler_registrations, provider_registrations
+
     def load_skills(
         self,
         *,
@@ -131,6 +250,7 @@ class PluginManager:
             discovered = PluginDiscovery(self.policy).discover()
             failures = list(discovered.failures)
             registrations: list[PluginSkillRegistration] = []
+            all_registrations: list[Any] = []
             loaded: list[str] = []
             claimed_names = set(reserved_names)
             seen_plugin_ids: set[str] = set()
@@ -148,7 +268,7 @@ class PluginManager:
                 seen_plugin_ids.add(manifest.plugin_id)
                 conflicts = sorted(
                     declaration.name
-                    for declaration in manifest.skills
+                    for declaration in (*manifest.skills, *manifest.capabilities)
                     if declaration.name in claimed_names
                 )
                 if conflicts:
@@ -157,7 +277,8 @@ class PluginManager:
                             manifest.plugin_id,
                             str(manifest.manifest_path),
                             "policy",
-                            "duplicate or reserved skill name: " + ", ".join(conflicts),
+                            "duplicate or reserved capability name: "
+                            + ", ".join(conflicts),
                         )
                     )
                     continue
@@ -180,6 +301,15 @@ class PluginManager:
                         module,
                         reserved_names=claimed_names,
                     )
+                    (
+                        tool_registrations,
+                        handler_registrations,
+                        provider_registrations,
+                    ) = self._capability_registrations(
+                        manifest,
+                        module,
+                        reserved_names=claimed_names,
+                    )
                 except Exception as error:
                     logger.warning("Plugin %s was isolated: %s", manifest.plugin_id, error)
                     failures.append(
@@ -192,10 +322,31 @@ class PluginManager:
                     )
                     continue
                 registrations.extend(plugin_registrations)
+                all_registrations.extend(tool_registrations)
+                all_registrations.extend(handler_registrations)
+                all_registrations.extend(provider_registrations)
                 claimed_names.update(item.name for item in plugin_registrations)
+                claimed_names.update(item.name for item in tool_registrations)
+                claimed_names.update(item.name for item in handler_registrations)
+                claimed_names.update(item.name for item in provider_registrations)
                 loaded.append(manifest.plugin_id)
             report = PluginLoadReport(
                 registrations=tuple(registrations),
+                tool_registrations=tuple(
+                    item
+                    for item in all_registrations
+                    if isinstance(item, PluginToolRegistration)
+                ),
+                handler_registrations=tuple(
+                    item
+                    for item in all_registrations
+                    if isinstance(item, PluginHandlerRegistration)
+                ),
+                provider_registrations=tuple(
+                    item
+                    for item in all_registrations
+                    if isinstance(item, PluginProviderRegistration)
+                ),
                 loaded_plugin_ids=tuple(loaded),
                 skipped_plugin_ids=discovered.skipped_plugin_ids,
                 failures=tuple(failures),

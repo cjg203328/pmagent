@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import argparse
 from pathlib import Path
 import subprocess
 import sys
@@ -56,11 +57,11 @@ def run_config_check() -> bool:
         return True
     except SystemExit as error:
         return error.code == 0
-    except Exception as error:  # noqa: BLE001 - a warning must not hide the app
-        print(f"[WARN] Configuration check failed: {error}")
-        print("       Startup will continue, but runtime features may be unavailable.")
+    except Exception as error:  # noqa: BLE001 - the check must fail closed
+        print(f"[ERROR] Configuration check could not complete: {error}")
+        print("        Startup is blocked until the configuration check succeeds.")
         print()
-        return True
+        return False
 
 
 def _subprocess_environment(process_role: str | None = None) -> dict[str, str]:
@@ -233,20 +234,33 @@ def start_stack() -> None:
         stop_api(api_process)
 
 
-def main() -> None:
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run ArtPM Agent pre-flight checks and start the local stack."
+    )
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="run configuration checks without starting the API or UI",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
     """Run configuration checks and launch the complete local stack."""
 
     _configure_standard_streams()
+    args = _parser().parse_args(argv)
     if not run_config_check():
         print()
         print("[ERROR] Configuration checks reported blocking errors.")
-        response = input("Continue startup anyway? (y/N): ")
-        if response.lower() not in ("y", "yes"):
-            print("Startup cancelled.")
-            raise SystemExit(1)
+        raise SystemExit(1)
+    if args.check_only:
+        print("Configuration checks passed; startup was not requested.")
+        return
 
     start_stack()
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

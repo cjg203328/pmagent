@@ -4,6 +4,7 @@ Skill Router - Route user intents to appropriate skills
 Core skill implementations and adapters used by the synchronous agent router.
 """
 from copy import deepcopy
+import asyncio
 from hashlib import sha256
 import json
 import logging
@@ -33,6 +34,7 @@ from artpm_agent.utils.unlimited_ocr import UnlimitedOCRClient
 from artpm_agent.plugins import PluginManager
 from artpm_agent.tenancy import (
     TenantContext,
+    TenantContextManager,
     TenantContextError,
     WorkspaceAccessDenied,
     tenant_context_from_host,
@@ -1147,7 +1149,25 @@ class SkillRouter:
                     "error_code": "skill_initialization_failed",
                 }
 
-        return skill.run(inputs)
+        if effective_tenant is None:
+            return skill.run(inputs)
+        with TenantContextManager.use(effective_tenant):
+            return skill.run(inputs)
+
+    async def execute_async(
+        self,
+        skill_name: str,
+        inputs: Dict[str, Any],
+        *,
+        tenant_context: TenantContext | None = None,
+    ) -> Dict[str, Any]:
+        """Canonical async router entry point for API and workflow callers."""
+        return await asyncio.to_thread(
+            self.execute_skill,
+            skill_name,
+            inputs,
+            tenant_context=tenant_context,
+        )
 
     def for_tenant(self, tenant_context: TenantContext) -> "TenantBoundSkillRouter":
         """Return an immutable request-scoped view over this shared router."""
@@ -1262,6 +1282,17 @@ class TenantBoundSkillRouter:
         inputs: Dict[str, Any],
     ) -> Dict[str, Any]:
         return self._router.execute_skill(
+            skill_name,
+            inputs,
+            tenant_context=self.tenant_context,
+        )
+
+    async def execute_async(
+        self,
+        skill_name: str,
+        inputs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return await self._router.execute_async(
             skill_name,
             inputs,
             tenant_context=self.tenant_context,

@@ -140,13 +140,17 @@ class LangChainClient(BaseLLMClient):
             common["api_key"] = api_key
             return ChatAnthropic(**common)
 
-        if self.provider not in {"openai", "custom", "zhipu"}:
+        if self.provider not in {"openai", "custom", "zhipu", "deepseek"}:
             raise ValueError(f"Unsupported LangChain provider: {self.provider}")
-        api_key = (
-            config.get("zhipu_api_key")
-            if self.provider == "zhipu"
-            else config.get("openai_api_key")
-        )
+        if self.provider == "zhipu":
+            api_key = config.get("zhipu_api_key")
+            default_base_url = "https://open.bigmodel.cn/api/paas/v4"
+        elif self.provider == "deepseek":
+            api_key = config.get("deepseek_api_key")
+            default_base_url = "https://api.deepseek.com"
+        else:
+            api_key = config.get("openai_api_key")
+            default_base_url = ""
         if not is_valid_api_key(api_key):
             raise ValueError("OPENAI-compatible API key not found in config")
         try:
@@ -162,16 +166,12 @@ class LangChainClient(BaseLLMClient):
             "timeout": timeout,
             "max_retries": 0,
         }
-        base_url_key = (
-            "zhipu_api_base" if self.provider == "zhipu" else "openai_api_base"
-        )
+        base_url_key = {
+            "zhipu": "zhipu_api_base",
+            "deepseek": "deepseek_api_base",
+        }.get(self.provider, "openai_api_base")
         base_url = str(
-            config.get(base_url_key)
-            or (
-                "https://open.bigmodel.cn/api/paas/v4"
-                if self.provider == "zhipu"
-                else ""
-            )
+            config.get(base_url_key) or default_base_url
         ).strip()
         if base_url:
             common["base_url"] = base_url

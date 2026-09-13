@@ -99,6 +99,7 @@ class CrossSessionMemory:
         content: str,
         memory_type: str,
         *,
+        tenant_id: str = "local",
         workspace_id: str = "local-default",
         source_conversation: str = "",
         source_type: str = "auto_extract",
@@ -134,6 +135,7 @@ class CrossSessionMemory:
                 searchable_text=content,
                 resource_type=memory_type,
                 source_type="memory_" + source_type,
+                tenant_id=tenant_id,
                 workspace_id=workspace_id,
                 # Source identity must be content-level, not only conversation
                 # level.  Otherwise two memories from one conversation become
@@ -160,6 +162,7 @@ class CrossSessionMemory:
         self,
         items: Iterable[Dict[str, Any]],
         *,
+        tenant_id: str = "local",
         workspace_id: str = "local-default",
         source_conversation: str = "",
         source_type: str = "auto_extract",
@@ -173,6 +176,7 @@ class CrossSessionMemory:
             conf = float(item.get("confidence", 1.0))
             if self.save_memory(
                 content, mtype,
+                tenant_id=tenant_id,
                 workspace_id=workspace_id,
                 source_conversation=source_conversation,
                 source_type=source_type,
@@ -187,6 +191,7 @@ class CrossSessionMemory:
         messages: Sequence[Dict[str, Any]],
         *,
         conversation_id: str = "",
+        tenant_id: str = "local",
         workspace_id: str = "local-default",
         llm_callable: Any = None,  # 可选 LLM 用于增强提取
     ) -> List[MemoryItem]:
@@ -218,6 +223,7 @@ class CrossSessionMemory:
             self.save_memory(
                 item.content,
                 item.memory_type,
+                tenant_id=tenant_id,
                 workspace_id=workspace_id,
                 source_conversation=item.source_conversation,
                 source_type=item.source_type,
@@ -241,6 +247,7 @@ class CrossSessionMemory:
         memory_types: Optional[List[str]] = None,
         top_k: int = 0,
         max_chars: int = 0,
+        tenant_id: str = "local",
         workspace_id: str = "local-default",
         exclude_conversation: str = "",  # 排除当前会话的记忆
     ) -> List[MemoryItem]:
@@ -272,6 +279,7 @@ class CrossSessionMemory:
         try:
             results = self.store.search(
                 query,
+                tenant_id=tenant_id,
                 workspace_id=workspace_id,
                 limit=candidate_limit,
                 resource_types=resource_types,
@@ -329,7 +337,11 @@ class CrossSessionMemory:
 
                 # 记录命中（用于衰减/强化计算）
                 try:
-                    self.store.record_hit(rid)
+                    self.store.record_hit(
+                        rid,
+                        tenant_id=tenant_id,
+                        workspace_id=workspace_id,
+                    )
                 except Exception:
                     pass
 
@@ -346,6 +358,7 @@ class CrossSessionMemory:
         self,
         *,
         limit: int = 20,
+        tenant_id: str = "local",
         workspace_id: str = "local-default",
     ) -> List[MemoryItem]:
         """获取所有用户偏好记忆（用于 system prompt 注入）。"""
@@ -354,6 +367,7 @@ class CrossSessionMemory:
                 "用户偏好 设置 规则 习惯 要求",
                 workspace_id=workspace_id,
                 limit=limit,
+                tenant_id=tenant_id,
                 resource_types=["user_preference"],
                 include_rules=False,
                 max_text_chars=500,
@@ -410,6 +424,7 @@ class CrossSessionMemory:
         user_input: str,
         *,
         conversation_id: str = "",
+        tenant_id: str = "local",
         workspace_id: str = "local-default",
         include_preferences: bool = True,
     ) -> str:
@@ -425,6 +440,7 @@ class CrossSessionMemory:
         if include_preferences:
             prefs = self.get_all_preferences(
                 limit=10,
+                tenant_id=tenant_id,
                 workspace_id=workspace_id,
             )
             if prefs:
@@ -435,6 +451,7 @@ class CrossSessionMemory:
         # 相关记忆检索
         relevant = self.retrieve(
             user_input,
+            tenant_id=tenant_id,
             workspace_id=workspace_id,
             exclude_conversation=conversation_id,
         )

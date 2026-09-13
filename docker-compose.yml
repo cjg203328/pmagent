@@ -1,4 +1,4 @@
-# ArtPM Agent — 轻量化单栈编排（Streamlit + Caddy 反向代理 + 自动 HTTPS + Redis）
+# ArtPM Agent — 单栈编排（Streamlit + REST API + Caddy + PostgreSQL/Qdrant）
 #
 # 用法：
 #   cp .env.example .env            # 至少填一个 LLM Key
@@ -35,20 +35,85 @@ services:
       - DATA_ROOT=/app/data
       - STREAMLIT_SERVER_HEADLESS=true
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+      # The UI probes the API over the Compose network. Browser/API traffic is
+      # still exposed through Caddy under the /api path.
+      - ARTPM_API_BASE_URL=http://artpm-api:8765
+      - ARTPM_API_REQUIRED=true
       # Redis 连接地址：应用已把 TokenMonitor / EpisodeStore 的热查询接入
       # Redis 作为可丢弃加速层（SQLite 仍为权威源）；REDIS_URL 缺失或不可达时
       # 自动降级为纯 SQLite，不阻断应用。
       - REDIS_URL=redis://redis:6379/0
+      # artpm_app is deliberately not a superuser; PostgreSQL superusers bypass RLS.
+      - DATABASE_URL=postgresql+psycopg://artpm_app:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env before deploying}@postgres:5432/artpm
+      - ARTPM_SQLITE_FALLBACK=false
+      - VECTOR_BACKEND=qdrant
+      - QDRANT_URL=http://qdrant:6333
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - SENTRY_DSN=${SENTRY_DSN:-}
     restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_started
+      otel-collector:
+        condition: service_started
     networks:
       - artpm-net
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/healthz', timeout=4)"]
+      test: ["CMD", "python", "-c", "import urllib.request; response=urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=4); raise SystemExit(0 if response.status == 200 and response.read(32).strip() == b'ok' else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 25s
     # 轻量化资源上限（按机器配置调整；去掉则不限）
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+
+  # REST gateway is a first-class production surface. Keep it internal and
+  # let Caddy expose it at /api/* with the same TLS and Basic Auth boundary.
+  artpm-api:
+    build: .
+    image: artpm-agent:latest
+    command: ["python", "-m", "artpm_agent.api"]
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    environment:
+      - DATA_ROOT=/app/data
+      - ARTPM_PROCESS_ROLE=api
+      - ARTPM_API_HOST=0.0.0.0
+      - ARTPM_API_PORT=8765
+      - ARTPM_ENV=production
+      - ARTPM_GATEWAY_SHARED_SECRET=${ARTPM_GATEWAY_SHARED_SECRET:?Set ARTPM_GATEWAY_SHARED_SECRET in .env before deploying}
+      - ARTPM_CORS_ORIGINS=${ARTPM_CORS_ORIGINS:-}
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+psycopg://artpm_app:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env before deploying}@postgres:5432/artpm
+      - ARTPM_SQLITE_FALLBACK=false
+      - VECTOR_BACKEND=qdrant
+      - QDRANT_URL=http://qdrant:6333
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - SENTRY_DSN=${SENTRY_DSN:-}
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+    networks:
+      - artpm-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; response=urllib.request.urlopen('http://localhost:8765/ready', timeout=4); payload=json.load(response); raise SystemExit(0 if response.status == 200 and payload.get('ready') is True else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
     deploy:
       resources:
         limits:
@@ -79,6 +144,8 @@ services:
     depends_on:
       artpm-agent:
         condition: service_healthy
+      artpm-api:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - artpm-net
@@ -103,6 +170,101 @@ services:
       timeout: 5s
       retries: 3
 
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: artpm
+      POSTGRES_USER: artpm_admin
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD in .env before deploying}
+      ARTPM_DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env before deploying}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/postgres/init-app-role.sh:/docker-entrypoint-initdb.d/10-artpm-app-role.sh:ro
+    restart: unless-stopped
+    networks:
+      - artpm-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U artpm_admin -d artpm"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build: .
+    image: artpm-agent:latest
+    command: ["python", "scripts/migrate_postgres.py"]
+    environment:
+      DATABASE_ADMIN_URL: postgresql+psycopg://artpm_admin:${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD in .env before deploying}@postgres:5432/artpm
+      DATABASE_APP_ROLE: artpm_app
+      ARTPM_ALEMBIC_DIR: /app/alembic
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - artpm-net
+
+  qdrant:
+    image: qdrant/qdrant:v1.15.5
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+    networks:
+      - artpm-net
+
+  tempo:
+    image: grafana/tempo:2.8.2
+    command: ["-config.file=/etc/tempo.yml"]
+    volumes:
+      - ./deploy/observability/tempo.yml:/etc/tempo.yml:ro
+      - tempo-data:/var/tempo
+    restart: unless-stopped
+    networks:
+      - artpm-net
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.132.0
+    command: ["--config=/etc/otelcol/config.yml"]
+    volumes:
+      - ./deploy/observability/otel-collector.yml:/etc/otelcol/config.yml:ro
+    depends_on:
+      - tempo
+    restart: unless-stopped
+    networks:
+      - artpm-net
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - otel-collector
+    restart: unless-stopped
+    networks:
+      - artpm-net
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    # Keep local dashboard access available without bypassing the Caddy
+    # production boundary on a public interface.
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env before deploying}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - tempo
+    restart: unless-stopped
+    networks:
+      - artpm-net
+
 networks:
   artpm-net:
     driver: bridge
@@ -111,3 +273,8 @@ volumes:
   caddy-data:
   caddy-config:
   redis-data:
+  postgres-data:
+  qdrant-data:
+  tempo-data:
+  prometheus-data:
+  grafana-data:

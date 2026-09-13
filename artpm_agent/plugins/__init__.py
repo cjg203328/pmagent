@@ -1,5 +1,11 @@
-"""Secure, opt-in plugin infrastructure for external ArtPM skills."""
+"""Secure, opt-in plugin infrastructure for external ArtPM capabilities."""
 
+from .capabilities import (
+    CapabilityEntry,
+    CapabilityRegistry,
+    get_capability_registry,
+    reset_capability_registry,
+)
 from .discovery import (
     PluginDiscovery,
     PluginDiscoveryReport,
@@ -13,10 +19,18 @@ from .environment import (
     PluginConfigurationError,
     build_plugin_manager_from_environment,
 )
-from .loader import PluginLoadReport, PluginManager, PluginSkillRegistration
+from .loader import (
+    PluginHandlerRegistration,
+    PluginLoadReport,
+    PluginManager,
+    PluginProviderRegistration,
+    PluginSkillRegistration,
+    PluginToolRegistration,
+)
 from .manifest import (
     MANIFEST_FILENAME,
     MANIFEST_SCHEMA_VERSION,
+    PluginEntryManifest,
     PluginManifest,
     PluginManifestError,
     PluginSkillManifest,
@@ -32,14 +46,22 @@ __all__ = [
     "PluginConfigurationError",
     "PluginDiscovery",
     "PluginDiscoveryReport",
+    "PluginEntryManifest",
     "PluginFailure",
+    "PluginHandlerRegistration",
     "PluginLoadReport",
     "PluginManager",
     "PluginManifest",
     "PluginManifestError",
     "PluginPolicy",
+    "PluginProviderRegistration",
     "PluginSkillManifest",
     "PluginSkillRegistration",
+    "PluginToolRegistration",
+    "CapabilityEntry",
+    "CapabilityRegistry",
     "build_plugin_manager_from_environment",
+    "get_capability_registry",
     "load_plugin_manifest",
+    "reset_capability_registry",
 ]

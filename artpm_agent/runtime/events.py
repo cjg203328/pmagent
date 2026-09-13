@@ -35,6 +35,20 @@ class AgentEventType(str, Enum):
     RUNTIME_ERROR = "runtime_error"
 
 
+class EventDomain(str, Enum):
+    """Three-domain event taxonomy (mirrors deepseek-harness).
+
+    - SESSION: durable facts appended to the session log and replayed later.
+    - AGENT: live observations of a running agent (steps, turns, messages).
+    - CAPABILITY: seam notifications used to attach policy/adapters without
+      circular imports (tools/*, fs/*, telemetry/* style).
+    """
+
+    SESSION = "session"
+    AGENT = "agent"
+    CAPABILITY = "capability"
+
+
 @dataclass(frozen=True, slots=True)
 class AgentMessage:
     """A runtime message independent from any provider payload shape."""
@@ -81,6 +95,7 @@ class AgentEvent:
     run_id: str
     turn_id: str
     timestamp: float = field(default_factory=time)
+    domain: EventDomain = EventDomain.AGENT
     message: Optional[AgentMessage] = None
     delta: str = ""
     error: Optional[str] = None
@@ -94,6 +109,8 @@ class AgentEvent:
     def __post_init__(self) -> None:
         if not isinstance(self.type, AgentEventType):
             object.__setattr__(self, "type", AgentEventType(self.type))
+        if not isinstance(self.domain, EventDomain):
+            object.__setattr__(self, "domain", EventDomain(self.domain))
         for field_name, value in (("run_id", self.run_id), ("turn_id", self.turn_id)):
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field_name} must be a non-empty string")
@@ -112,6 +129,7 @@ class AgentEvent:
             "run_id": self.run_id,
             "turn_id": self.turn_id,
             "timestamp": self.timestamp,
+            "domain": self.domain.value,
             "message": self.message.to_dict() if self.message else None,
             "delta": self.delta,
             "error": self.error,

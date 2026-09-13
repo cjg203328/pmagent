@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 import inspect
 import json
+import logging
 import math
 import re
 from threading import Event, RLock
@@ -799,6 +800,7 @@ def build_capability_registry(
     workflow_definition_provider: Optional[Callable[[str], Any]] = None,
     workflow_conversation_id_factory: Optional[Callable[[], str]] = None,
     workflow_definition_ids: Optional[list[str]] = None,
+    plugin_registry: Any = None,
 ) -> ToolRegistry:
     """Union of every provider-neutral capability the agent may call.
 
@@ -806,6 +808,11 @@ def build_capability_registry(
     structured agent loop sees a single, consistent tool surface. Skill tools
     win name collisions (they carry the richer business metadata); MCP and
     workflow tools are appended afterwards.
+
+    ``plugin_registry`` optionally accepts the plugin ``CapabilityRegistry``:
+    every plugin tool factory is invoked (no arguments) and, when it returns
+    an ``AgentTool`` whose name is not already taken, registered. Plugin tools
+    never override built-in tools.
     """
     registry = ToolRegistry()
     if skill_router is not None:
@@ -826,4 +833,33 @@ def build_capability_registry(
         ).snapshot():
             if registry.get(tool.name) is None:
                 registry.register(tool)
+    if plugin_registry is not None:
+        _merge_plugin_tools(registry, plugin_registry)
     return registry
+
+
+def _merge_plugin_tools(registry: ToolRegistry, plugin_registry: Any) -> None:
+    """Register plugin-contributed AgentTool factories that are not taken."""
+    logger = logging.getLogger(__name__)
+    try:
+        entries = plugin_registry.tools()
+    except Exception:
+        logger.warning("plugin capability registry is unavailable", exc_info=True)
+        return
+    for entry in entries:
+        try:
+            tool = entry.factory()
+        except TypeError:
+            # Factories that require a context argument get an empty context.
+            try:
+                tool = entry.factory({})
+            except Exception as error:
+                logger.warning(
+                    "plugin tool %s failed to build: %s", entry.name, error
+                )
+                continue
+        except Exception as error:
+            logger.warning("plugin tool %s failed to build: %s", entry.name, error)
+            continue
+        if isinstance(tool, AgentTool) and registry.get(tool.name) is None:
+            registry.register(tool)

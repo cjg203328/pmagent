@@ -160,6 +160,7 @@ class ConversationCompressor:
         *,
         conversation_id: str = "",
         workspace_id: str = "local-default",
+        tenant_id: str = "local",
         knowledge_store: Any = None,  # WorkspaceKnowledgeStore or None
     ) -> CompressionResult:
         """执行压缩：生成摘要 → 提取关键点 → 可选写入知识库。
@@ -213,6 +214,7 @@ class ConversationCompressor:
                     result,
                     conversation_id,
                     workspace_id,
+                    tenant_id,
                 )
 
             logger.info(
@@ -323,6 +325,7 @@ class ConversationCompressor:
         result: CompressionResult,
         conversation_id: str,
         workspace_id: str,
+        tenant_id: str = "local",
     ) -> None:
         """将摘要和相关记忆写入知识库。"""
         try:
@@ -348,6 +351,7 @@ class ConversationCompressor:
                 searchable_text=searchable_text,
                 resource_type="conversation_summary",
                 source_type="auto_compress",
+                tenant_id=tenant_id,
                 workspace_id=workspace_id,
                 source_id=conversation_id,
                 structured_data={
@@ -370,6 +374,7 @@ class ConversationCompressor:
                         searchable_text=pref,
                         resource_type="user_preference",
                         source_type="auto_extract",
+                        tenant_id=tenant_id,
                         workspace_id=workspace_id,
                         source_id=conversation_id,
                         structured_data={

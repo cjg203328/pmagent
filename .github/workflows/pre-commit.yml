@@ -30,10 +30,10 @@ jobs:
     - name: Lint with Ruff
       run: ruff check artpm_agent tests --output-format=github
 
-    # Fast feedback: skip the coverage gate and bail out after a few failures.
-    # The full suite plus the fail-under threshold runs in ci.yml.
+    # Fast feedback: exclude UI startup, external integrations, and benchmarks.
+    # The complete offline suite runs in ci.yml.
     - name: Run tests without the coverage gate
-      run: pytest -q --no-cov --maxfail=3
+      run: pytest --timeout=120 -q --no-cov -m "not integration and not benchmark and not slow" --maxfail=3
 
   pr-checks:
     name: PR Requirements

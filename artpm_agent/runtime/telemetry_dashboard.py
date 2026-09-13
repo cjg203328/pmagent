@@ -2,7 +2,7 @@
 
 Reads ``AgentTelemetry`` aggregates and renders a self-contained HTML report
 (light theme, no external assets) plus a CLI to export it. A dedicated
-Streamlit entrypoint (``telemetry_dashboard_app.py``) reuses the same data so
+Streamlit entrypoint (``scripts/telemetry_dashboard_app.py``) reuses the same data so
 the dashboard can be viewed in-app or as a static file — without touching the
 main ``app.py`` routing.
 

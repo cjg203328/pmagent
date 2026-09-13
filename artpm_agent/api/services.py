@@ -8,6 +8,7 @@ the default adapter is lazy and exists for the local/CLI deployment.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import asyncio
 from contextlib import closing
 from dataclasses import dataclass, field
 from hmac import compare_digest
@@ -20,6 +21,7 @@ import sqlite3
 from typing import Any
 
 from artpm_agent.memory.conversation_store import ConversationStore
+from artpm_agent.memory.session_store import SessionStore
 from artpm_agent.security.permission_store import PermissionRequest, PermissionStore
 from artpm_agent.workflows.store import WorkflowStore
 
@@ -229,6 +231,7 @@ class GatewayServices:
     workflows: Any
     chat_handler: Callable[[ChatCommand], Any]
     capability_provider: Callable[[], Any]
+    chat_async_handler: Callable[[ChatCommand], Any] | None = None
     workflow_capability_provider: Callable[[], Any] | None = None
     permission_executor: Callable[[PermissionRequest], Any] | None = None
     permission_executor_sources: frozenset[str] | None = None
@@ -276,6 +279,24 @@ class GatewayServices:
         if self.close_handler is not None:
             self.close_handler()
 
+    async def chat_async(self, command: ChatCommand) -> Any:
+        """Run chat without blocking the gateway event loop.
+
+        Deployments may provide a native async handler. The legacy synchronous
+        handler is isolated in a worker thread until the provider stack is
+        migrated to async APIs.
+        """
+        handler = self.chat_async_handler or self.chat_handler
+        call = getattr(handler, "__call__", None)
+        is_async = inspect.iscoroutinefunction(handler) or inspect.iscoroutinefunction(call)
+        if is_async:
+            result = handler(command)
+            return await result if inspect.isawaitable(result) else result
+        result = await asyncio.to_thread(handler, command)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
 
 def _plain_json(value: Any, *, depth: int = 0) -> Any:
     """Convert frozen permission JSON back to ordinary JSON containers."""
@@ -304,8 +325,17 @@ class DefaultGatewayRuntime:
                 db_path = "./data/conversations.db"
         self.db_path = str(Path(db_path).expanduser())
         self.conversations = ConversationStore(self.db_path)
+        self.session_store = SessionStore(self.conversations)
         self.permissions = PermissionStore(self.db_path)
         self.workflows = WorkflowStore(self.db_path)
+        self.knowledge_store: Any = None
+        self.episode_store: Any = None
+        self.feedback_store: Any = None
+        self.strategy_store: Any = None
+        self.reflection_scheduler: Any = None
+        self.consolidation_scheduler: Any = None
+        self.meta_memory_store: Any = None
+        self._learning_initialized = False
         self._agent: Any = None
         self._coordinator: Any = None
         self._engine: Any = None
@@ -314,6 +344,75 @@ class DefaultGatewayRuntime:
         import threading
 
         self._lock = threading.RLock()
+
+    def _ensure_knowledge_store(self) -> Any:
+        """Build the workspace knowledge backend once for the local gateway."""
+
+        if not hasattr(self, "knowledge_store"):
+            return None
+        if self.knowledge_store is not None:
+            return self.knowledge_store
+        try:
+            from artpm_agent.config import get_config
+            from artpm_agent.memory import WorkspaceKnowledgeStore, create_embedding_provider
+
+            config = get_config()
+            vector_root = Path(
+                config.get("database.vector_db_path", str(Path(self.db_path).parent / "vector_store"))
+            )
+            self.knowledge_store = WorkspaceKnowledgeStore(
+                self.db_path,
+                vector_store_path=vector_root / "workspace_knowledge",
+                embedding_provider=create_embedding_provider(config.get("memory", {})),
+            )
+        except Exception as error:  # noqa: BLE001 - knowledge is an optional enhancer
+            logger.warning("workspace knowledge store unavailable: %s", error)
+            self.knowledge_store = None
+        return self.knowledge_store
+
+    def _ensure_learning_services(self) -> None:
+        """Build the learning services once for the local gateway host."""
+
+        if getattr(self, "_learning_initialized", False):
+            return
+        self._learning_initialized = True
+        try:
+            from artpm_agent.harness.outcome_recorder import default_episode_db_path
+            from artpm_agent.memory.episode_store import EpisodeStore
+
+            self.episode_store = EpisodeStore(default_episode_db_path())
+        except Exception as error:  # noqa: BLE001 - learning is optional
+            logger.warning("episode store unavailable: %s", error)
+        try:
+            from artpm_agent.memory.feedback_store import get_default_feedback_store
+
+            self.feedback_store = get_default_feedback_store()
+        except Exception as error:  # noqa: BLE001 - learning is optional
+            logger.warning("feedback store unavailable: %s", error)
+        try:
+            from artpm_agent.evolution.strategy_store import get_default_strategy_store
+
+            self.strategy_store = get_default_strategy_store()
+        except Exception as error:  # noqa: BLE001 - learning is optional
+            logger.warning("strategy store unavailable: %s", error)
+        try:
+            from artpm_agent.evolution.scheduler import get_default_scheduler
+
+            self.reflection_scheduler = get_default_scheduler()
+        except Exception as error:  # noqa: BLE001 - learning is optional
+            logger.warning("reflection scheduler unavailable: %s", error)
+        try:
+            from artpm_agent.evolution.meta_memory import get_default_meta_memory_store
+
+            self.meta_memory_store = get_default_meta_memory_store()
+        except Exception as error:  # noqa: BLE001 - learning is optional
+            logger.warning("meta-memory store unavailable: %s", error)
+        try:
+            from artpm_agent.memory.consolidation import ConsolidationScheduler
+
+            self.consolidation_scheduler = ConsolidationScheduler()
+        except Exception as error:  # noqa: BLE001 - learning is optional
+            logger.warning("consolidation scheduler unavailable: %s", error)
 
     def _ensure_agent(self) -> Any:
         with self._lock:
@@ -325,6 +424,8 @@ class DefaultGatewayRuntime:
 
     def _ensure_workflow_runtime(self, tenant_context: Any) -> tuple[Any, Any]:
         agent = self._ensure_agent()
+        workspace_id = tenant_context.require_workspace()
+        self.workflows.ensure_builtins(workspace_id=workspace_id)
         scoped_router = agent.router.for_tenant(tenant_context)
         from artpm_agent.workflows.designer import (
             capability_allowlist_from_skill_metadata,
@@ -356,6 +457,7 @@ class DefaultGatewayRuntime:
             self.workflows,
             _TenantAgentProxy(agent, scoped_router),
             capability_allowlist=allowlist,
+            workspace_id=workspace_id,
         )
         return engine, coordinator
 
@@ -372,6 +474,7 @@ class DefaultGatewayRuntime:
     def chat(self, command: ChatCommand) -> ChatOutcome:
         with self._lock:
             agent = self._ensure_agent()
+            self._ensure_learning_services()
             from artpm_agent.harness import TurnContext, run_turn
 
             history = self.conversations.build_context(
@@ -383,7 +486,42 @@ class DefaultGatewayRuntime:
             if tenant_context is None:
                 raise GatewayServiceError("tenant context is required for chat")
             engine, coordinator = self._ensure_workflow_runtime(tenant_context)
+            knowledge_store = self._ensure_knowledge_store()
+            from artpm_agent.runtime.request_services import TurnServiceBundle
+
+            turn_services = TurnServiceBundle(
+                knowledge_store=knowledge_store,
+                permission_store=self.permissions,
+                workflow_coordinator=coordinator,
+                session_store=getattr(self, "session_store", None),
+                memory_manager=getattr(agent, "memory", None),
+                tencentdb_memory=getattr(agent, "tencentdb_memory", None),
+                feedback_store=self.feedback_store,
+                strategy_store=self.strategy_store,
+                episode_store=self.episode_store,
+                reflection_scheduler=self.reflection_scheduler,
+                meta_memory_store=self.meta_memory_store,
+                consolidation_scheduler=self.consolidation_scheduler,
+            )
+            # The API gateway is the first production host of the public
+            # HarnessRuntime contract.  Bind the legacy facade's router to
+            # this request's tenant before handing the turn to the harness;
+            # the historical ``agent=`` fallback remains for injected test or
+            # plugin runtimes that already implement the public contract.
+            runtime = None
+            agent_reference = agent
+            router = getattr(agent, "router", None)
+            bind_router = getattr(router, "for_tenant", None)
+            if callable(bind_router):
+                from artpm_agent.harness.runtime import LegacyAgentRuntimeAdapter
+
+                runtime = LegacyAgentRuntimeAdapter(
+                    agent,
+                    router=bind_router(tenant_context),
+                )
+                agent_reference = None
             context = {
+                "tenant_id": command.principal.tenant_id,
                 "workspace_id": command.principal.workspace_id,
                 "conversation_id": command.conversation_id,
                 "turn_id": command.turn_id,
@@ -392,6 +530,12 @@ class DefaultGatewayRuntime:
                 "agent_id": "artpm-agent",
                 "permission_store": self.permissions,
                 "attachments": list(command.attachments),
+                "file_paths": [
+                    str(item.get("file_path") or item.get("stored_path"))
+                    for item in command.attachments
+                    if isinstance(item, Mapping)
+                    and (item.get("file_path") or item.get("stored_path"))
+                ],
                 "tenant_context": command.tenant_context,
             }
             turn_context = TurnContext(
@@ -400,14 +544,20 @@ class DefaultGatewayRuntime:
                 user_input=command.message,
                 attachments=list(command.attachments),
                 conversation_history=history,
-                agent=agent,
+                agent=agent_reference,
+                runtime=runtime,
+                services=turn_services,
                 extra=context,
             )
             result = run_turn(
                 turn_context,
+                services=turn_services,
                 request_conversation_id=command.conversation_id,
-                workflow_coordinator=coordinator,
             )
+            # A canonical run_turn() owns the learning tail. Keep the adapter
+            # fallback for injected legacy runners used by downstream hosts.
+            if not result.metadata.get("lifecycle_managed"):
+                self._record_turn_learning(turn_context, result, turn_services)
             return ChatOutcome(
                 response=result.response,
                 success=result.success,
@@ -417,6 +567,60 @@ class DefaultGatewayRuntime:
                 artifacts=tuple(result.artifacts),
                 error=result.error,
             )
+
+    def _record_turn_learning(
+        self,
+        turn_context: Any,
+        result: Any,
+        services: Any,
+    ) -> None:
+        """Run the host-independent learning tail for an API turn."""
+
+        try:
+            from artpm_agent.harness.outcome_recorder import record_outcome
+
+            record_outcome(
+                turn_context,
+                result,
+                store=getattr(services, "episode_store", None),
+            )
+        except Exception as error:  # noqa: BLE001 - learning is non-fatal
+            logger.warning("API outcome recording failed: %s", error, exc_info=True)
+
+        scope = getattr(turn_context, "scope", None)
+        if scope is None:
+            return
+        scheduler = getattr(services, "reflection_scheduler", None)
+        if scheduler is not None:
+            try:
+                episode_store = getattr(services, "episode_store", None)
+                feedback_store = getattr(services, "feedback_store", None)
+                strategy_store = getattr(services, "strategy_store", None)
+                if episode_store is not None and feedback_store is not None and strategy_store is not None:
+                    scheduler.run_if_due(
+                        episode_store,
+                        feedback_store,
+                        strategy_store,
+                        tenant_id=scope.tenant_id,
+                        workspace_id=scope.workspace_id,
+                        all_principals=True,
+                    )
+            except Exception as error:  # noqa: BLE001 - learning is non-fatal
+                logger.warning("API reflection failed: %s", error, exc_info=True)
+
+        knowledge_store = getattr(services, "knowledge_store", None)
+        consolidation_scheduler = getattr(services, "consolidation_scheduler", None)
+        if knowledge_store is not None and consolidation_scheduler is not None:
+            try:
+                from artpm_agent.memory.consolidation import ConsolidationService
+
+                consolidation_scheduler.run_if_due(
+                    ConsolidationService(knowledge_store),
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                )
+            except Exception as error:  # noqa: BLE001 - learning is non-fatal
+                logger.warning("API consolidation failed: %s", error, exc_info=True)
 
     def execute_permission(
         self,

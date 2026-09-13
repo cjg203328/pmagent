@@ -166,6 +166,26 @@ def test_workspace_knowledge_uses_vector_retrieval_and_persists(tmp_path):
     assert reopened.vector_status()["needs_rebuild"] is False
 
 
+def test_workspace_search_does_not_run_full_vector_sync(tmp_path, monkeypatch):
+    store = WorkspaceKnowledgeStore(
+        tmp_path / "knowledge.db",
+        vector_store_path=tmp_path / "vectors",
+        embedding_provider=SemanticTestEmbedding(),
+    )
+    resource = store.ingest_resource(
+        title="Search without reconciliation",
+        searchable_text="budget cost review",
+    )
+
+    def fail_full_sync(*_args, **_kwargs):
+        raise AssertionError("search must not run a full vector reconciliation")
+
+    monkeypatch.setattr(store, "_sync_vector_index", fail_full_sync)
+    result = store.search("budget", include_rules=False)
+
+    assert result[0]["id"] == resource["id"]
+
+
 def test_workspace_vector_index_tracks_archive_and_provider_changes(tmp_path):
     database_path = tmp_path / "knowledge.db"
     vector_path = tmp_path / "knowledge-vectors"

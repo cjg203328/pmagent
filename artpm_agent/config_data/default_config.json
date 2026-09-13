@@ -85,6 +85,7 @@
     "cache_max_entries": 64
   },
   "database": {
+    "url": "",
     "db_path": "./data/artpm.db",
     "memory_db_path": "./data/memory.db",
     "conversation_db_path": "./data/conversations.db",
@@ -139,10 +140,22 @@
     "check_interval_hours": 24
   },
   "memory": {
+    "vector_backend": "qdrant",
     "embedding_provider": "local_feature_hash",
     "embedding_model": "char-ngram-feature-hash-v1",
     "embedding_dimension": 1536,
     "vector_top_k": 5,
-    "short_term_memory_days": 7
+    "short_term_memory_days": 7,
+    "tencentdb_agent_memory": {
+      "enabled": false,
+      "base_url": "http://127.0.0.1:8420",
+      "api_key": "",
+      "scope_secret": "",
+      "timeout_seconds": 3,
+      "max_context_chars": 2400,
+      "max_capture_chars": 12000,
+      "agent_id": "artpm-agent",
+      "allow_insecure_http": false
+    }
   }
 }

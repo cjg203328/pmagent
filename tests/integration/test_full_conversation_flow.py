@@ -41,6 +41,15 @@ def _add_workspace(store: ConversationStore, workspace_id: str) -> None:
         )
 
 
+def _bind_workspace(store: ConversationStore, workspace_id: str, tenant_id: str) -> None:
+    """Bind the fixture's pre-created local workspace to its test tenant."""
+    with store._connection(write=True) as connection:  # noqa: SLF001 - fixture setup
+        connection.execute(
+            "UPDATE workspaces SET tenant_id = ? WHERE id = ?",
+            (tenant_id, workspace_id),
+        )
+
+
 @pytest.fixture()
 def conversation_gateway(tmp_path: Path) -> SimpleNamespace:
     """Run the real HTTP, identity, persistence, and permission boundaries."""
@@ -50,6 +59,7 @@ def conversation_gateway(tmp_path: Path) -> SimpleNamespace:
     permissions = PermissionStore(db_path)
     workflows = WorkflowStore(db_path)
     _add_workspace(conversations, "workspace-b")
+    _bind_workspace(conversations, "local-default", "tenant-a")
     commands = []
     executions = []
 

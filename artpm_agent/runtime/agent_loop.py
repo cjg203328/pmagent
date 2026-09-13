@@ -18,6 +18,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from .events import AgentEvent, AgentEventType, AgentMessage
+from .pipeline import ToolExecutionPipeline
 from .tools import (
     AgentTool,
     BeforeToolCallDecision,
@@ -470,6 +471,7 @@ class AgentLoop:
         before_tool_call: Optional[BeforeToolCallHook] = None,
         after_tool_call: Optional[AfterToolCallHook] = None,
         should_stop_after_turn: Optional[ShouldStopAfterTurn] = None,
+        pipeline: Optional["ToolExecutionPipeline"] = None,
     ) -> None:
         if isinstance(max_turns, bool) or not isinstance(max_turns, int):
             raise TypeError("max_turns must be an integer")
@@ -485,17 +487,31 @@ class AgentLoop:
             raise TypeError("context_transform must be callable")
         if should_stop_after_turn is not None and not callable(should_stop_after_turn):
             raise TypeError("should_stop_after_turn must be callable")
+        if pipeline is not None and not isinstance(pipeline, ToolExecutionPipeline):
+            raise TypeError("pipeline must be a ToolExecutionPipeline")
 
         self.registry = registry if registry is not None else ToolRegistry()
         self.max_turns = max_turns
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self.context_transform = context_transform
         self.should_stop_after_turn = should_stop_after_turn
+        # An optional pipeline composes with legacy single hooks: pipeline
+        # policies run first, the legacy hook last (pre) or last (post).
+        combined_before = (
+            pipeline.compose_pre(before_tool_call)
+            if pipeline is not None
+            else before_tool_call
+        )
+        combined_after = (
+            pipeline.compose_post(after_tool_call)
+            if pipeline is not None
+            else after_tool_call
+        )
         self.tool_executor = ToolExecutor(
             self.registry,
             execution_mode=tool_execution,
-            before_tool_call=before_tool_call,
-            after_tool_call=after_tool_call,
+            before_tool_call=combined_before,
+            after_tool_call=combined_after,
         )
         self._lock = RLock()
         self._active_abort: Optional[Event] = None

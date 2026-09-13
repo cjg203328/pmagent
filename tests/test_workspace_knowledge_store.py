@@ -210,6 +210,71 @@ def test_agent_rule_is_not_active_or_searchable_until_user_confirms(tmp_path):
     assert rule_result["status"] == "accepted"
 
 
+def test_rule_decisions_are_scoped_to_the_requested_workspace(tmp_path):
+    store = WorkspaceKnowledgeStore(tmp_path / "knowledge.db")
+    proposed = store.propose_rule(
+        "交付前必须完成审核",
+        workspace_id="workspace-a",
+        proposed_by="agent",
+    )
+
+    with pytest.raises(KeyError, match="Unknown rule"):
+        store.confirm_rule(
+            proposed["id"],
+            workspace_id="workspace-b",
+            confirmed_by="user-b",
+            confirmation_token="wrong-workspace-approval",
+        )
+
+    assert store.list_rules(workspace_id="workspace-a", status="proposed")[0][
+        "id"
+    ] == proposed["id"]
+    accepted = store.confirm_rule(
+        proposed["id"],
+        workspace_id="workspace-a",
+        confirmed_by="user-a",
+        confirmation_token="workspace-a-approval",
+    )
+    assert accepted["status"] == "accepted"
+
+
+def test_same_workspace_source_is_unique_per_tenant(tmp_path):
+    store = WorkspaceKnowledgeStore(tmp_path / "knowledge.db", enable_vector_search=False)
+    first = store.ingest_resource(
+        title="Tenant A resource",
+        searchable_text="tenant-a-only fact",
+        tenant_id="tenant-a",
+        workspace_id="shared-workspace",
+        source_type="upload",
+        source_id="same-source",
+    )
+    second = store.ingest_resource(
+        title="Tenant B resource",
+        searchable_text="tenant-b-only fact",
+        tenant_id="tenant-b",
+        workspace_id="shared-workspace",
+        source_type="upload",
+        source_id="same-source",
+    )
+
+    assert first["id"] != second["id"]
+    assert store.search(
+        "tenant-a-only",
+        tenant_id="tenant-a",
+        workspace_id="shared-workspace",
+    )[0]["id"] == first["id"]
+    assert store.search(
+        "tenant-b-only",
+        tenant_id="tenant-b",
+        workspace_id="shared-workspace",
+    )[0]["id"] == second["id"]
+    assert store.search(
+        "tenant-b-only",
+        tenant_id="tenant-a",
+        workspace_id="shared-workspace",
+    ) == []
+
+
 def test_rejected_and_revoked_rules_are_not_retrieved(tmp_path):
     store = WorkspaceKnowledgeStore(tmp_path / "knowledge.db")
     rejected = store.propose_rule("所有提醒都自动发送", proposed_by="agent")

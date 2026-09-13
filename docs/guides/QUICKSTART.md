@@ -1,400 +1,107 @@
-# ArtPM Agent - 快速启动指南
+# ArtPM Agent 快速启动
 
-## 📦 1. 环境准备
+本指南覆盖本地 UI、UI + REST API 和 Docker Compose 三种启动方式。完整配置项以根目录
+`.env.example` 为准，README 是项目总入口。
 
-### 系统要求
-- Windows 10/11 或 macOS 或 Linux
-- Python 3.8+
-- 4GB+ 内存
-- 1GB+ 磁盘空间
+## 本地 UI + API
 
-### 检查Python版本
-```bash
-python --version
-# 应该显示: Python 3.8.x 或更高
+Python 版本要求为 3.10 或更高。
+
+### Windows PowerShell
+
+```powershell
+py -3.10 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[api]"
+Copy-Item .env.example .env
+python -m artpm_agent.tools.check_config
+python start_with_checks.py
 ```
 
-如果没有Python,请访问: https://www.python.org/downloads/
-
----
-
-## 🚀 2. 快速安装
-
-### 方法1: 一键启动(推荐)
+### Linux / macOS
 
 ```bash
-# 双击运行
-start.bat
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[api]"
+cp .env.example .env
+python -m artpm_agent.tools.check_config
+python start_with_checks.py
 ```
 
-`start.bat` 会自动:
-1. 检查依赖
-2. 安装缺失的包
-3. 启动应用
-4. 打开浏览器
+访问：
 
-### 方法2: 手动安装
+- UI：`http://127.0.0.1:8501`
+- API：`http://127.0.0.1:8765`
+- Swagger：`http://127.0.0.1:8765/docs`
+
+无 LLM API Key 时仍可使用报价测算、任务分配、进度追踪、文档解析和本地文件分析。
+配置 Provider 和对应 Key 后，才启用通用对话和模型增强能力。
+
+## 仅启动离线 UI
+
+基础安装不包含 FastAPI，只启动 Streamlit 时使用：
 
 ```bash
-# 1. 安装依赖
-pip install -r requirements.txt
-
-# 2. 健康检查
-cd artpm_agent
-python health_check.py
-
-# 3. 启动应用
-cd ..
-streamlit run artpm_agent/app.py
+python -m pip install -e .
+python -m streamlit run artpm_agent/app.py --server.address 127.0.0.1 --server.port 8501
 ```
 
----
+Windows 可在安装依赖后运行 `start.bat`；Linux/macOS 可运行 `./start.sh`。统一启动器也
+支持只做配置检查：
 
-## ⚙️ 3. 配置API密钥
+```bash
+python start_with_checks.py --check-only
+```
 
-### 为什么需要API密钥?
-ArtPM Agent使用大语言模型(LLM)提供智能对话功能。没有API密钥也能使用基础功能,但无法使用智能对话。
+## 配置 LLM
 
-### 获取API密钥
+编辑 `.env`，选择一个 Provider 并填写对应 Key：
 
-选择一个提供商:
-
-#### OpenAI (推荐)
-1. 访问: https://platform.openai.com/api-keys
-2. 注册/登录账号
-3. 创建API Key
-4. 复制密钥(sk-开头)
-
-#### Anthropic Claude
-1. 访问: https://console.anthropic.com/
-2. 注册/登录账号
-3. 创建API Key
-4. 复制密钥(sk-ant-开头)
-
-#### DeepSeek (便宜)
-1. 访问: https://platform.deepseek.com/
-2. 注册/登录账号
-3. 创建API Key
-4. 复制密钥(sk-开头)
-
-### 配置方法
-
-#### 方法1: 通过UI配置(推荐)
-
-1. 启动应用: `start.bat`
-2. 点击左侧"⚙️ 设置"
-3. 选择LLM提供商
-4. 粘贴API Key
-5. 点击"💾 保存配置"
-6. 重启应用
-
-#### 方法2: 手动编辑.env文件
-
-1. 打开项目根目录的`.env`文件
-2. 添加API Key:
-
-```env
-# OpenAI
-OPENAI_API_KEY=sk-your-openai-key-here
-
-# Anthropic (或使用这个)
-ANTHROPIC_API_KEY=sk-ant-your-anthropic-key-here
-
-# DeepSeek (或使用这个,最便宜)
-DEEPSEEK_API_KEY=sk-your-deepseek-key-here
-
-# 选择提供商
+```dotenv
 LLM_PROVIDER=anthropic
 LLM_MODEL=claude-3-5-sonnet-20241022
+ANTHROPIC_API_KEY=
 ```
 
-3. 保存文件
-4. 重启应用
+也支持 `openai`、`zhipu`、`deepseek` 和 `custom`。视觉模型使用
+`LLM_VISION_PROVIDER`、`LLM_VISION_MODEL` 和对应 Key 单独配置。
 
----
+模型工具调用默认关闭。只有接入宿主审批钩子后，才允许设置：
 
-## ✅ 4. 验证安装
+```dotenv
+AGENT_MODEL_TOOL_CALLS_ENABLED=true
+```
 
-### 运行健康检查
+写入型工具始终需要审批，不能用该开关绕过安全边界。
+
+## Docker Compose
+
+生产 Compose 使用 PostgreSQL/RLS、Qdrant、Redis、Caddy 和可观测组件。对外入口是 Caddy
+的 `80/443`；应用容器内的 UI `8501` 和 API `8765` 不直接暴露到宿主机。
+
+在 `.env` 中设置 `BASIC_AUTH_USER`、`BASIC_AUTH_HASH`、`ARTPM_GATEWAY_SHARED_SECRET`、
+`POSTGRES_PASSWORD`、`POSTGRES_ADMIN_PASSWORD` 和 `GRAFANA_ADMIN_PASSWORD`，再执行：
 
 ```bash
-cd artpm_agent
-python health_check.py
+cp .env.example .env
+docker run --rm caddy:2-alpine caddy hash-password
+# 将输出填入 BASIC_AUTH_HASH，并设置 BASIC_AUTH_USER
+docker compose config
+docker compose up -d --build
+docker compose ps
 ```
 
-**成功输出示例:**
-```
-============================================================
-ArtPM Agent - 系统健康检查
-============================================================
+完整部署、证书、数据卷和权限说明见
+[`docs/operations/DEPLOY.md`](../operations/DEPLOY.md)。
 
-📦 模块导入:
-  ✓ streamlit           v1.28.0
-  ✓ pandas              v2.0.0
-  ✓ openpyxl            vN/A
-  ✓ sqlalchemy          v2.0.0
-
-🤖 LLM提供商:
-  ✓ openai              v1.0.0
-  ✓ anthropic           v0.8.0
-
-💾 数据库:
-  ✓ 连接状态: success
-  ✓ 项目数量: 0
-
-⚙️ 配置:
-  LLM Provider: anthropic
-  LLM Model: claude-3-5-sonnet-20241022
-  API Keys:
-    ✓ anthropic: configured
-
-🤖 Agent:
-  ✓ 初始化成功
-  ✓ Skills数量: 10
-  ✓ LLM可用: True
-
-============================================================
-✓ 系统健康 - 所有组件正常工作
-============================================================
-```
-
-### 测试功能
-
-启动应用后:
-
-1. **测试对话功能**
-   ```
-   输入: "你好"
-   期望: Agent返回欢迎消息
-   ```
-
-2. **测试利润计算**
-   ```
-   输入: "报价30万成本20万帮我算利润"
-   期望: 显示详细利润分析表格
-   ```
-
-3. **测试概览页面**
-   - 点击左侧"📊 概览"
-   - 查看项目统计数据
-
----
-
-## 💡 5. 开始使用
-
-### 基础操作
-
-#### 1. 对话助手
-- 点击"💬 对话"
-- 输入问题,比如:
-  - "这个项目的利润率怎么样?"
-  - "帮我分配任务"
-  - "检查项目进度"
-
-#### 2. 查看项目
-- 点击"📁 项目"
-- 查看所有项目列表
-- 点击项目查看详情
-
-#### 3. 上传文档
-- 点击"📤 上传"
-- 上传Excel报价单
-- 点击"🔍 解析文档"
-
-#### 4. 查看统计
-- 点击"📊 概览"
-- 查看项目统计和最近项目
-
-### 高级功能
-
-#### 利润计算
-```
-输入: "报价金额300000成本200000管理费15%税率6%"
-```
-
-#### 任务分配
-```
-输入: "分配建模任务给团队"
-```
-
-#### 进度跟踪
-```
-输入: "检查项目进度"
-```
-
-#### 催办提醒
-```
-输入: "帮我催一下进度"
-```
-
----
-
-## 🔧 6. 故障排除
-
-### 问题1: 应用无法启动
-
-**症状:** 双击start.bat后闪退
-
-**解决:**
-```bash
-# 1. 手动启动查看错误
-python artpm_agent/app.py
-
-# 2. 查看日志
-cat artpm_agent/logs/artpm_*.log
-
-# 3. 重新安装依赖
-pip install --force-reinstall -r requirements.txt
-```
-
-### 问题2: LLM不可用
-
-**症状:** 对话功能提示"LLM未配置"
-
-**解决:**
-1. 检查`.env`文件中的API Key
-2. 确认API Key正确(无空格)
-3. 在UI的"设置"页面重新配置
-
-### 问题3: 数据库错误
-
-**症状:** 项目页面报错
-
-**解决:**
-```bash
-# 删除旧数据库
-rm data/artpm.db
-
-# 重启应用
-start.bat
-```
-
-### 问题4: 依赖缺失
-
-**症状:** ImportError: No module named 'xxx'
-
-**解决:**
-```bash
-# 安装特定模块
-pip install xxx
-
-# 或重新安装所有依赖
-pip install -r requirements.txt
-```
-
----
-
-## 📝 7. 查看日志
-
-### 日志位置
-```
-artpm_agent/logs/artpm_20260711.log
-```
-
-### 实时查看
-```bash
-# Linux/Mac
-tail -f artpm_agent/logs/artpm_*.log
-
-# Windows PowerShell
-Get-Content artpm_agent/logs/artpm_*.log -Wait
-
-# Windows Git Bash
-tail -f artpm_agent/logs/artpm_*.log
-```
-
-### 搜索错误
-```bash
-grep "ERROR" artpm_agent/logs/artpm_*.log
-```
-
----
-
-## 🎓 8. 学习资源
-
-### 文档
-
-| 文档 | 说明 |
-|------|------|
-| README.md | 项目概览 |
-| OPTIMIZATION_SUMMARY.md | 优化总结 |
-| OPTIMIZATION_PLAN.md | 优化计划 |
-| PROJECT_STRUCTURE.md | 项目结构 |
-| MCP_SKILLS_QUICKSTART.md | MCP Skills指南 |
-
-### 日志分析
-
-查看Agent执行日志:
-```bash
-grep "skills" artpm_agent/logs/artpm_*.log
-```
-
-查看LLM调用日志:
-```bash
-grep "LLM" artpm_agent/logs/artpm_*.log
-```
-
----
-
-## 📞 9. 获取帮助
-
-### 运行诊断
+## 常用检查
 
 ```bash
-cd artpm_agent
-python health_check.py > diagnosis.txt
+python -m artpm_agent.tools.check_config
+python -m compileall -q artpm_agent
 ```
 
-将 `diagnosis.txt` 和 `logs/artpm_*.log` 一起发送以获取支持。
-
-### 常见命令
-
-```bash
-# 健康检查
-cd artpm_agent && python health_check.py
-
-# 查看日志
-cat artpm_agent/logs/artpm_*.log | tail -50
-
-# 重启应用
-start.bat
-
-# 清理缓存
-rm -rf __pycache__
-rm -rf artpm_agent/__pycache__
-rm -rf artpm_agent/*/__pycache__
-```
-
----
-
-## 🎉 10. 下一步
-
-现在你已经成功安装并配置了ArtPM Agent!
-
-### 推荐操作
-
-1. **创建测试项目**
-   - 点击"📁 项目"
-   - 创建一个测试项目
-   - 上传报价单
-
-2. **测试利润计算**
-   - 输入: "报价30万成本20万"
-   - 查看利润分析
-
-3. **浏览功能**
-   - 尝试所有菜单项
-   - 测试对话功能
-   - 上传文档
-
-### 进阶学习
-
-- 阅读 [OPTIMIZATION_PLAN.md](OPTIMIZATION_PLAN.md) 了解系统架构
-- 阅读 [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) 了解代码结构
-- 阅读 [技术架构重构方案.md](技术架构重构方案.md) 了解技术细节
-
----
-
-**祝你使用愉快! 🎉**
-
-如有问题,请查看日志文件或运行健康检查获取诊断信息。
+开发测试命令见 [`docs/operations/QUALITY_GATES.md`](../operations/QUALITY_GATES.md)。
+遇到服务、端口或依赖问题时，先查看
+[`docs/operations/TROUBLESHOOTING.md`](../operations/TROUBLESHOOTING.md)。

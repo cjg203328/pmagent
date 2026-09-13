@@ -330,7 +330,7 @@ def test_schema_migration_is_idempotent_and_wal_is_enabled(tmp_path):
             "SELECT version FROM chat_schema_migrations ORDER BY version"
         ).fetchall()
     assert journal_mode.lower() == "wal"
-    assert versions == [(1,), (2,)]
+    assert versions == [(1,), (2,), (3,)]
 
 
 def test_concurrent_message_writes_do_not_lose_data(tmp_path):

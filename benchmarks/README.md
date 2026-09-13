@@ -17,7 +17,7 @@ Write a machine-readable report and enforce the regression thresholds:
 python -m benchmarks.core_performance `
   --samples 30 `
   --warmups 5 `
-  --output artifacts/core-performance.json `
+  --output artifacts/benchmarks/core-performance.json `
   --enforce
 ```
 

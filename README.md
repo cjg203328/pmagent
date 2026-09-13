@@ -1,414 +1,311 @@
 # ArtPM Agent
 
-面向游戏美术外包项目管理的 Streamlit 助手，支持离线利润测算、任务分配、进度预警、报价单解析和本地文件分析。通用自然语言对话需要有效的 LLM API Key。
+面向游戏美术外包项目管理的 AI 助手，采用离线优先设计。它覆盖报价测算、任务分配、
+进度预警、提醒投递、文档解析和本地文件分析；配置 LLM 后可启用通用对话、语义理解和
+模型工具调用。
 
-> 多模态文档增强可选使用 [MinerU](https://github.com/opendatalab/MinerU)，
-> 支持 PDF、图片、DOCX、PPTX、XLSX 转换为 Markdown/结构化 JSON；
-> 未部署 MinerU 时自动回退到项目内置解析器。部署与许可证说明见
-> [docs/MINERU_INTEGRATION.md](docs/MINERU_INTEGRATION.md)。
+核心业务技能和本地文件能力不依赖 API Key。项目提供三种主要入口：
 
-## 快速启动
+- **Streamlit UI**：主界面，提供对话、设置、可观测和工作流功能。
+- **FastAPI REST 网关**：供外部系统集成，默认监听 `127.0.0.1:8765`。
+- **CLI**：使用 `python main.py` 或安装后的 `artpm-agent` 命令。
 
-**推荐方式**（跨平台 + 配置检查）：
+## 运行方式
 
-```bash
-python start_with_checks.py
-```
+| 场景 | 安装方式 | 入口 | 默认依赖 |
+| --- | --- | --- | --- |
+| 离线 UI / CLI | `python -m pip install -e .` | Streamlit 或 CLI | SQLite、FAISS |
+| 本地 UI + API | `python -m pip install -e ".[api]"` | `python start_with_checks.py` | 上述依赖 + FastAPI、Uvicorn |
+| 开发与测试 | `python -m pip install -e ".[dev]"` | `scripts/` 下的质量门禁 | 本地依赖 + 测试和质量工具 |
+| 生产 Compose | `python -m pip install -e ".[production]"` | `docker compose up -d --build` | PostgreSQL/RLS、Qdrant、Redis、可观测组件 |
 
-**快速启动**：
-
-Windows：
-```bat
-start.bat
-```
-
-Linux/Mac：
-```bash
-./start.sh
-```
-
-**手动启动**：
-```bash
-python -m pip install -e .
-python -m streamlit run artpm_agent/app.py --server.address 127.0.0.1
-```
-
-访问 `http://localhost:8501`。
-
-**配置检查工具**：
-
-在启动前或遇到问题时，可以单独运行配置检查：
-```bash
-python -m artpm_agent.tools.check_config
-```
+基础安装不包含 FastAPI。需要启动完整本地栈时，请安装 `.[api]` 或 `.[dev]`；只运行离线
+UI 时直接使用基础安装即可。
 
 ## 核心能力
 
-> 💡 **离线优先设计**：核心业务功能无需 API 密钥即可使用。[查看完整离线模式指南 →](OFFLINE_FALLBACK.md)
+### 离线可用
 
-| 能力 | 实现状态 | 离线可用 |
-|---|---|---|
-| 利润、管理费、税费和风险测算 | ✅ | ✅ |
-| 基于技能、经验和当前负载的任务分配 | ✅ | ✅ |
-| 从业务数据库读取项目并进行截止日期预警 | ✅ | ✅ |
-| 生成提醒及可选企业微信 Webhook 投递 | ✅ | ✅ 生成 / ⚠️ 投递需配置 |
-| Excel `.xlsx/.xls` 报价单解析 | ✅ | ✅ |
-| TXT、CSV、JSON、Excel、PDF 文件读取与分析 | ✅ | ✅ |
-| 文件搜索、内容搜索、趋势分析、项目评估 | ✅ | ✅ |
-| 通用 AI 对话 | ✅ | ❌ 需要 API Key |
+| 能力 | 说明 |
+| --- | --- |
+| 报价与成本 | 报价、成本、利润、管理费、税费和风险测算 |
+| 项目执行 | 任务分配、负载分析、进度追踪和截止日期预警 |
+| 交付流程 | 报价排期、需求评估、质量控制、交付和复盘 |
+| 文档处理 | 文档分类、结构化抽取、Excel/PDF/TXT/CSV/JSON 读取 |
+| 本地分析 | 文件搜索、数据分析、趋势分析和项目健康度评估 |
+| 通知投递 | 生成提醒，可选企业微信 Webhook 投递 |
+
+### 配置 LLM 后增强
+
+- 通用自然语言对话和语义理解。
+- 多 Provider 故障转移、请求限时和响应缓存。
+- DeepSeek `deepseek-chat` / `deepseek-reasoner`，支持独立捕获 `reasoning_content` 和
+  `DEEPSEEK_REASONING_EFFORT`。
+- 视觉模型搭配：主模型不支持图片时，将图片请求路由到独立视觉模型。
+- 模型工具调用：参数先通过 JSON Schema 校验，写入型工具仍需宿主审批。
+
+## 快速开始
+
+### Windows PowerShell
+
+```powershell
+# 可选：创建并启用虚拟环境
+py -3.10 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# 本地完整栈需要 [api]；只使用离线 UI 时改为 python -m pip install -e .
+python -m pip install -e ".[api]"
+Copy-Item .env.example .env
+
+# 检查配置。无 LLM Key 也可以通过离线检查
+python -m artpm_agent.tools.check_config
+
+# 同时启动 FastAPI 和 Streamlit
+python start_with_checks.py
+```
+
+访问：
+
+- UI：`http://127.0.0.1:8501`
+- API 健康检查：`http://127.0.0.1:8765/health`
+- API 文档：`http://127.0.0.1:8765/docs`
+
+只启动离线 UI：
+
+```powershell
+python -m pip install -e .
+python -m streamlit run artpm_agent/app.py --server.address 127.0.0.1 --server.port 8501
+```
+
+也可以在依赖安装完成后使用 `start.bat`。它会调用统一启动器；配置检查失败或端口被其他
+程序占用时会停止启动。仅检查配置而不启动服务：
+
+```powershell
+python start_with_checks.py --check-only
+```
+
+### Linux / macOS
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[api]"
+cp .env.example .env
+python -m artpm_agent.tools.check_config
+python start_with_checks.py
+```
+
+也可以使用 `./start.sh`。脚本会启动相同的本地 UI + API 栈。
 
 ## 配置
 
-```powershell
-Copy-Item .env.example .env
-```
+从 `.env.example` 创建 `.env`，只填写当前部署需要的配置。无 LLM Key 时，系统保持离线
+模式，不应发起无效的模型请求。
 
-关键配置：
+常用配置：
 
-```env
+```dotenv
+# LLM_PROVIDER 可选 anthropic / openai / zhipu / deepseek / custom
 LLM_PROVIDER=anthropic
 LLM_MODEL=claude-3-5-sonnet-20241022
 ANTHROPIC_API_KEY=
-AGENT_MODEL_TOOL_CALLS_ENABLED=true
+DEEPSEEK_API_KEY=
 
+# 默认关闭。只有接入宿主审批钩子后才启用
+AGENT_MODEL_TOOL_CALLS_ENABLED=false
+
+# 本地数据默认落在 data/
 DB_PATH=./data/artpm.db
 MEMORY_DB_PATH=./data/memory.db
 VECTOR_DB_PATH=./data/vector_store
 ```
 
-### Optional Voice Channel
+关键行为：
 
-The real-time voice channel is optional and keeps the existing text chat,
-knowledge base, memory, LangGraph, and approval paths unchanged. Install the
-isolated voice dependencies only when this channel is needed:
+- `ARTPM_DEPLOYMENT_MODE=local` 用于本机模式，生产 Compose 使用 `server`/生产环境配置。
+- `VECTOR_BACKEND=qdrant` 只有在 `QDRANT_URL` 非空且 Qdrant 可用时使用远程后端；否则使用
+  本地 FAISS，运行期远程故障也会回退到 FAISS。
+- `DATABASE_URL` 配置 PostgreSQL 时使用数据库隔离；本地默认使用 SQLite。SQLite 不提供
+  数据库级 RLS，应用层仍必须保持 tenant/workspace 隔离。
+- `REDIS_URL` 只启用缓存加速层，SQLite 仍是权威数据源；缺失或不可达时自动降级。
+- `ARTPM_TELEMETRY=0` 可关闭遥测写入；`OTEL_EXPORTER_OTLP_ENDPOINT` 和 `SENTRY_DSN`
+  未配置时对应集成为 no-op。
+- 生产环境不要把 `AGENT_MODEL_TOOL_CALLS_ENABLED` 当作审批替代品，也不要关闭 TLS 校验。
 
-```powershell
-python -m pip install -e ".[voice]"
-```
+## Docker 生产部署
 
-The extra pins `livekit-agents==1.6.6` and matching Cartesia, MiniMax AI,
-and Silero plugins. MiniMax uses
-`livekit-plugins-minimax-ai`; do not install the older
-`livekit-plugins-minimax` package, which pins Agents 1.2.x.
+Compose 对外只暴露 Caddy 的 `80/443`；Streamlit `8501` 和 REST API `8765` 只在容器网络内
+供 Caddy 访问。Grafana 仅绑定宿主机 `127.0.0.1:3000`。完整部署说明见
+[`docs/operations/DEPLOY.md`](docs/operations/DEPLOY.md)。
 
-Minimal cloud configuration for Chinese speech:
+首次部署前，在 `.env` 中设置以下必填值：
 
-```env
-ARTPM_VOICE_ENABLED=true
-ARTPM_VOICE_TRANSPORT=livekit
-LIVEKIT_URL=wss://your-project.livekit.cloud
-LIVEKIT_API_KEY=your-key
-LIVEKIT_API_SECRET=your-secret
-VOICE_STT_PROVIDER=cartesia
-VOICE_STT_MODEL=ink-whisper
-VOICE_STT_LANGUAGE=zh
-VOICE_TTS_PROVIDER=minimax
-VOICE_TTS_FALLBACKS=minimax,cartesia,local,text
-CARTESIA_API_KEY=your-cartesia-key
-MINIMAX_API_KEY=your-minimax-key
-VOICE_FALLBACK=text
-VOICE_REQUIRE_APPROVAL=true
-```
+- `BASIC_AUTH_USER`、`BASIC_AUTH_HASH`：Caddy 基础认证凭据。
+- `ARTPM_GATEWAY_SHARED_SECRET`：API 网关共享密钥。
+- `POSTGRES_PASSWORD`：应用角色密码。
+- `POSTGRES_ADMIN_PASSWORD`：迁移角色密码。
+- `GRAFANA_ADMIN_PASSWORD`：Grafana 管理员密码。
 
-Run the media worker as a process separate from the API and Streamlit UI:
-
-```powershell
-artpm-voice-worker start
-```
-
-The API exposes authenticated `GET /v1/voice/status` and
-`POST /v1/voice/sessions` endpoints. The browser receives only a short-lived,
-conversation-bound LiveKit token; LiveKit and provider secrets remain on the
-server.
-
-Final speech transcripts still enter the PMAgent Harness, so knowledge
-retrieval, global memory, model failover, token caching, and high-risk approval
-cannot be bypassed. Empty keys or an unavailable voice service keep the text
-path active. The voice extra installs the lightweight operating-system TTS
-adapter used by the `local` fallback; `text` is the guaranteed final fallback.
-
-占位或空 API Key 会进入离线模式，不会发起无效网络请求。
-模型驱动工具调用默认开启；模型参数会先经过 JSON Schema 校验，写入型工具仍需宿主显式审批。需要紧急回滚时，可设置 `AGENT_MODEL_TOOL_CALLS_ENABLED=false`。
-
-远程 Skills Forge 是可选能力。推荐设置 `MCP_ENABLED=true`、`MCP_TRANSPORT=stdio` 和有效的 `SKILLS_FORGE_KEY`，由本机 `npx` 启动官方 MCP server；只有旧版 `http` transport 才需要 `SKILLS_FORGE_URL`。远程侧默认只开放 `resolve_skill`、`get_skill_raw`、`list_skills` 和 `list_bundles` 四个只读发现工具。本地文件工具不依赖远程服务，命令执行默认关闭，需显式设置 `MCP_ALLOW_COMMANDS=true`。
-
-## 离线模式
-
-**ArtPM Agent 采用离线优先设计**，核心业务功能无需 API 密钥：
+生成 Caddy bcrypt 密码哈希并启动：
 
 ```bash
-# 无需配置 API Key 即可运行
-python -m streamlit run artpm_agent/app.py
+cp .env.example .env
+docker run --rm caddy:2-alpine caddy hash-password
+# 将输出填入 .env 的 BASIC_AUTH_HASH，并设置 BASIC_AUTH_USER
+docker compose config
+docker compose up -d --build
+docker compose ps
 ```
 
-### 离线可用功能
+公网部署时设置已解析到服务器的 `SITE_ADDRESS`。留空时使用 `localhost` 和 Caddy 本地 CA，
+浏览器可能需要先信任该证书。`./data`、`./logs` 和具名卷会持久化业务数据、记忆、向量索引、
+缓存、数据库、证书及可观测数据；生产 Compose 禁用 SQLite fallback，PostgreSQL/RLS 失败
+不会静默降级到 SQLite。
 
-- ✅ 利润测算：报价/成本/利润/税费/风险计算
-- ✅ 任务分配：基于技能/经验/负载智能分配
-- ✅ 进度预警：从业务数据库读取项目并检查截止日期
-- ✅ 文档解析：Excel/PDF/TXT/CSV/JSON 本地解析
-- ✅ 文件工具：本地文件搜索/内容搜索/项目评估（MCP）
-- ✅ 数据查询：SQLite 业务数据和 FAISS 向量检索
+## REST API
 
-### 使用示例
+安装 API extra 后可使用以下入口：
 
-离线模式下，直接输入业务指令：
-
-```
-报价12万成本8万帮我算利润
-分配建模任务给团队成员
-检查项目进度有没有卡住的
-解析这份报价单（上传 Excel 附件）
+```powershell
+python -m pip install -e ".[api]"
+artpm-api
+# 或
+python -m artpm_agent.api
 ```
 
-系统会自动路由到对应技能并返回结果，**无需任何 API 调用**。
+主要路由：
 
-### 在线增强
+- `GET /health`、`GET /ready`
+- `GET /v1/capabilities`
+- `POST /v1/chat`
+- 权限审批：`/v1/permissions/*`
+- 工作流及运行记录：`/v1/workflows/*`、`/v1/workflow-runs/*`
 
-配置 API 密钥后解锁智能对话和高级语义理解：
+生产网关要求经过认证的租户、workspace、actor 上下文，并使用 `X-Gateway-Token`。完整的
+请求体、身份头、错误码和审批契约见
+[`docs/operations/API_GATEWAY_DOCUMENTATION.md`](docs/operations/API_GATEWAY_DOCUMENTATION.md) 与
+[`docs/operations/API_GATEWAY.md`](docs/operations/API_GATEWAY.md)。
 
-```env
-LLM_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-...
+## 可选能力
+
+### MinerU 多模态文档解析
+
+支持 PDF、图片、DOCX、PPTX、XLSX 转 Markdown 和结构化 JSON。按部署方式选择：
+
+```bash
+# 本地 pipeline，包含模型运行时
+python -m pip install -e ".[mineru]"
+
+# 远程 mineru-api 客户端，不下载本地 VLM/OCR 权重
+python -m pip install -e ".[mineru-client]"
 ```
 
-详见 [完整离线模式指南](OFFLINE_FALLBACK.md)。
+MinerU 是增强后端；未部署、转换失败或超时都会回退到内置解析器。配置细节见
+[`docs/integrations/MINERU_INTEGRATION.md`](docs/integrations/MINERU_INTEGRATION.md)。
 
-## 📚 文档
+### OCR、语音、MCP 与 Redis
 
-### 快速入门
-- **[快速启动指南](QUICKSTART.md)** - 5 分钟从零到运行
-- **[速查手册](QUICK_REFERENCE.md)** - 配置、命令、故障排查速查
+| 能力 | 启用方式 | 说明 |
+| --- | --- | --- |
+| OCR | `python -m pip install -e ".[ocr]"` | 适用于报价单和扫描件，重依赖，按需安装 |
+| 实时语音 | `python -m pip install -e ".[voice]"` | 配置 LiveKit 与 STT/TTS 后运行 `artpm-voice-worker start`，文本通道不依赖它 |
+| Skills Forge MCP | `MCP_ENABLED=true` + 有效 `SKILLS_FORGE_KEY` | 默认只读发现工具，命令执行仍需显式 `MCP_ALLOW_COMMANDS=true` |
+| Redis | 设置 `REDIS_URL` | 可选缓存加速层，不是 SQLite 权威源的替代品 |
 
-### 深度指南
-- **[项目全面分析](PROJECT_ANALYSIS_2026-07-22.md)** - 技术栈、架构设计、优化路线图
-  - 项目概览与核心价值主张
-  - 10 大核心特性深度解析
-  - 代码质量评估 (91分 - 卓越)
-  - 12 个月改进路线图
+MCP 默认关闭。普通业务和本地文件工具不依赖远程 MCP；真实 MCP 验证必须显式设置集成开关。
+语音转录仍进入既有会话、记忆、检索和审批链路，不绕过文本通道的安全边界。
 
-- **[架构图谱](ARCHITECTURE_DIAGRAM.md)** - 8 个关键流程可视化
-  - Intent 路由决策树
-  - ModelGateway 故障转移流程
-  - Memory 系统数据流
-  - 遥测数据采集管道
-
-### 开发指南
-- **[插件开发指南](docs/PLUGIN_DEVELOPMENT_GUIDE.md)** ⭐ 生产就绪
-  - 6 步快速开始
-  - SHA-256 + Capability Allowlist 安全机制
-  - 2 个完整示例 (天气查询 + 数据分析)
-  - 最佳实践与故障排查
-
-- **[API Gateway 文档](docs/API_GATEWAY_DOCUMENTATION.md)** - 完整 REST API 参考
-  - 认证与安全机制
-  - 10+ 端点完整示例 (cURL + Python + JavaScript)
-  - 错误处理最佳实践
-  - 生产部署指南
-
-### 实施报告
-- **[优化实施报告](OPTIMIZATION_IMPLEMENTATION_REPORT.md)** - 本次优化总结
-- **[优化完成报告](OPTIMIZATION_COMPLETION_REPORT.md)** - 执行结果与后续建议
-
-### 专题文档
-- [MinerU 集成说明](docs/MINERU_INTEGRATION.md) - 多模态文档转换
-- [完整离线模式指南](OFFLINE_FALLBACK.md) - 无 API 运行指南
-- [历史实施报告](OPTIMIZATION_REPORT_20260711_ACTUAL.md) - 历史优化记录
-
----
-
-## 架构
+## 架构边界
 
 ```text
-artpm_agent/app.py                 Streamlit 界面
-artpm_agent/agent.py               对话与确定性意图路由
-artpm_agent/skills/                业务 Skill 和本地 MCP Skill
-artpm_agent/parsers/               Excel 与可选 OCR 解析
-artpm_agent/database/models.py     SQLAlchemy 业务数据
-artpm_agent/memory/                文档记忆与离线检索
-artpm_agent/core/                  工具客户端和可选基础设施
-artpm_agent/runtime/telemetry.py   可观测系统：Token 消耗与连接情况（sqlite telemetry.db）
-artpm_agent/runtime/pricing.py     USD 定价表与成本估算
-artpm_agent/runtime/telemetry_dashboard.py  运营看板（HTML 报告 / Streamlit）
+artpm_agent/
+├── app.py / views/       Streamlit 入口与页面
+├── api/                  FastAPI 网关
+├── harness/              会话编排：模型、技能、知识、记忆和 Token 预算
+├── runtime/              AgentLoop、事件总线、工具流水线、plan、subagent、会话查询
+├── skills/               业务技能、本地文件技能和技能路由
+├── providers/            Provider 故障转移、结构化输出和响应缓存
+├── memory/               SQLite 会话、FAISS/Qdrant 向量和 workspace 知识库
+├── database/             SQLAlchemy 模型、租户会话和 Alembic 迁移
+├── security/ / tenancy/  审批、权限和租户上下文
+└── plugins/              带 allowlist 和 SHA-256 校验的插件注册
 ```
 
-业务库和记忆库必须分离：`artpm.db` 用于项目、任务和人员，`memory.db` 用于文档记忆。代码不会在 schema 不匹配时自动删表。
+当前请求边界：
 
-## 可观测系统（Token 消耗与连接情况）
+- `HarnessRuntime` 与 `run_turn()` 是 API/UI 请求处理的规范入口。
+- `ArtPMAgent` 是兼容 facade，新功能不应继续扩大对旧 facade 私有实现的依赖。
+- API chat 优先使用 async handler；同步旧 Agent 在迁移完成前通过线程隔离。
+- 业务库和记忆库分离，workspace/tenant 隔离必须贯穿查询、写入、缓存和向量检索。
+- 模型工具调用先过 JSON Schema；写入型操作必须经过宿主审批。
 
-为现有工程叠加了一层只读、非侵入的可观测能力，记录每次模型调用的 **Token 消耗** 与 **连接/链接情况**，便于核算成本与排查接口故障。所有新增行为默认开启、纯增量、不影响原有逻辑，且遥测写入为 best-effort（绝不会打断一次对话回合）。
+## 开发与质量验证
 
-- **Token 消耗**：每次成功/缓存命中均记录 `prompt_tokens` / `completion_tokens` / `cached_tokens` / `total_tokens` 与估算 `cost_usd`。优先读取客户端返回的 `usage`（如 `client.last_usage`），不可用时回退到基于文本长度的启发式估算。成本通过 `runtime/pricing.py` 的 USD 定价表计算；未知模型按层级回退，缓存命中成本为 0。
-- **连接/链接情况**：每次 failover 候选尝试都写入一条 `connection_events` 记录（成功/失败、错误类型、HTTP 状态码、端点、延迟），从而能统计成功率、错误类型分布与端点健康度（含熔断器冷却状态）。
-- **存储**：`data/telemetry.db`（WAL 模式，独立库）。表结构以幂等 `ALTER TABLE` 向后兼容扩展，旧列保留。
+安装开发依赖：
 
-查看方式（任选其一）：
+```bash
+python -m pip install -e ".[dev]"
+```
+
+按变更范围执行门禁：
 
 ```powershell
-# 1) 已集成进主应用的「可观测」面板（推荐）：主应用内左侧导航 / 右上角固定导航点击「可观测」
-streamlit run app.py
-# 2) 静态 HTML 报告
-python -m artpm_agent.runtime.telemetry_dashboard --out telemetry_report.html --window 500
-# 3) 独立 Streamlit 看板
-streamlit run telemetry_dashboard_app.py
-```
+# 快速离线回归
+powershell -ExecutionPolicy Bypass -File scripts/test_fast.ps1
 
-「可观测」面板与原「对话 / 设置」共用主应用导航、主题与控件风格（`render_page_header`、`metric-rail`、`section-heading`），数据复用 `telemetry_dashboard.collect_dashboard` 这一单一数据源，与独立看板口径一致。面板含两块：**Token 消耗**（总/输入/输出/缓存命中 Token、估算成本、按模型与按 Provider 明细、Token 趋势）与 **连接 / 链接情况**（成功率、连接趋势、错误类型分布、端点健康，含 `agent.model_gateway` 熔断器冷却态）。
+# 完整离线回归，包含慢速 UI 测试
+powershell -ExecutionPolicy Bypass -File scripts/test_all.ps1
 
-关键开关（环境变量，均为可选，默认开启遥测）：
+# 显式外部集成：MCP、网络、凭据或 PostgreSQL
+powershell -ExecutionPolicy Bypass -File scripts/test_integration.ps1
 
-```text
-ARTPM_TELEMETRY=0               关闭遥测写入
-ARTPM_TELEMETRY_DB=path.db      指定遥测库路径
-```
+# 离线性能门禁
+powershell -ExecutionPolicy Bypass -File scripts/test_benchmark.ps1
 
-## 日志轮转
+# 现代化边界核心覆盖率，门槛为 90%
+powershell -ExecutionPolicy Bypass -File scripts/coverage_core.ps1
 
-应用日志默认写入 `artpm_agent/logs/artpm.log`，每天午夜轮转并保留 14 份；
-文件和控制台 handler 均启用敏感信息脱敏。可在 `.env` 中调整：
-
-```env
-ARTPM_LOG_LEVEL=INFO
-ARTPM_LOG_ROTATION=time          # time / size / none
-ARTPM_LOG_WHEN=midnight
-ARTPM_LOG_INTERVAL=1
-ARTPM_LOG_BACKUP_COUNT=14
-ARTPM_LOG_MAX_BYTES=10485760     # size 模式生效
-ARTPM_LOG_FILE=artpm.log
-ARTPM_LOG_DIR=
-ARTPM_LOG_UTC=false
-```
-
-`time` 适合常驻服务，`size` 适合日志量波动较大的部署；`none` 只关闭轮转，
-不会关闭日志写入。
-
-## 测试与检查
-
-```powershell
-python -m pip install -r requirements-dev.txt
-python -m pytest -q
+# 静态与语法检查
 ruff check artpm_agent tests
-python health_check.py
-
-# 工作流模块覆盖率
-python -m pytest -o addopts="" tests/test_workflow_runtime.py tests/test_workflow_store.py `
-  tests/test_workflow_coordinator.py tests/test_task_graph.py `
-  --cov=artpm_agent.workflows --cov-report=term-missing --cov-fail-under=50
-
-# 离线性能回归门禁与 JSON 报告
-python -m benchmarks.core_performance --samples 30 --warmups 5 `
-  --output artifacts/core-performance.json --enforce
+python -m compileall -q artpm_agent
 ```
 
-OCR 和标准 MCP SDK 是可选依赖；FAISS 是知识库向量检索的核心依赖,未加载时应用会明确报告检索降级状态。
+Linux/macOS 的快速回归和覆盖率命令：
 
-实际审计结果和后续策略见 [OPTIMIZATION_REPORT_20260711_ACTUAL.md](OPTIMIZATION_REPORT_20260711_ACTUAL.md)。
-
-## 🧪 测试
-
-### 运行测试
 ```bash
-# 完整测试套件
-pytest -v
-
-# 测试覆盖率 (73% ✅)
-./scripts/coverage_report.sh
-
-# 端到端集成测试
-pytest tests/integration/ -v
-
-# 性能基准测试
-python -m benchmarks.core_performance --samples 30
+python -m pytest -q --no-cov -m "not integration and not benchmark and not slow"
+python scripts/coverage_core.py
 ```
 
-### 当前状态
-- ✅ **1,182 个测试** 全部通过
-- ✅ **73% 代码覆盖率** (超过 70% 目标)
-- ✅ **端到端集成测试** 框架已建立
-- ✅ **性能基准** 门禁已配置
+集成测试必须显式 opt-in，不能把 mock、skip 或静态检查描述为真实生产验证。`mypy artpm_agent`
+用于渐进式类型检查，当前仍可能包含既有基线错误；修改类型边界时应区分新增错误和既有错误。
 
----
+## 文档索引
 
-## 🎯 项目健康度
+- [`docs/INDEX.md`](docs/INDEX.md)：完整文档索引。
+- [`docs/operations/CURRENT_STATUS.md`](docs/operations/CURRENT_STATUS.md)：当前架构、质量门禁和外部验证状态。
+- [`docs/operations/QUALITY_GATES.md`](docs/operations/QUALITY_GATES.md)：测试分层和质量命令。
+- [`docs/operations/DEPENDENCY_PROFILES.md`](docs/operations/DEPENDENCY_PROFILES.md)：本地、API、开发和生产依赖。
+- [`docs/architecture/PROJECT_STRUCTURE.md`](docs/architecture/PROJECT_STRUCTURE.md)：仓库目录、入口和数据目录说明。
+- [`docs/architecture/EXECUTION_MAP.md`](docs/architecture/EXECUTION_MAP.md)：请求编排、上下文、记忆、工具和记录的执行映射。
+- [`docs/guides/QUICK_REFERENCE.md`](docs/guides/QUICK_REFERENCE.md)：常用模块和命令速查。
+- [`docs/architecture/ARCHITECTURE_DIAGRAM.md`](docs/architecture/ARCHITECTURE_DIAGRAM.md)：架构图谱。
+- [`docs/guides/USER_GUIDE.md`](docs/guides/USER_GUIDE.md)：用户使用教程。
+- [`docs/architecture/MULTI_TENANT_ARCHITECTURE.md`](docs/architecture/MULTI_TENANT_ARCHITECTURE.md)：多租户隔离设计。
+- [`docs/dev/PLUGIN_DEVELOPMENT_GUIDE.md`](docs/dev/PLUGIN_DEVELOPMENT_GUIDE.md)：插件开发。
+- [`docs/integrations/LOCAL_MCP_GUIDE.md`](docs/integrations/LOCAL_MCP_GUIDE.md)：本地 MCP 工具。
+- [`docs/operations/PRODUCTION_MODERNIZATION.md`](docs/operations/PRODUCTION_MODERNIZATION.md)：生产现代化边界。
+- [`docs/operations/TROUBLESHOOTING.md`](docs/operations/TROUBLESHOOTING.md)：故障排查。
 
-**综合评分**: **32/35 (91%) - 卓越** ⭐⭐⭐⭐⭐
+## 故障排查
 
-| 维度 | 评分 | 说明 |
-|------|------|------|
-| 代码质量 | ⭐⭐⭐⭐⭐ | 架构清晰、模块化优秀 |
-| 功能完整性 | ⭐⭐⭐⭐☆ | 核心功能完备、可扩展 |
-| 文档质量 | ⭐⭐⭐⭐⭐ | 体系化、生产就绪 |
-| 测试覆盖 | ⭐⭐⭐⭐☆ | 73% 覆盖率、1182 个测试 |
-| 可维护性 | ⭐⭐⭐⭐⭐ | 分层清晰、易于理解 |
-| 性能表现 | ⭐⭐⭐⭐☆ | 多轮优化、生产可用 |
-| 安全性 | ⭐⭐⭐⭐☆ | 基础机制完备 |
+1. 先运行 `python -m artpm_agent.tools.check_config`，确认配置结构和必填项。
+2. API 启动失败时确认已安装 `.[api]`，并检查 `8765` 是否被其他程序占用。
+3. UI 不能访问 API 时检查 `http://127.0.0.1:8765/health`；生产环境检查 Caddy、API 和
+   `ARTPM_GATEWAY_SHARED_SECRET`。
+4. Qdrant、Redis 或 MinerU 不可用时查看启动日志和回退原因；离线模式应保持可用。
+5. PostgreSQL RLS 测试没有 `ARTPM_TEST_POSTGRES_URL` 时会明确 skip，不应报告为已验证。
 
----
+## 许可证
 
-## 🤝 贡献指南
-
-### 开发工作流
-1. Fork 项目
-2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
-3. 运行测试 (`pytest -v`)
-4. 提交变更 (`git commit -m 'Add amazing feature'`)
-5. 推送到分支 (`git push origin feature/amazing-feature`)
-6. 创建 Pull Request
-
-### 代码风格
-```bash
-# 代码检查
-ruff check artpm_agent tests
-
-# 类型检查
-mypy artpm_agent
-
-# 安全扫描
-bandit -r artpm_agent
-```
-
----
-
-## 📊 统计数据
-
-- **代码规模**: ~57,000 行 Python
-- **测试数量**: 1,182 个测试,130 个测试文件
-- **测试覆盖率**: 73%
-- **文档量**: ~70,000 字 (新增)
-- **技能数量**: 10+ 内置技能
-- **插件示例**: 2 个完整示例
-
----
-
-## 🗺️ 路线图
-
-### ✅ 短期 (1-2 月) - 100% 完成
-- [x] 项目全面分析文档
-- [x] API Gateway 完整文档
-- [x] 插件开发指南
-- [x] 测试覆盖率提升到 73%
-- [x] 端到端集成测试框架
-
-### 🔄 中期 (3-6 月)
-- [ ] PostgreSQL 迁移 (支持 500+ 并发)
-- [ ] 性能监控增强 (P95/P99 延迟)
-- [ ] 插件生态建设 (5+ 官方插件)
-- [ ] 移动端 UI 适配
-
-### 🔮 长期 (6-12 月)
-- [ ] Fine-tune 行业专用模型
-- [ ] 多智能体协作深度集成
-- [ ] SaaS 多租户完全隔离
-- [ ] 第三方集成市场
-
----
-
-## ⭐ Star History
-
-如果这个项目对您有帮助,请给我们一个 ⭐ Star!
-
----
-
-**最后更新**: 2026-07-22  
-**项目版本**: v0.2.0  
-**许可证**: MIT
+MIT，见 `pyproject.toml`。

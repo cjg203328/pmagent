@@ -8,6 +8,8 @@ similarity math live behind a single, testable boundary.
 The router is constructed with callables so it never depends on the concrete
 agent, LLM client, or memory backend.
 """
+from dataclasses import dataclass
+import math
 from typing import Any, Callable, Dict, List, Mapping, Optional
 from collections import OrderedDict
 from threading import RLock
@@ -15,6 +17,55 @@ from threading import RLock
 from artpm_agent.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class IntentDecision:
+    """Auditable result of one intent classification attempt."""
+
+    intent: Optional[str] = None
+    confidence: float = 0.0
+    tier: str = "none"
+    candidates: tuple[str, ...] = ()
+    margin: float = 0.0
+    clarification_required: bool = False
+
+    def __post_init__(self) -> None:
+        intent = str(self.intent).strip() if self.intent is not None else ""
+        normalized_candidates = tuple(
+            dict.fromkeys(
+                str(candidate).strip()
+                for candidate in self.candidates
+                if str(candidate).strip()
+            )
+        )
+        if intent and intent not in normalized_candidates:
+            normalized_candidates = (intent, *normalized_candidates)
+        try:
+            confidence = float(self.confidence)
+            margin = float(self.margin)
+        except (TypeError, ValueError) as error:
+            raise ValueError("intent confidence and margin must be numeric") from error
+        if not math.isfinite(confidence) or not math.isfinite(margin):
+            raise ValueError("intent confidence and margin must be finite")
+        object.__setattr__(self, "intent", intent or None)
+        object.__setattr__(self, "confidence", max(0.0, min(1.0, confidence)))
+        object.__setattr__(self, "tier", str(self.tier or "none").strip() or "none")
+        object.__setattr__(self, "candidates", normalized_candidates)
+        object.__setattr__(self, "margin", max(0.0, margin))
+        object.__setattr__(self, "clarification_required", bool(self.clarification_required))
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return JSON-safe metadata for context, events, and API responses."""
+
+        return {
+            "intent": self.intent,
+            "confidence": self.confidence,
+            "tier": self.tier,
+            "candidates": list(self.candidates),
+            "margin": self.margin,
+            "clarification_required": self.clarification_required,
+        }
 
 
 class IntentRouter:
@@ -293,48 +344,95 @@ class IntentRouter:
         # Routing decision cache: identical/near-identical prompts skip the
         # (potentially embedding- or LLM-backed) detection pipeline entirely.
         # Deterministic, so safe to always enable.
-        self._route_cache: "OrderedDict[str, Optional[str]]" = OrderedDict()
+        self._route_cache: "OrderedDict[str, IntentDecision]" = OrderedDict()
         self._route_cache_lock = RLock()
         self._route_cache_max = 256
+        self._embedding_min_similarity = 0.25
+        self._embedding_min_margin = 0.05
+        self._clarification_min_margin = 0.05
 
     # ── Public detection API ──
 
     def detect(self, user_input: str) -> Optional[str]:
         """Run the three tiers and return a skill name or None."""
-        cache_key = user_input.strip().lower()
+
+        return self.detect_decision(user_input).intent
+
+    def detect_decision(self, user_input: str) -> IntentDecision:
+        """Run routing once and return an auditable structured decision."""
+
+        if not isinstance(user_input, str):
+            raise TypeError("user_input must be a string")
+        cache_key = user_input.strip().casefold()
         with self._route_cache_lock:
             if cache_key in self._route_cache:
                 return self._route_cache[cache_key]
 
-        skill, kw_score = self.detect_via_keywords(user_input)
+        keyword_rankings = self._rank_keyword_scores(user_input)
+        skill, kw_score = (
+            keyword_rankings[0] if keyword_rankings else (None, 0.0)
+        )
         if skill and self.is_high_confidence(
             skill_name=skill, text=user_input, tier="keyword", kw_score=kw_score
         ):
-            result = skill
+            second_score = keyword_rankings[1][1] if len(keyword_rankings) > 1 else 0.0
+            result = self._decision(
+                intent=skill,
+                confidence=self._keyword_confidence(kw_score, second_score),
+                tier="keyword",
+                rankings=keyword_rankings,
+                margin=self._relative_margin(kw_score, second_score),
+            )
         else:
             if self._intent_embeddings is None:
                 self.build_embeddings()
-            skill, sim = self.detect_via_embedding(user_input)
-            if skill and self.is_high_confidence(
-                skill_name=skill, text=user_input, tier="embedding", sim=sim
-            ):
-                result = skill
+            embedding_rankings = self._rank_embedding_scores(user_input)
+            embedding_skill, embedding_sim = (
+                embedding_rankings[0] if embedding_rankings else (None, 0.0)
+            )
+            second_sim = (
+                embedding_rankings[1][1] if len(embedding_rankings) > 1 else 0.0
+            )
+            embedding_margin = max(0.0, embedding_sim - second_sim)
+            embedding_ready = bool(
+                embedding_skill
+                and embedding_sim >= self._embedding_min_similarity
+                and embedding_margin >= self._embedding_min_margin
+                and self.is_high_confidence(
+                    skill_name=embedding_skill,
+                    text=user_input,
+                    tier="embedding",
+                    sim=embedding_sim,
+                )
+            )
+            if embedding_ready:
+                result = self._decision(
+                    intent=embedding_skill,
+                    confidence=self._embedding_confidence(
+                        embedding_sim, embedding_margin
+                    ),
+                    tier="embedding",
+                    rankings=embedding_rankings,
+                    margin=embedding_margin,
+                )
             elif (
                 len(user_input.strip()) >= 8
                 and self._llm_client is not None
                 and self._intent_classification_enabled
             ):
                 intent = self.detect_via_llm(user_input)
-                result = (
-                    intent
-                    if intent
-                    and self.is_high_confidence(
-                        skill_name=intent, text=user_input, tier="llm"
-                    )
-                    else None
+                result = self._llm_decision(
+                    intent,
+                    user_input,
+                    keyword_rankings=keyword_rankings,
+                    embedding_rankings=embedding_rankings,
                 )
             else:
-                result = None
+                result = self._ambiguous_decision(
+                    user_input,
+                    keyword_rankings=keyword_rankings,
+                    embedding_rankings=embedding_rankings,
+                )
 
         with self._route_cache_lock:
             self._route_cache[cache_key] = result
@@ -342,6 +440,110 @@ class IntentRouter:
             while len(self._route_cache) > self._route_cache_max:
                 self._route_cache.popitem(last=False)
         return result
+
+    def _decision(
+        self,
+        *,
+        intent: Optional[str],
+        confidence: float,
+        tier: str,
+        rankings: list[tuple[str, float]],
+        margin: float,
+        clarification_required: bool = False,
+    ) -> IntentDecision:
+        return IntentDecision(
+            intent=intent,
+            confidence=confidence,
+            tier=tier,
+            candidates=tuple(name for name, _score in rankings[:3]),
+            margin=margin,
+            clarification_required=clarification_required,
+        )
+
+    @staticmethod
+    def _relative_margin(best: float, second: float) -> float:
+        return max(0.0, best - second) / max(1.0, abs(best))
+
+    @staticmethod
+    def _keyword_confidence(best: float, second: float) -> float:
+        signal_strength = min(1.0, max(0.0, best) / 18.0)
+        margin_strength = min(1.0, IntentRouter._relative_margin(best, second))
+        return min(0.99, 0.82 + 0.12 * signal_strength + 0.05 * margin_strength)
+
+    @staticmethod
+    def _embedding_confidence(best: float, margin: float) -> float:
+        similarity_strength = min(1.0, max(0.0, best))
+        margin_strength = min(1.0, max(0.0, margin) / 0.20)
+        return min(0.95, 0.50 + 0.35 * similarity_strength + 0.15 * margin_strength)
+
+    def _llm_decision(
+        self,
+        intent: Optional[str],
+        text: str,
+        *,
+        keyword_rankings: list[tuple[str, float]],
+        embedding_rankings: list[tuple[str, float]],
+    ) -> IntentDecision:
+        if intent and self.is_high_confidence(
+            skill_name=intent,
+            text=text,
+            tier="llm",
+        ):
+            return self._decision(
+                intent=intent,
+                confidence=0.78,
+                tier="llm",
+                rankings=[(intent, 1.0)],
+                margin=1.0,
+            )
+        return self._ambiguous_decision(
+            text,
+            keyword_rankings=keyword_rankings,
+            embedding_rankings=embedding_rankings,
+        )
+
+    def _ambiguous_decision(
+        self,
+        text: str,
+        *,
+        keyword_rankings: list[tuple[str, float]],
+        embedding_rankings: list[tuple[str, float]],
+    ) -> IntentDecision:
+        rankings = embedding_rankings or keyword_rankings
+        if not rankings or not self._has_actionable_signals(text, rankings[:2]):
+            return IntentDecision(tier="none")
+        best_score = rankings[0][1]
+        second_score = rankings[1][1] if len(rankings) > 1 else 0.0
+        margin = max(0.0, best_score - second_score)
+        return self._decision(
+            intent=None,
+            confidence=min(0.70, max(0.0, best_score)),
+            tier="embedding" if embedding_rankings else "keyword",
+            rankings=rankings,
+            margin=margin,
+            clarification_required=(
+                len(rankings) > 1 and margin < self._clarification_min_margin
+            ),
+        )
+
+    def _has_actionable_signals(
+        self, text: str, rankings: list[tuple[str, float]]
+    ) -> bool:
+        lowered = text.casefold()
+        if any(
+            marker in lowered
+            for marker in ("是什么意思", "什么是", "概念", "定义", "怎么理解", "如何理解")
+        ):
+            return False
+        for skill_name, _score in rankings:
+            signals = self.SKILL_ROUTE_SIGNALS.get(skill_name)
+            if not signals:
+                continue
+            has_action = any(marker.casefold() in lowered for marker in signals["actions"])
+            has_entity = any(marker.casefold() in lowered for marker in signals["entities"])
+            if has_action and has_entity:
+                return True
+        return False
 
     def is_high_confidence(
         self,
@@ -383,32 +585,17 @@ class IntentRouter:
 
     def detect_via_embedding(self, user_input: str):
         """Match against pre-computed intent example embeddings (dot product)."""
-        MIN_SIM = 0.25
-        MARGIN = 0.05
-
-        if len(user_input.strip()) < 6:
-            return None, 0.0
-
-        if self._intent_embeddings is None:
-            return None, 0.0
-        query_vec = self._embed_fn(user_input)
-
-        skill_scores: Dict[str, float] = {}
-        for skill_name, embeddings in self._intent_embeddings.items():
-            best = max(
-                sum(a * b for a, b in zip(query_vec, ev))
-                for ev in embeddings
-            )
-            skill_scores[skill_name] = best
-
-        ranked = sorted(skill_scores.items(), key=lambda x: x[1], reverse=True)
+        ranked = self._rank_embedding_scores(user_input)
         if not ranked:
             return None, 0.0
 
         best_skill, best_sim = ranked[0]
         second_sim = ranked[1][1] if len(ranked) > 1 else 0.0
 
-        if best_sim >= MIN_SIM and (best_sim - second_sim) >= MARGIN:
+        if (
+            best_sim >= self._embedding_min_similarity
+            and (best_sim - second_sim) >= self._embedding_min_margin
+        ):
             return best_skill, best_sim
 
         return None, 0.0
@@ -487,6 +674,14 @@ class IntentRouter:
 
     def detect_via_keywords(self, user_input: str):
         """Weighted keyword matching — offline fallback."""
+        ranked = self._rank_keyword_scores(user_input)
+        if not ranked:
+            return None, 0.0
+        return ranked[0]
+
+    def _rank_keyword_scores(self, user_input: str) -> list[tuple[str, float]]:
+        """Return deterministic keyword candidates for audit and tie handling."""
+
         text = user_input.lower()
         scores: Dict[str, float] = {}
         for skill_name, keywords in self.INTENT_KEYWORDS.items():
@@ -497,11 +692,28 @@ class IntentRouter:
             if total > 0:
                 scores[skill_name] = total
 
-        if not scores:
-            return None, 0.0
+        return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
 
-        best = max(scores, key=scores.get)
-        return best, scores[best]
+    def _rank_embedding_scores(self, user_input: str) -> list[tuple[str, float]]:
+        """Return semantic candidates without deciding whether they are safe."""
+
+        if len(user_input.strip()) < 6 or self._intent_embeddings is None:
+            return []
+        try:
+            query_vec = self._embed_fn(user_input)
+        except Exception as error:  # noqa: BLE001 - routing may fall back safely
+            logger.warning("[IntentRouter] query embedding failed: %s", error)
+            return []
+
+        skill_scores: Dict[str, float] = {}
+        for skill_name, embeddings in self._intent_embeddings.items():
+            if not embeddings:
+                continue
+            skill_scores[skill_name] = max(
+                sum(a * b for a, b in zip(query_vec, example))
+                for example in embeddings
+            )
+        return sorted(skill_scores.items(), key=lambda item: (-item[1], item[0]))
 
     def build_embeddings(self) -> None:
         """Pre-compute embeddings for all intent examples (offline, no API)."""

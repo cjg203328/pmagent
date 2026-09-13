@@ -4,6 +4,74 @@ from unittest.mock import Mock
 from artpm_agent.views import settings
 
 
+def test_persist_settings_writes_vision_pairing_env(tmp_path, monkeypatch):
+    """persist_settings must persist the vision pairing config to .env."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_PROVIDER=custom\n", encoding="utf-8")
+
+    monkeypatch.setattr(settings, "PROJECT_ENV_PATH", env_path)
+    settings.persist_settings(
+        {
+            "provider": "custom",
+            "model": "deepseek-v4-pro",
+            "framework": "langchain",
+            "mcp_enabled": False,
+            "mcp_key": "",
+            "mcp_url": "",
+            "api_key": "sk-main",
+            "api_base_url": "",
+            "available_models": [],
+            "models_synced_at": "",
+            "vision_provider": "zhipu",
+            "vision_model": "glm-4v-flash",
+            "vision_api_key": "vision-key-123",
+            "vision_api_base": "https://open.bigmodel.cn/api/paas/v4",
+        },
+        env_path=env_path,
+    )
+
+    text = env_path.read_text(encoding="utf-8")
+    assert "LLM_VISION_PROVIDER=zhipu" in text
+    assert "glm-4v-flash" in text and "LLM_VISION_MODEL" in text
+    assert "vision-key-123" in text and "LLM_VISION_API_KEY" in text
+    assert "open.bigmodel.cn/api/paas/v4" in text and "LLM_VISION_API_BASE" in text
+
+
+def test_persist_settings_unsets_empty_vision_pairing(tmp_path, monkeypatch):
+    """Empty vision fields must remove stale LLM_VISION_* env entries."""
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "LLM_PROVIDER=custom\n"
+        "LLM_VISION_PROVIDER=zhipu\n"
+        "LLM_VISION_MODEL=glm-4v-flash\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(settings, "PROJECT_ENV_PATH", env_path)
+    settings.persist_settings(
+        {
+            "provider": "custom",
+            "model": "deepseek-v4-pro",
+            "mcp_enabled": False,
+            "mcp_key": "",
+            "mcp_url": "",
+            "api_key": "sk-main",
+            "api_base_url": "",
+            "available_models": [],
+            "models_synced_at": "",
+            "vision_provider": "",
+            "vision_model": "",
+            "vision_api_key": "",
+            "vision_api_base": "",
+        },
+        env_path=env_path,
+    )
+
+    text = env_path.read_text(encoding="utf-8")
+    assert "LLM_VISION_PROVIDER" not in text
+    assert "LLM_VISION_MODEL" not in text
+
+
 def test_replace_session_agent_closes_previous_instance(monkeypatch):
     previous = SimpleNamespace(close=Mock())
     session_state = {"agent": previous, "db": object()}

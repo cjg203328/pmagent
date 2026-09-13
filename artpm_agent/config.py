@@ -46,6 +46,17 @@ class Config:
                 custom_config = json.load(f)
                 self._deep_update(self.config, custom_config)
 
+        # dsh-style layered config: an active profile patch (+ home patch +
+        # overlays) is applied over the merged defaults/custom config *before*
+        # environment overrides, so deployment-level env values stay
+        # authoritative (the existing "env wins" contract).
+        profile = os.getenv("ARTPM_PROFILE") or None
+        if profile:
+            from .config_layers import load_layered_config
+
+            layered = load_layered_config(self.config, profile=profile)
+            self.config = layered.merged()
+
         # Override with environment variables
         self._load_from_env()
 
@@ -72,6 +83,12 @@ class Config:
             self.config["llm"]["framework"] = os.getenv("LLM_FRAMEWORK")
         if os.getenv("LLM_VISION_MODEL"):
             self.config["llm"]["vision_model"] = os.getenv("LLM_VISION_MODEL")
+        if os.getenv("LLM_VISION_PROVIDER"):
+            self.config["llm"]["vision_provider"] = os.getenv("LLM_VISION_PROVIDER")
+        if os.getenv("LLM_VISION_API_KEY"):
+            self.config["llm"]["vision_api_key"] = os.getenv("LLM_VISION_API_KEY")
+        if os.getenv("LLM_VISION_API_BASE"):
+            self.config["llm"]["vision_api_base"] = os.getenv("LLM_VISION_API_BASE")
         if os.getenv("LLM_REQUEST_TIMEOUT_SECONDS"):
             try:
                 self.config["llm"]["request_timeout_seconds"] = float(
@@ -153,6 +170,8 @@ class Config:
             self.config["llm"]["anthropic_api_key"] = os.getenv("ANTHROPIC_API_KEY")
         if os.getenv("ZHIPU_API_KEY"):
             self.config["llm"]["zhipu_api_key"] = os.getenv("ZHIPU_API_KEY")
+        if os.getenv("DEEPSEEK_API_KEY"):
+            self.config["llm"]["deepseek_api_key"] = os.getenv("DEEPSEEK_API_KEY")
 
         # API Base URLs
         if os.getenv("OPENAI_API_BASE"):
@@ -161,6 +180,12 @@ class Config:
             self.config["llm"]["anthropic_api_base"] = os.getenv("ANTHROPIC_API_BASE")
         if os.getenv("ZHIPU_API_BASE"):
             self.config["llm"]["zhipu_api_base"] = os.getenv("ZHIPU_API_BASE")
+        if os.getenv("DEEPSEEK_API_BASE"):
+            self.config["llm"]["deepseek_api_base"] = os.getenv("DEEPSEEK_API_BASE")
+        if os.getenv("DEEPSEEK_REASONING_EFFORT"):
+            self.config["llm"]["reasoning_effort"] = os.getenv(
+                "DEEPSEEK_REASONING_EFFORT"
+            )
 
         # The structured tool loop is opt-in until a host approval boundary is
         # supplied. Sensitive data-access and write tools fail closed without it.
@@ -311,6 +336,45 @@ class Config:
                 )
             except ValueError:
                 pass
+
+        tencentdb_memory = memory_config.setdefault("tencentdb_agent_memory", {})
+        if os.getenv("TENCENTDB_AGENT_MEMORY_ENABLED"):
+            tencentdb_memory["enabled"] = (
+                os.getenv("TENCENTDB_AGENT_MEMORY_ENABLED", "").strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
+        for env_name, config_key in (
+            ("TENCENTDB_AGENT_MEMORY_BASE_URL", "base_url"),
+            ("TENCENTDB_AGENT_MEMORY_API_KEY", "api_key"),
+            ("TENCENTDB_AGENT_MEMORY_SCOPE_SECRET", "scope_secret"),
+            ("TENCENTDB_AGENT_MEMORY_AGENT_ID", "agent_id"),
+        ):
+            value = os.getenv(env_name)
+            if value:
+                tencentdb_memory[config_key] = value
+        if os.getenv("TENCENTDB_AGENT_MEMORY_ALLOW_INSECURE_HTTP"):
+            tencentdb_memory["allow_insecure_http"] = (
+                os.getenv("TENCENTDB_AGENT_MEMORY_ALLOW_INSECURE_HTTP", "")
+                .strip()
+                .lower()
+                in {"1", "true", "yes", "on"}
+            )
+        for env_name, config_key in (
+            ("TENCENTDB_AGENT_MEMORY_TIMEOUT_SECONDS", "timeout_seconds"),
+            ("TENCENTDB_AGENT_MEMORY_MAX_CONTEXT_CHARS", "max_context_chars"),
+            ("TENCENTDB_AGENT_MEMORY_MAX_CAPTURE_CHARS", "max_capture_chars"),
+        ):
+            value = os.getenv(env_name)
+            if not value:
+                continue
+            try:
+                tencentdb_memory[config_key] = (
+                    float(value)
+                    if config_key == "timeout_seconds"
+                    else int(value)
+                )
+            except ValueError:
+                continue
 
         # Cost configuration
         if os.getenv("OVERHEAD_RATE"):

@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from artpm_agent.memory.sqlite_manager import SQLiteManager
+from artpm_agent.tenancy import TenantContextManager, WorkspaceAccessDenied
 from artpm_agent.utils import generate_uuid
 
 
@@ -28,6 +29,8 @@ class Strategy:
     rule_text: str                       # human-readable instruction
     rationale: str = ""                  # why this strategy exists
     risk: str = "low"                    # low | medium | high | critical
+    tenant_id: str = "local"
+    workspace_id: str = "local-default"
     active: bool = True
     source: str = "reflection"           # reflection | feedback | manual
     hit_count: int = 0
@@ -42,6 +45,8 @@ class Strategy:
             "rule_text": self.rule_text,
             "rationale": self.rationale,
             "risk": self.risk,
+            "tenant_id": self.tenant_id,
+            "workspace_id": self.workspace_id,
             "active": int(bool(self.active)),
             "source": self.source,
             "hit_count": int(self.hit_count),
@@ -57,6 +62,8 @@ def _row_to_strategy(row: sqlite3.Row) -> Strategy:
         rule_text=row["rule_text"],
         rationale=row["rationale"] or "",
         risk=row["risk"] or "low",
+        tenant_id=row["tenant_id"] or "local",
+        workspace_id=row["workspace_id"] or "local-default",
         active=bool(row["active"]),
         source=row["source"] or "reflection",
         hit_count=int(row["hit_count"]),
@@ -85,6 +92,8 @@ class StrategyStore:
                     rule_text TEXT,
                     rationale TEXT,
                     risk TEXT,
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
+                    workspace_id TEXT NOT NULL DEFAULT 'local-default',
                     active INTEGER,
                     source TEXT,
                     hit_count INTEGER,
@@ -93,14 +102,67 @@ class StrategyStore:
                 )
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(strategies)").fetchall()
+            }
+            for name, definition in (
+                ("tenant_id", "TEXT NOT NULL DEFAULT 'local'"),
+                ("workspace_id", "TEXT NOT NULL DEFAULT 'local-default'"),
+            ):
+                if name not in columns:
+                    conn.execute(
+                        f"ALTER TABLE strategies ADD COLUMN {name} {definition}"
+                    )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_strategies_cap ON strategies(capability)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_strategies_active ON strategies(active)"
             )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_strategies_workspace "
+                "ON strategies(tenant_id, workspace_id, active)"
+            )
 
-    def add(self, strategy: Strategy) -> str:
+    @staticmethod
+    def _resolve_scope(
+        tenant_id: Optional[str], workspace_id: Optional[str]
+    ) -> tuple[str, str]:
+        current = TenantContextManager.get_current()
+        if current is not None:
+            requested_tenant = str(tenant_id or "").strip()
+            requested_workspace = str(workspace_id or "").strip()
+            if requested_tenant and requested_tenant != current.tenant_id:
+                raise WorkspaceAccessDenied("tenant does not match the authenticated context")
+            if requested_workspace and requested_workspace != current.workspace_id:
+                raise WorkspaceAccessDenied(
+                    "workspace does not match the authenticated context"
+                )
+            return current.tenant_id, current.workspace_id
+        return (
+            str(tenant_id or "local").strip() or "local",
+            str(workspace_id or "local-default").strip() or "local-default",
+        )
+
+    def add(
+        self,
+        strategy: Strategy,
+        *,
+        tenant_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+    ) -> str:
+        resolved_tenant, resolved_workspace = self._resolve_scope(
+            tenant_id if tenant_id is not None else strategy.tenant_id,
+            workspace_id if workspace_id is not None else strategy.workspace_id,
+        )
+        strategy = Strategy(
+            **{
+                **strategy.__dict__,
+                "tenant_id": resolved_tenant,
+                "workspace_id": resolved_workspace,
+            }
+        )
         row = strategy.to_row()
         with self.db.get_connection() as conn:
             # Reflection can be retried after a timeout or process restart.
@@ -110,18 +172,25 @@ class StrategyStore:
                 """
                 SELECT id FROM strategies
                 WHERE active = 1 AND capability = ? AND rule_text = ?
+                  AND tenant_id = ? AND workspace_id = ?
                 ORDER BY created_at DESC LIMIT 1
                 """,
-                (row["capability"], row["rule_text"]),
+                (
+                    row["capability"],
+                    row["rule_text"],
+                    row["tenant_id"],
+                    row["workspace_id"],
+                ),
             ).fetchone()
             if existing is not None:
                 return str(existing["id"])
             conn.execute(
                 """
                 INSERT INTO strategies (
-                    id, capability, rule_text, rationale, risk, active,
+                    id, capability, rule_text, rationale, risk,
+                    tenant_id, workspace_id, active,
                     source, hit_count, created_at, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["id"],
@@ -129,6 +198,8 @@ class StrategyStore:
                     row["rule_text"],
                     row["rationale"],
                     row["risk"],
+                    row["tenant_id"],
+                    row["workspace_id"],
                     row["active"],
                     row["source"],
                     row["hit_count"],
@@ -138,24 +209,49 @@ class StrategyStore:
             )
         return row["id"]
 
-    def active(self, *, capability: Optional[str] = None) -> List[Strategy]:
+    def active(
+        self,
+        *,
+        capability: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+    ) -> List[Strategy]:
+        clauses = ["active = 1"]
+        params: List[Any] = []
+        if capability:
+            clauses.append("(capability = ? OR capability = 'global')")
+            params.append(capability)
+        current = TenantContextManager.get_current()
+        scoped = current is not None or any(
+            value is not None for value in (tenant_id, workspace_id)
+        )
+        if scoped:
+            resolved_tenant, resolved_workspace = self._resolve_scope(
+                tenant_id, workspace_id
+            )
+            clauses.extend(["tenant_id = ?", "workspace_id = ?"])
+            params.extend([resolved_tenant, resolved_workspace])
+        sql = (
+            "SELECT * FROM strategies WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY created_at DESC"
+        )
         with self.db.get_connection() as conn:
-            if capability:
-                rows = conn.execute(
-                    "SELECT * FROM strategies WHERE active = 1 AND "
-                    "(capability = ? OR capability = 'global') "
-                    "ORDER BY created_at DESC",
-                    (capability,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM strategies WHERE active = 1 "
-                    "ORDER BY created_at DESC"
-                ).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return [_row_to_strategy(r) for r in rows]
 
-    def by_capability(self, capability: str) -> List[Strategy]:
-        return self.active(capability=capability)
+    def by_capability(
+        self,
+        capability: str,
+        *,
+        tenant_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+    ) -> List[Strategy]:
+        return self.active(
+            capability=capability,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
 
     def get(self, strategy_id: str) -> Optional[Strategy]:
         with self.db.get_connection() as conn:

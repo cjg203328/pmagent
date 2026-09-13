@@ -107,9 +107,17 @@ class WorkflowCoordinator:
         agent: Any,
         *,
         capability_allowlist: CapabilityAllowlist | None = None,
+        workspace_id: str = "local-default",
+        profile_id: str = "local-default",
     ) -> None:
         self.store = store
         self.agent = agent
+        self.workspace_id = workspace_id
+        self.profile_id = profile_id
+        store.ensure_builtins(
+            workspace_id=self.workspace_id,
+            profile_id=self.profile_id,
+        )
         router = getattr(agent, "router", None)
         execute_skill = getattr(router, "execute_skill", None)
         if not callable(execute_skill):
@@ -293,6 +301,8 @@ class WorkflowCoordinator:
         selection = WorkflowSelectionContext(
             prompt=prompt,
             conversation_id=conversation_id,
+            workspace_id=self.workspace_id,
+            profile_id=self.profile_id,
             explicit_workflow_id=explicit_workflow_id,
             project_status=(
                 str(context_data["project_status"])
@@ -304,7 +314,11 @@ class WorkflowCoordinator:
         )
         decision = self.selector.select(
             selection,
-            self.store.list_definitions(enabled_only=True),
+            self.store.list_definitions(
+                workspace_id=self.workspace_id,
+                profile_id=self.profile_id,
+                enabled_only=True,
+            ),
         )
         if decision.definition is None:
             return WorkflowChatOutcome(decision=decision, fallback_reason="no_match")

@@ -20,6 +20,7 @@ from artpm_agent.ui_feedback import build_error_info, render_error_callback
 from artpm_agent.config import PROJECT_ENV_PATH, resolve_data_root, save_data_root, reset_config
 from artpm_agent.tenancy import TenantContext
 from artpm_agent.views.workflow_designer import render_workflow_designer
+from artpm_agent.views.wiki import render_wiki_workspace
 from artpm_agent.workflows.designer import capability_allowlist_from_skill_metadata
 
 # 显式导入 Agent / Config，避免降级态（核心模块导入失败时）下
@@ -391,6 +392,7 @@ def _apply_data_root(new_root, *, migrate, reset):
         "workflow_store",
         "profile_store",
         "knowledge_store",
+        "wiki_store",
         "agent",
         "db",
         "messages_loaded_for",
@@ -463,12 +465,14 @@ def persist_settings(config, env_path=None):
         "openai": "OPENAI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
         "zhipu": "ZHIPU_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
         "custom": "OPENAI_API_KEY",
     }[config["provider"]]
     provider_base = {
         "openai": "OPENAI_API_BASE",
         "anthropic": "ANTHROPIC_API_BASE",
         "zhipu": "ZHIPU_API_BASE",
+        "deepseek": "DEEPSEEK_API_BASE",
         "custom": "OPENAI_API_BASE",
     }[config["provider"]]
 
@@ -481,6 +485,24 @@ def persist_settings(config, env_path=None):
     else:
         keys_to_unset.add(provider_base)
 
+    # Vision pairing ("eyes model"): optional dedicated vision model that
+    # handles image requests independently of the text primary model.
+    vision_provider = str(config.get("vision_provider", "") or "").strip().lower()
+    vision_model = str(config.get("vision_model", "") or "").strip()
+    vision_api_key = str(config.get("vision_api_key", "") or "").strip()
+    vision_api_base = str(config.get("vision_api_base", "") or "").strip()
+    vision_env = {
+        "LLM_VISION_PROVIDER": vision_provider,
+        "LLM_VISION_MODEL": vision_model,
+        "LLM_VISION_API_KEY": vision_api_key,
+        "LLM_VISION_API_BASE": vision_api_base,
+    }
+    for env_key, value in vision_env.items():
+        if value:
+            values[env_key] = value
+        else:
+            keys_to_unset.add(env_key)
+
     try:
         _persist_env_with_dotenv(env_path, values, keys_to_unset)
     except OSError:
@@ -492,7 +514,11 @@ def persist_settings(config, env_path=None):
     for key in keys_to_unset:
         os.environ.pop(key, None)
 @st.cache_data(ttl=60, show_spinner=False)
-def _load_knowledge_snapshot():
+def _load_knowledge_snapshot(
+    tenant_id: str = "local",
+    workspace_id: str = "local-default",
+    principal_id: str = "",
+):
     """缓存工作区知识库只读快照，避免设置页每次 rerun 都打向量库。"""
     knowledge_store = get_knowledge_store()
     if knowledge_store is None:
@@ -513,14 +539,23 @@ def _load_knowledge_snapshot():
 
         feedback_store = get_default_feedback_store()
         if feedback_store is not None:
-            learning["feedback"] = len(feedback_store.active())
+            learning["feedback"] = len(
+                feedback_store.active(
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    principal_id=principal_id,
+                )
+            )
     except Exception:
         logger.exception("读取反馈统计失败")
     try:
         from artpm_agent.harness.outcome_recorder import default_episode_db_path
         from artpm_agent.memory.episode_store import EpisodeStore
 
-        learning["episodes"] = EpisodeStore(default_episode_db_path()).count()
+        learning["episodes"] = EpisodeStore(default_episode_db_path()).count(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
     except Exception:
         logger.exception("读取回合经验统计失败")
     try:
@@ -528,14 +563,24 @@ def _load_knowledge_snapshot():
 
         strategy_store = get_default_strategy_store()
         if strategy_store is not None:
-            learning["strategies"] = len(strategy_store.active())
+            learning["strategies"] = len(
+                strategy_store.active(
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                )
+            )
     except Exception:
         logger.exception("读取进化策略统计失败")
     try:
         from artpm_agent.evolution.meta_memory import get_default_meta_memory_store
 
         learning["knowledge_gaps"] = len(
-            get_default_meta_memory_store().top_gaps(limit=100)
+            get_default_meta_memory_store().top_gaps(
+                limit=100,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                principal_id=principal_id,
+            )
         )
     except Exception:
         logger.exception("读取知识缺口统计失败")
@@ -544,24 +589,48 @@ def _load_knowledge_snapshot():
 
         scheduler = get_default_scheduler()
         if scheduler is not None:
-            learning["last_reflection"] = scheduler.last_run()[0]
+            learning["last_reflection"] = scheduler.last_run(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+            )[0]
     except Exception:
         logger.exception("读取复盘状态失败")
 
     return {
-        "resources": knowledge_store.list_resources(limit=100),
-        "active_rules": knowledge_store.get_active_rules(limit=100),
-        "pending_ingestions": knowledge_store.list_ingestion_proposals(
-            status="pending", limit=100
+        "resources": knowledge_store.list_resources(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            limit=100,
         ),
-        "pending_rules": knowledge_store.list_rules(status="proposed", limit=100),
+        "active_rules": knowledge_store.get_active_rules(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            limit=100,
+        ),
+        "pending_ingestions": knowledge_store.list_ingestion_proposals(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            status="pending",
+            limit=100,
+        ),
+        "pending_rules": knowledge_store.list_rules(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            status="proposed",
+            limit=100,
+        ),
         "learning": learning,
     }
 
 
 def settings_page():
     """设置页面"""
+    st.markdown('<div class="settings-page-marker"></div>', unsafe_allow_html=True)
     render_page_header("系统 / 设置", "设置")
+    st.markdown(
+        '<div class="settings-intro">把常用配置放在前面，其他选项按需展开。改动保存后会立即应用到当前会话。</div>',
+        unsafe_allow_html=True,
+    )
 
     # 远端状态只在用户主动刷新时检测，避免打开设置页就产生网络等待。
     mcp_skills = st.session_state.get("mcp_skills_cache", [])
@@ -629,7 +698,7 @@ def settings_page():
         st.session_state.mcp_error_category_cache = None
         st.session_state.mcp_market_cache = []
 
-    provider_options = ["openai", "anthropic", "zhipu", "custom"]
+    provider_options = ["openai", "anthropic", "zhipu", "deepseek", "custom"]
     configured_provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
     provider_index = (
         provider_options.index(configured_provider)
@@ -637,23 +706,56 @@ def settings_page():
         else 0
     )
 
+    configured_model_summary = os.getenv("LLM_MODEL", "尚未选择") or "尚未选择"
+    data_root_summary = os.getenv("DATA_ROOT", "./data") or "./data"
+    mcp_summary = "已开启" if configured_mcp_enabled else "未开启"
+    st.markdown(
+        (
+            '<div class="settings-summary" role="status">'
+            '<div class="settings-summary-item">'
+            '<span class="settings-summary-label">当前模型</span>'
+            f'<strong>{escape(configured_model_summary)}</strong>'
+            f'<small>{escape(configured_provider.title())}</small>'
+            '</div>'
+            '<div class="settings-summary-item">'
+            '<span class="settings-summary-label">远程工具</span>'
+            f'<strong>{escape(mcp_summary)}</strong>'
+            '<small>Skills Forge</small>'
+            '</div>'
+            '<div class="settings-summary-item">'
+            '<span class="settings-summary-label">数据目录</span>'
+            f'<strong>{escape(data_root_summary)}</strong>'
+            '<small>本地资料与运行记录</small>'
+            '</div>'
+            '</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+
+    # Keep the six capability areas separate, but use short task-oriented labels
+    # so the tab row reads as a simple checklist instead of a feature catalog.
     model_tab, mcp_tab, workflow_tab, knowledge_tab, storage_tab, identity_tab = st.tabs(
-        ["模型", "工具与连接", "工作流", "知识", "存储", "身份"]
+        ["模型", "连接", "自动化", "知识", "数据", "助手"]
     )
     with model_tab:
+        st.markdown(
+            '<div class="settings-tab-lead"><strong>模型</strong><span>选择回答引擎和默认模型。通常只需要填写提供商、Key 和模型。</span></div>',
+            unsafe_allow_html=True,
+        )
         framework_options = ["langchain", "native"]
         configured_framework = os.getenv("LLM_FRAMEWORK", "langchain").lower()
         if configured_framework not in framework_options:
             configured_framework = "langchain"
-        framework = st.selectbox(
-            "模型框架",
-            framework_options,
-            index=framework_options.index(configured_framework),
-            format_func=lambda value: (
-                "LangChain v1" if value == "langchain" else "原生 SDK"
-            ),
-            key="llm_framework",
-        )
+        with st.expander("高级：模型框架", expanded=False, icon=":material/tune:"):
+            framework = st.selectbox(
+                "模型框架",
+                framework_options,
+                index=framework_options.index(configured_framework),
+                format_func=lambda value: (
+                    "LangChain v1" if value == "langchain" else "原生 SDK"
+                ),
+                key="llm_framework",
+            )
         llm_provider = st.selectbox(
             "LLM 提供商",
             provider_options,
@@ -664,18 +766,21 @@ def settings_page():
             "openai": "OPENAI_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
             "zhipu": "ZHIPU_API_KEY",
+            "deepseek": "DEEPSEEK_API_KEY",
             "custom": "OPENAI_API_KEY",
         }
         provider_base_names = {
             "openai": "OPENAI_API_BASE",
             "anthropic": "ANTHROPIC_API_BASE",
             "zhipu": "ZHIPU_API_BASE",
+            "deepseek": "DEEPSEEK_API_BASE",
             "custom": "OPENAI_API_BASE",
         }
         defaults = {
             "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),
             "anthropic": ("https://api.anthropic.com", "claude-3-5-sonnet-20241022"),
             "zhipu": ("https://open.bigmodel.cn/api/paas/v4", "glm-4"),
+            "deepseek": ("https://api.deepseek.com", "deepseek-chat"),
             "custom": ("https://api.openai.com/v1", "gpt-4o-mini"),
         }
         default_base_url, default_model = defaults[llm_provider]
@@ -715,7 +820,7 @@ def settings_page():
 
         supports_model_sync = (
             MODEL_CATALOG_AVAILABLE
-            and llm_provider in {"openai", "custom", "zhipu"}
+            and llm_provider in {"openai", "custom", "zhipu", "deepseek"}
         )
         can_sync_models = supports_model_sync and bool(api_key.strip())
         sync_feedback = None
@@ -791,7 +896,71 @@ def settings_page():
         else:
             model = model_choice
 
+        # ── 视觉模型搭配（"眼睛模型"）──
+        # 主模型（如 DeepSeek）不支持图片时，图片请求自动路由到这个独立视觉
+        # 模型（例如智谱免费 GLM-4V-Flash），文本与视觉可来自不同供应商。
+        st.divider()
+        st.markdown(
+            '<div class="settings-tab-lead"><strong>视觉模型搭配（眼睛模型）</strong>'
+            '<span>可选：为不支持图片的主模型补上图片识别能力。</span></div>',
+            unsafe_allow_html=True,
+        )
+        vision_enabled = st.toggle(
+            "启用视觉模型搭配",
+            value=bool(os.getenv("LLM_VISION_MODEL", "").strip()),
+            key="vision_enabled_toggle",
+            help="关闭后图片请求回到主模型路径，并清空 LLM_VISION_* 配置",
+        )
+        if vision_enabled:
+            vision_provider_options = ["zhipu", "openai", "deepseek", "custom"]
+            configured_vision_provider = os.getenv("LLM_VISION_PROVIDER", "").lower()
+            vision_provider_index = (
+                vision_provider_options.index(configured_vision_provider)
+                if configured_vision_provider in vision_provider_options
+                else 0
+            )
+            vision_provider = st.selectbox(
+                "视觉提供商",
+                options=vision_provider_options,
+                index=vision_provider_index,
+                key="vision_provider",
+            )
+            vision_model = st.text_input(
+                "视觉模型 ID",
+                value=os.getenv("LLM_VISION_MODEL", ""),
+                placeholder="glm-4v-flash",
+                key="vision_model_input",
+                help="例如智谱 GLM-4V-Flash（免费）：glm-4v-flash",
+            ).strip()
+            vision_api_key = st.text_input(
+                "视觉 API Key",
+                type="password",
+                value=os.getenv("LLM_VISION_API_KEY", ""),
+                placeholder="LLM_VISION_API_KEY；留空则用该供应商的默认 Key",
+                key="vision_api_key_input",
+            ).strip()
+            vision_api_base = st.text_input(
+                "视觉 API Base URL",
+                value=os.getenv("LLM_VISION_API_BASE", ""),
+                placeholder={
+                    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+                    "openai": "https://api.openai.com/v1",
+                    "deepseek": "https://api.deepseek.com",
+                    "custom": "https://api.example.com/v1",
+                }.get(vision_provider, ""),
+                key="vision_api_base_input",
+            ).strip()
+        else:
+            vision_provider = ""
+            vision_model = ""
+            vision_api_key = ""
+            vision_api_base = ""
+
     with mcp_tab:
+        st.markdown(
+            '<div class="settings-tab-lead"><strong>连接</strong><span>需要远程工具时再打开；不开启也不影响本地报价、分析和项目管理。</span></div>',
+            unsafe_allow_html=True,
+        )
         mcp_enabled = st.toggle(
             "启用远程 Skills Forge",
             value=os.getenv("MCP_ENABLED", "false").lower() == "true",
@@ -885,6 +1054,10 @@ def settings_page():
             st.caption("状态：尚未检查")
 
     with workflow_tab:
+        st.markdown(
+            '<div class="settings-tab-lead"><strong>自动化</strong><span>把重复工作串起来。没有明确需求时可以保持默认。</span></div>',
+            unsafe_allow_html=True,
+        )
         workflow_store = get_workflow_store()
         reset_widget_state = st.session_state.pop(
             "reset_workflow_widget_state", False
@@ -1011,7 +1184,18 @@ def settings_page():
                     )
 
     with knowledge_tab:
-        snapshot = _load_knowledge_snapshot()
+        st.markdown(
+            '<div class="settings-tab-lead"><strong>知识</strong><span>查看工作区资料和已确认的规则，内容会在对话中被优先参考。</span></div>',
+            unsafe_allow_html=True,
+        )
+        render_wiki_workspace(on_changed=_load_knowledge_snapshot.clear)
+        st.divider()
+        tenant_context, _ = _trusted_workflow_scope()
+        snapshot = _load_knowledge_snapshot(
+            tenant_id=tenant_context.tenant_id,
+            workspace_id=tenant_context.workspace_id,
+            principal_id=tenant_context.principal_id,
+        )
         if snapshot is None:
             st.error("工作区知识库未就绪，请查看服务日志。")
         else:
@@ -1046,7 +1230,11 @@ def settings_page():
                                 "资料": resource["title"],
                                 "类型": resource["resource_type"],
                                 "版本": resource["current_version"],
-                                "来源": resource["source_type"],
+                                "来源": (
+                                    (resource.get("source") or {}).get("type")
+                                    or resource.get("source_type")
+                                    or "未知"
+                                ),
                             }
                             for resource in resources
                         ]
@@ -1074,9 +1262,17 @@ def settings_page():
                 st.info("当前工作区还没有已确认的资料或规则。")
 
     with storage_tab:
+        st.markdown(
+            '<div class="settings-tab-lead"><strong>数据</strong><span>管理本地资料、缓存和运行记录的保存位置。</span></div>',
+            unsafe_allow_html=True,
+        )
         _render_storage_settings()
 
     with identity_tab:
+        st.markdown(
+            '<div class="settings-tab-lead"><strong>助手</strong><span>设置助手的称呼、角色和回答方式，让它更像你的项目搭档。</span></div>',
+            unsafe_allow_html=True,
+        )
         current_profile = get_current_profile()
         if current_profile is not None:
             identity_defaults = current_profile.identity
@@ -1160,6 +1356,10 @@ def settings_page():
             "mcp_transport": mcp_transport,
             "mcp_key": mcp_key.strip(),
             "mcp_url": mcp_url,
+            "vision_provider": vision_provider,
+            "vision_model": vision_model,
+            "vision_api_key": vision_api_key,
+            "vision_api_base": vision_api_base,
         }
         try:
             persist_settings(settings)

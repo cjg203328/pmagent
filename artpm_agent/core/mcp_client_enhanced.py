@@ -27,10 +27,9 @@ _SENSITIVE_FILE_SUFFIXES = frozenset(
 )
 _SENSITIVE_DIRECTORIES = frozenset({".git", ".ssh", ".aws", ".azure", ".gnupg"})
 
-# Executable basename allowlist for the execute_command tool. Empty means
-# "allow every command once command execution is enabled"; non-empty means only
-# the listed executables may run. This is defense-in-depth on top of the
-# MCP_ALLOW_COMMANDS master switch.
+# Executable basename allowlist for the execute_command tool. It must be
+# explicitly non-empty when command execution is enabled. This is defense in
+# depth on top of the MCP_ALLOW_COMMANDS master switch.
 def _parse_command_allowlist(value: str | None) -> frozenset[str]:
     if not value:
         return frozenset()
@@ -567,6 +566,15 @@ class EnhancedMCPClient:
                 "error": "Command execution is disabled. Set MCP_ALLOW_COMMANDS=true to enable it."
             }
 
+        if not self.command_allowlist:
+            return {
+                "success": False,
+                "error": (
+                    "Command execution requires a non-empty "
+                    "MCP_COMMAND_ALLOWLIST"
+                ),
+            }
+
         try:
             import subprocess
 
@@ -576,10 +584,10 @@ class EnhancedMCPClient:
             if not args:
                 return {"success": False, "error": "Command is empty"}
 
-            # Executable basename allowlist (defense-in-depth). When set, only
-            # the listed executables may run, regardless of MCP_ALLOW_COMMANDS.
+            # Executable basename allowlist (defense-in-depth). Only the
+            # explicitly listed executables may run.
             executable = os.path.basename(args[0])
-            if self.command_allowlist and executable not in self.command_allowlist:
+            if executable not in self.command_allowlist:
                 return {
                     "success": False,
                     "error": (

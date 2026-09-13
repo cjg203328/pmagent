@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set
 
 from .workspace_knowledge_store import WorkspaceKnowledgeStore
+from artpm_agent.tenancy import TenantContextManager, WorkspaceAccessDenied
 
 _DEFAULT_CONSOLIDATION_DB = "data/consolidation.db"  # legacy label; default path resolves via resolve_state_path()
 
@@ -135,15 +136,22 @@ class ConsolidationService:
         self,
         workspace_id: str = WorkspaceKnowledgeStore.DEFAULT_WORKSPACE_ID,
         *,
+        tenant_id: Optional[str] = None,
         dry_run: bool = False,
     ) -> ConsolidationReport:
         """扫描并炼化指定工作区的知识库。
 
         dry_run=True 时只统计、不写回，适合先观察影响面。
         """
+        tenant_id, workspace_id = self.store._resolve_scope(
+            workspace_id, tenant_id
+        )
         report = ConsolidationReport()
         resources = list(
-            self.store.iter_active_resources(workspace_id=workspace_id)
+            self.store.iter_active_resources(
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
+            )
         )
         report.resources_scanned = len(resources)
         if not resources:
@@ -181,15 +189,28 @@ class ConsolidationService:
                 report.duplicates_merged += 1
                 if not dry_run:
                     self.store.mark_consolidation_status(
-                        dup["id"], "superseded"
+                        dup["id"],
+                        "superseded",
+                        workspace_id=workspace_id,
+                        tenant_id=tenant_id,
                     )
-                    self.store.set_supersedes(canonical["id"], dup["id"])
+                    self.store.set_supersedes(
+                        canonical["id"],
+                        dup["id"],
+                        workspace_id=workspace_id,
+                        tenant_id=tenant_id,
+                    )
                     report.superseded += 1
 
         # 2) 矛盾检测（保守：高重叠 + 极性相反）
         if self.detect_contradictions:
             self._detect_contradictions(
-                resources, report, dry_run, handled_superseded
+                resources,
+                report,
+                dry_run,
+                handled_superseded,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
             )
 
         # 3) 衰减 / 强化：基于 last_hit 调整置信度
@@ -207,7 +228,12 @@ class ConsolidationService:
                 else:
                     report.reinforced += 1
                 if not dry_run:
-                    self.store.set_confidence(res["id"], new_conf)
+                    self.store.set_confidence(
+                        res["id"],
+                        new_conf,
+                        workspace_id=workspace_id,
+                        tenant_id=tenant_id,
+                    )
 
         report.notes.append(
             "consolidation完成："
@@ -245,6 +271,9 @@ class ConsolidationService:
         report: ConsolidationReport,
         dry_run: bool,
         handled_superseded: Set[str],
+        *,
+        tenant_id: str,
+        workspace_id: str,
     ) -> None:
         active = [
             r
@@ -290,8 +319,18 @@ class ConsolidationService:
                         }
                     )
                     if not dry_run:
-                        self.store.mark_consolidation_status(a["id"], "conflict")
-                        self.store.mark_consolidation_status(b["id"], "conflict")
+                        self.store.mark_consolidation_status(
+                            a["id"],
+                            "conflict",
+                            workspace_id=workspace_id,
+                            tenant_id=tenant_id,
+                        )
+                        self.store.mark_consolidation_status(
+                            b["id"],
+                            "conflict",
+                            workspace_id=workspace_id,
+                            tenant_id=tenant_id,
+                        )
 
 
 # ---- 轻量调度器（周期性触发，复用 reflection 的模式） --------------------
@@ -329,6 +368,7 @@ class ConsolidationScheduler:
                 """
                 CREATE TABLE IF NOT EXISTS consolidation_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
                     workspace_id TEXT NOT NULL,
                     ran_at TEXT NOT NULL,
                     resources_scanned INTEGER NOT NULL DEFAULT 0,
@@ -338,13 +378,59 @@ class ConsolidationScheduler:
                 )
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(consolidation_runs)"
+                ).fetchall()
+            }
+            if "tenant_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE consolidation_runs ADD COLUMN "
+                    "tenant_id TEXT NOT NULL DEFAULT 'local'"
+                )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_consolidation_runs_scope "
+                "ON consolidation_runs(tenant_id, workspace_id, id)"
+            )
 
-    def last_run(self, workspace_id: str) -> Optional[str]:
+    @staticmethod
+    def _resolve_scope(
+        tenant_id: Optional[str], workspace_id: str
+    ) -> tuple[str, str]:
+        current = TenantContextManager.get_current()
+        requested_tenant = str(tenant_id or "").strip()
+        requested_workspace = str(workspace_id or "").strip()
+        if current is not None:
+            if requested_tenant and requested_tenant != current.tenant_id:
+                raise WorkspaceAccessDenied(
+                    "tenant does not match the authenticated context"
+                )
+            if requested_workspace and requested_workspace != current.workspace_id:
+                raise WorkspaceAccessDenied(
+                    "workspace does not match the authenticated context"
+                )
+            return current.tenant_id, current.workspace_id
+        return (
+            requested_tenant or "local",
+            requested_workspace or WorkspaceKnowledgeStore.DEFAULT_WORKSPACE_ID,
+        )
+
+    def last_run(
+        self,
+        workspace_id: str,
+        *,
+        tenant_id: Optional[str] = None,
+    ) -> Optional[str]:
+        resolved_tenant, resolved_workspace = self._resolve_scope(
+            tenant_id, workspace_id
+        )
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT ran_at FROM consolidation_runs "
-                "WHERE workspace_id = ? ORDER BY id DESC LIMIT 1",
-                (workspace_id,),
+                "WHERE tenant_id = ? AND workspace_id = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (resolved_tenant, resolved_workspace),
             ).fetchone()
         return row["ran_at"] if row else None
 
@@ -356,8 +442,9 @@ class ConsolidationScheduler:
         min_new_resources: int = 10,
         current_resource_count: int = 0,
         last_seen_count: int = 0,
+        tenant_id: Optional[str] = None,
     ) -> bool:
-        last = self.last_run(workspace_id)
+        last = self.last_run(workspace_id, tenant_id=tenant_id)
         if last is None:
             return True
         last_ts = _parse_ts(last)
@@ -376,17 +463,23 @@ class ConsolidationScheduler:
         self,
         workspace_id: str,
         report: ConsolidationReport,
+        *,
+        tenant_id: Optional[str] = None,
     ) -> None:
+        resolved_tenant, resolved_workspace = self._resolve_scope(
+            tenant_id, workspace_id
+        )
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO consolidation_runs(
-                    workspace_id, ran_at, resources_scanned,
+                    tenant_id, workspace_id, ran_at, resources_scanned,
                     duplicates_merged, contradictions_flagged, confidence_updated
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    workspace_id,
+                    resolved_tenant,
+                    resolved_workspace,
                     _utc_now(),
                     report.resources_scanned,
                     report.duplicates_merged,
@@ -400,21 +493,34 @@ class ConsolidationScheduler:
         service: ConsolidationService,
         *,
         workspace_id: str = WorkspaceKnowledgeStore.DEFAULT_WORKSPACE_ID,
+        tenant_id: Optional[str] = None,
         interval_minutes: int = 60 * 12,
         min_new_resources: int = 10,
         current_resource_count: int = 0,
         last_seen_count: int = 0,
         dry_run: bool = False,
     ) -> Optional[ConsolidationReport]:
+        resolved_tenant, resolved_workspace = self._resolve_scope(
+            tenant_id, workspace_id
+        )
         if not self.should_run(
-            workspace_id=workspace_id,
+            workspace_id=resolved_workspace,
+            tenant_id=resolved_tenant,
             interval_minutes=interval_minutes,
             min_new_resources=min_new_resources,
             current_resource_count=current_resource_count,
             last_seen_count=last_seen_count,
         ):
             return None
-        report = service.consolidate(workspace_id=workspace_id, dry_run=dry_run)
+        report = service.consolidate(
+            workspace_id=resolved_workspace,
+            tenant_id=resolved_tenant,
+            dry_run=dry_run,
+        )
         if not dry_run:
-            self.mark_run(workspace_id, report)
+            self.mark_run(
+                resolved_workspace,
+                report,
+                tenant_id=resolved_tenant,
+            )
         return report

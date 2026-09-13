@@ -43,13 +43,20 @@ except Exception as error:
 
 CONVERSATION_STORE_AVAILABLE = False
 try:
-    from artpm_agent.memory import WorkspaceKnowledgeStore, create_embedding_provider
+    from artpm_agent.memory import (
+        SessionStore,
+        WorkspaceKnowledgeStore,
+        WorkspaceWikiStore,
+        create_embedding_provider,
+    )
     from artpm_agent.memory.conversation_store import ConversationStore
 
     CONVERSATION_STORE_AVAILABLE = True
 except Exception as error:
     ConversationStore = None
+    SessionStore = None
     WorkspaceKnowledgeStore = None
+    WorkspaceWikiStore = None
     create_embedding_provider = None
     logger.error("会话存储模块导入失败: %s", error)
 
@@ -163,6 +170,21 @@ def get_conversation_store():
     return st.session_state.get("conversation_store")
 
 
+def get_session_store():
+    """Return the append-only runtime log bound to the active conversation DB."""
+
+    import streamlit as st
+
+    conversation_store = get_conversation_store()
+    if conversation_store is None or SessionStore is None:
+        return None
+    cached = st.session_state.get("session_store")
+    if cached is None or getattr(cached, "conversations", None) is not conversation_store:
+        cached = SessionStore(conversation_store)
+        st.session_state.session_store = cached
+    return cached
+
+
 def get_chat_attachment_store():
     import streamlit as st
     return st.session_state.get("chat_attachment_store")
@@ -218,6 +240,11 @@ def get_knowledge_store():
     return st.session_state.get("knowledge_store")
 
 
+def get_wiki_store():
+    import streamlit as st
+    return st.session_state.get("wiki_store")
+
+
 def get_permission_store():
     import streamlit as st
     return st.session_state.get("permission_store")
@@ -242,6 +269,7 @@ _RUNTIME_COMPONENT_LABELS = {
     "workflow_store": "工作流",
     "profile_store": "配置档案",
     "knowledge_store": "知识库",
+    "wiki_store": "Wiki 知识库",
     "agent": "对话服务",
     "database": "业务数据库",
 }
