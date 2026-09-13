@@ -10,7 +10,7 @@
 | 测试 | `test_integration.ps1` | 显式外部集成测试 |
 | 测试 | `test_benchmark.ps1` | 性能基准测试 |
 | 覆盖率 | `coverage_core.py` / `coverage_core.ps1` | 核心边界 90% 覆盖率门禁 |
-| 覆盖率 | `coverage_report.sh` | 生成 `artifacts/quality/` 报告 |
+| 覆盖率 | `coverage_report.sh` | 生成 `artifacts/quality/` 报告，不承担 CI 门禁 |
 | 数据 | `backup_data.py` / `backup_data.sh` | 备份 `data/` 数据库 |
 | 数据库 | `migrate_postgres.py` | Compose PostgreSQL 迁移任务 |
 | 启动 | `prepare_streamlit_port.ps1` | 识别并处理本项目占用的 UI 端口 |

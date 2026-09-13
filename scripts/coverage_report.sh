@@ -12,7 +12,8 @@ echo "🧪 Running test coverage analysis..."
 echo ""
 
 # 运行测试并生成覆盖率报告
-# 覆盖率范围与 fail-under 门槛统一由 pytest.ini 提供，此处仅追加 HTML 报告。
+# This is a report command, not the CI baseline gate. CI enforces the current
+# whole-project baseline explicitly (`--cov-fail-under=20`) in its own job.
 pytest --cov=artpm_agent \
   --cov-report="html:$QUALITY_DIR/htmlcov" \
   --cov-report="json:$QUALITY_DIR/coverage.json" \

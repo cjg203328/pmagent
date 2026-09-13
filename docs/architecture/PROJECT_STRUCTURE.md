@@ -57,6 +57,9 @@ artpm_agent/
 ├── plugins/                            # 插件发现、allowlist 和注册
 ├── parsers/                            # Excel、OCR 和文档解析
 ├── views/                              # Streamlit 页面
+├── ui_formatters.py                    # 无副作用的 UI 格式化纯函数
+├── ui_helpers.py                       # UI 兼容门面和交互编排
+├── ui_style.py                         # UI 样式资源（待拆分）
 ├── voice/                              # 可选 LiveKit worker
 ├── evolution/ / editing/               # 复盘、自进化和文档编辑能力
 ├── core/                               # MCP、Redis 和 Token 监控
@@ -88,6 +91,21 @@ docs/
 当前稳定文档也按主题归入 `docs/architecture`、`docs/operations`、`docs/integrations`、
 `docs/guides` 和 `docs/dev`；新的分析、路线图和报告应放入对应子目录，避免再次形成
 无分类文件堆。
+
+## 当前规模与拆分状态
+
+以下数据由 2026-09-14 工作区实测，按源文件物理行数统计：
+
+| 文件 | 行数 | 当前职责 | 下一步 |
+| --- | ---: | --- | --- |
+| `artpm_agent/ui_helpers.py` | 2394 | UI 状态、会话、审批和渲染兼容门面 | 迁移为 session、approvals、rendering 子模块 |
+| `artpm_agent/ui_style.py` | 2312 | 内联 CSS 字符串 | 按页面/组件拆为样式资源 |
+| `artpm_agent/memory/workspace_knowledge_store.py` | 3013 | schema、资源、规则、向量索引 | 提取 migration、resource、rule、vector 服务 |
+| `artpm_agent/views/chat.py` | 1889 | 聊天页面生命周期和渲染 | 继续下沉状态与回合适配 |
+| `artpm_agent/agent.py` | 74 | 兼容 facade 和依赖组装 | 保持轻量，不新增业务逻辑 |
+
+拆分采用兼容迁移策略：先提取无副作用模块并保留原导入路径，再按测试覆盖逐步迁移
+调用方。禁止直接大规模改名或删除旧入口。
 
 ## 产物与数据
 

@@ -74,6 +74,27 @@ jobs:
         flags: python-${{ matrix.python-version }}
         fail_ci_if_error: false
 
+  # Whole-project coverage is a deliberately low baseline while the legacy UI
+  # and storage modules are being decomposed. The focused modernization gate
+  # above remains the higher-signal boundary check.
+  coverage:
+    name: Whole-project coverage baseline
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    - name: Install dependencies
+      run: pip install -e ".[dev]"
+    - name: Run tests with baseline coverage gate
+      run: >-
+        pytest -q --cov=artpm_agent --cov-report=term-missing
+        --cov-fail-under=20
+        -m "not integration and not benchmark"
+
   security:
     runs-on: ubuntu-latest
 

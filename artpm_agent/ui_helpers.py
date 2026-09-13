@@ -90,6 +90,10 @@ from artpm_agent.ui_state import (  # noqa: F401 — re-exported for wildcard co
 
 logger = get_logger(__name__)
 
+# Pure helpers are implemented in a dependency-free module. The assignments
+# preserve the historical import surface while allowing focused unit tests.
+from artpm_agent import ui_formatters as _ui_formatters  # noqa: E402
+
 try:
     from artpm_agent.agent import ArtPMAgent
     from artpm_agent.config import Config
@@ -2506,3 +2510,12 @@ def _render_workflow_approvals(conversation_id):
                         key=f"workflow_reject_error_{run.id}",
                         retry=False,
                     )
+
+
+# New code can import the pure implementations directly from ui_formatters;
+# these aliases keep the historical ui_helpers surface stable during migration.
+_history_limits = _ui_formatters.history_limits
+_current_model_id = _ui_formatters.current_model_id
+_response_model_id = _ui_formatters.response_model_id
+_fmt_size = _ui_formatters.format_size
+_artifact_subtitle = _ui_formatters.artifact_subtitle

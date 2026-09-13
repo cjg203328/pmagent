@@ -31,6 +31,9 @@ The focused gate enforces at least 90% coverage over the runtime, cache, vector,
 component, and tenant-session boundary modules. A whole-project HTML report is
 available through `scripts/coverage_report.sh` when needed, but it is not a
 per-commit gate because UI startup tests make that signal too slow and noisy.
+CI also runs a separate whole-project baseline job at 20%. This low threshold
+is intentional during the decomposition of the legacy UI and knowledge-store
+modules; it must be raised as those modules gain focused tests.
 
 Tests under `tests/integration/` are automatically marked `integration`.
 Streamlit and model synchronization modules with expensive application startup
