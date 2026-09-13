@@ -1,5 +1,6 @@
 """Tests for the memory-retrieval hook (Phase 1 memory activation)."""
 from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
 
 from artpm_agent.harness.memory_retrieval import (
     format_feedback_context,
@@ -115,6 +116,62 @@ def test_retrieve_filters_low_confidence_memory_to_reduce_pollution():
     assert "应该注入" in out
     assert "低相关噪声" not in out
     assert "不该注入" not in out
+
+
+def test_retrieval_marks_legacy_evidence_as_pending_with_provenance():
+    mm = FakeMemoryManager(
+        [
+            {
+                "data": {"raw_text": "旧系统返回的待核实内容"},
+                "metadata": {"source_type": "legacy", "source_id": "m-1"},
+            }
+        ]
+    )
+
+    out = retrieve_memory_context("待核实", memory_manager=mm)
+
+    assert "[待确认]" in out
+    assert "来源:legacy/m-1" in out
+    assert "旧系统返回的待核实内容" in out
+
+
+def test_retrieval_skips_unapproved_and_expired_evidence():
+    expires_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    ks = FakeKnowledgeStore(
+        [
+            {
+                "title": "模型提案",
+                "text": "不应注入的未批准内容",
+                "status": "proposed",
+                "confidence": 0.9,
+            },
+            {
+                "title": "过期资料",
+                "text": "不应注入的过期内容",
+                "status": "active",
+                "expires_at": expires_at,
+                "confidence": 0.9,
+            },
+            {
+                "title": "正式资料",
+                "text": "应注入的正式内容",
+                "status": "active",
+                "source_type": "wiki",
+                "source_id": "wiki-1",
+                "current_version": 3,
+                "updated_at": "2026-09-13T00:00:00+00:00",
+                "confidence": 0.9,
+            },
+        ]
+    )
+
+    out = retrieve_memory_context("内容", knowledge_store=ks)
+
+    assert "不应注入的未批准内容" not in out
+    assert "不应注入的过期内容" not in out
+    assert "应注入的正式内容" in out
+    assert "来源:wiki/wiki-1" in out
+    assert "版本:3" in out
 
 
 def test_retrieval_query_uses_user_history_but_not_assistant_guesses():

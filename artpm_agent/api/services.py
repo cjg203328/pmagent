@@ -425,7 +425,10 @@ class DefaultGatewayRuntime:
     def _ensure_workflow_runtime(self, tenant_context: Any) -> tuple[Any, Any]:
         agent = self._ensure_agent()
         workspace_id = tenant_context.require_workspace()
-        self.workflows.ensure_builtins(workspace_id=workspace_id)
+        self.workflows.ensure_builtins(
+            workspace_id=workspace_id,
+            tenant_id=tenant_context.tenant_id,
+        )
         scoped_router = agent.router.for_tenant(tenant_context)
         from artpm_agent.workflows.designer import (
             capability_allowlist_from_skill_metadata,
@@ -441,6 +444,7 @@ class DefaultGatewayRuntime:
             self.workflows,
             scoped_router.execute_skill,
             capability_allowlist=allowlist,
+            tenant_id=tenant_context.tenant_id,
         )
 
         from artpm_agent.workflows.coordinator import WorkflowCoordinator
@@ -458,6 +462,7 @@ class DefaultGatewayRuntime:
             _TenantAgentProxy(agent, scoped_router),
             capability_allowlist=allowlist,
             workspace_id=workspace_id,
+            tenant_id=tenant_context.tenant_id,
         )
         return engine, coordinator
 

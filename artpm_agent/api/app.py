@@ -248,6 +248,7 @@ def _permission_for_principal(
     try:
         item = services.permissions.get(
             validate_identifier(request_id, "request_id", max_length=256),
+            tenant_id=principal.tenant_id,
             workspace_id=principal.workspace_id,
         )
     except (ValueError, IdentityError) as error:
@@ -274,7 +275,9 @@ def _workflow_run_for_principal(services: GatewayServices, principal: RequestPri
         raise GatewayError(400, "invalid_run_id", str(error)) from error
     try:
         run = services.workflows.get_run(
-            run_id, workspace_id=principal.workspace_id
+            run_id,
+            tenant_id=principal.tenant_id,
+            workspace_id=principal.workspace_id,
         )
     except (WorkflowConflictError, sqlite3.Error) as error:
         raise _map_store_error(error) from error
@@ -383,6 +386,7 @@ def _workflow_definition_from_request(
         str(raw.get("id") or ""),
         workspace_id=principal.workspace_id,
         profile_id=principal.profile_id,
+        tenant_id=principal.tenant_id,
     )
     if latest is not None and latest.source == "builtin":
         raise PermissionError("built-in workflows cannot be replaced")
@@ -395,6 +399,7 @@ def _workflow_definition_from_request(
             "steps": steps,
             "workspace_id": principal.workspace_id,
             "profile_id": principal.profile_id,
+            "tenant_id": principal.tenant_id,
             "source": "custom",
             "read_only": all(not step.side_effect for step in steps),
         }
@@ -751,6 +756,7 @@ def create_app(
         try:
             items = services.permissions.list_pending(
                 workspace_id=principal.workspace_id,
+                tenant_id=principal.tenant_id,
                 conversation_id=conversation_id,
                 limit=limit,
             )
@@ -788,6 +794,7 @@ def create_app(
                 actor_role=principal.actor_role,
                 expected_version=payload.expected_version,
                 workspace_id=principal.workspace_id,
+                tenant_id=principal.tenant_id,
                 acknowledged_risk=(
                     payload.acknowledged_risk if decision == "approved" else None
                 ),
@@ -801,6 +808,7 @@ def create_app(
                     expected_payload_sha256=decided.payload_sha256,
                     expected_action_sha256=decided.action_sha256,
                     workspace_id=principal.workspace_id,
+                    tenant_id=principal.tenant_id,
                 )
                 try:
                     executor = services.permission_executor
@@ -821,6 +829,7 @@ def create_app(
                         expected_version=claimed.state_version,
                         result=result,
                         workspace_id=principal.workspace_id,
+                        tenant_id=principal.tenant_id,
                     )
                 except Exception as error:  # noqa: BLE001 - persist failed execution
                     services.permissions.complete_execution(
@@ -830,6 +839,7 @@ def create_app(
                         expected_version=claimed.state_version,
                         error=str(error),
                         workspace_id=principal.workspace_id,
+                        tenant_id=principal.tenant_id,
                     )
                     raise GatewayError(502, "permission_execution_failed", "approved operation failed") from error
                 return {"item": completed.to_dict()}
@@ -855,6 +865,7 @@ def create_app(
             definitions = services.workflows.list_definitions(
                 workspace_id=principal.workspace_id,
                 profile_id=principal.profile_id,
+                tenant_id=principal.tenant_id,
                 enabled_only=enabled_only,
             )
         except Exception as error:
@@ -888,6 +899,7 @@ def create_app(
                 version=version,
                 workspace_id=principal.workspace_id,
                 profile_id=principal.profile_id,
+                tenant_id=principal.tenant_id,
             )
         except Exception as error:
             raise _map_store_error(error) from error
@@ -907,6 +919,7 @@ def create_app(
                 version=payload.version,
                 workspace_id=principal.workspace_id,
                 profile_id=principal.profile_id,
+                tenant_id=principal.tenant_id,
             )
             if definition is None:
                 raise GatewayError(404, "workflow_not_found", "workflow was not found")
@@ -939,6 +952,7 @@ def create_app(
                 conversation_id,
                 workspace_id=principal.workspace_id,
                 profile_id=principal.profile_id,
+                tenant_id=principal.tenant_id,
                 limit=limit,
             )
         except Exception as error:
@@ -951,7 +965,8 @@ def create_app(
         _workflow_run_for_principal(services, principal, run_id)
         try:
             result = services.get_workflow_engine(_tenant_context(request)).result(
-                run_id, workspace_id=principal.workspace_id
+                run_id,
+                workspace_id=principal.workspace_id,
             )
         except Exception as error:
             raise _map_store_error(error) from error

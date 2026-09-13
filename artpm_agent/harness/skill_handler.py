@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Optional
 
 from artpm_agent.security.access_mode import access_decision
-from artpm_agent.routing.service import IntentDecision
+from artpm_agent.routing.service import IntentDecision, execution_gate_for_decision
 
 if TYPE_CHECKING:
     from .turn_service import TurnContext, TurnResult
@@ -170,7 +170,9 @@ def _permission_request(ctx: "TurnContext", intent: str, inputs: Mapping[str, An
         raise RuntimeError("permission store is unavailable for a protected Skill")
     from .turn_service import get_turn_scope
 
-    workspace_id = get_turn_scope(ctx).workspace_id
+    scope = get_turn_scope(ctx)
+    tenant_id = scope.tenant_id
+    workspace_id = scope.workspace_id
     risk = str(metadata.get("risk") or "medium").casefold()
     if risk not in {"low", "medium", "high", "critical", "untrusted"}:
         risk = "untrusted"
@@ -186,6 +188,7 @@ def _permission_request(ctx: "TurnContext", intent: str, inputs: Mapping[str, An
     }
     return store.create_request(
         workspace_id=str(workspace_id),
+        tenant_id=str(tenant_id),
         conversation_id=ctx.conversation_id or "unknown-conversation",
         turn_id=ctx.turn_id or "unknown-turn",
         agent_id=str(ctx.extra.get("agent_id") or "artpm-agent"),
@@ -272,7 +275,49 @@ def try_skill_routing(
         ctx.intent_checked = True
 
     decision_metadata = {"intent_decision": decision.as_dict()}
-    if decision.clarification_required:
+
+    # Explicitness must come from the trusted runtime decision, never from
+    # client-supplied context fields that could be used to lower the gate.
+    explicit_intent = decision.explicit
+    gate = getattr(runtime, "intent_execution_gate", None)
+    try:
+        allowed, gate_reason = (
+            gate(decision, explicit=explicit_intent)
+            if callable(gate)
+            else execution_gate_for_decision(decision, explicit=explicit_intent)
+        )
+    except Exception as error:  # noqa: BLE001 - invalid gate fails closed
+        logger.warning("Intent execution gate failed: %s", error)
+        allowed, gate_reason = False, "gate_error"
+    decision_metadata["intent_execution"] = {
+        "allowed": bool(allowed),
+        "reason": gate_reason,
+        "explicit": explicit_intent,
+    }
+
+    if not allowed and gate_reason in {
+        "clarification_required",
+        "low_confidence",
+        "low_margin",
+    }:
+        candidates = "、".join(decision.candidates[:2]) or "相关功能"
+        from .turn_service import TurnResult
+
+        return TurnResult(
+            response=(
+                f"我识别到可能涉及：{candidates}，但把握不足。"
+                "请明确你希望执行的具体操作。"
+            ),
+            success=True,
+            handled_by="intent_clarification",
+            metadata={
+                "turn_id": ctx.turn_id,
+                "conversation_id": ctx.conversation_id,
+                **decision_metadata,
+            },
+        )
+
+    if decision.clarification_required and not allowed:
         candidates = "、".join(decision.candidates[:2]) or "相关功能"
         from .turn_service import TurnResult
 

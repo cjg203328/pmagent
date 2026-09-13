@@ -21,6 +21,8 @@ from types import MappingProxyType
 from typing import Any, Literal, TypeAlias
 from uuid import uuid4
 
+from artpm_agent.tenancy.scope import Scope
+
 
 PermissionStatus = Literal[
     "pending",
@@ -278,6 +280,7 @@ class PermissionRequest:
     result: JsonValue | None = None
     result_sha256: str | None = None
     error: str | None = None
+    tenant_id: str = "local"
 
     def to_dict(self) -> dict[str, Any]:
         public_error = (
@@ -288,6 +291,7 @@ class PermissionRequest:
         return {
             "id": self.id,
             "idempotency_key": self.idempotency_key,
+            "tenant_id": self.tenant_id,
             "workspace_id": self.workspace_id,
             "conversation_id": self.conversation_id,
             "turn_id": self.turn_id,
@@ -322,7 +326,7 @@ class PermissionRequest:
 class PermissionStore:
     """Persist permission requests and enforce their one-shot lifecycle."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
     BUSY_TIMEOUT_MS = 10_000
 
     def __init__(
@@ -408,13 +412,13 @@ class PermissionStore:
                 raise PermissionStoreError(
                     "Permission database schema is newer than this application supports"
                 )
-            if current >= 1:
-                return
-            connection.executescript(
-                """
+            if current < 1:
+                connection.executescript(
+                    """
                 CREATE TABLE permission_requests (
                     id TEXT PRIMARY KEY,
                     idempotency_key TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
                     workspace_id TEXT NOT NULL,
                     conversation_id TEXT NOT NULL,
                     turn_id TEXT NOT NULL,
@@ -461,13 +465,78 @@ class PermissionStore:
                 CREATE UNIQUE INDEX idx_permission_execution_id
                     ON permission_requests(execution_id)
                     WHERE execution_id IS NOT NULL;
-                """
-            )
-            connection.execute(
-                "INSERT INTO permission_schema_migrations(version, applied_at) "
-                "VALUES (1, ?)",
-                (self._iso(self._now()),),
-            )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO permission_schema_migrations(version, applied_at) "
+                    "VALUES (1, ?)",
+                    (self._iso(self._now()),),
+                )
+                current = 1
+            if current < 2:
+                columns = {
+                    str(item[1])
+                    for item in connection.execute(
+                        "PRAGMA table_info(permission_requests)"
+                    )
+                }
+                if "tenant_id" not in columns:
+                    connection.execute(
+                        "ALTER TABLE permission_requests ADD COLUMN "
+                        "tenant_id TEXT NOT NULL DEFAULT 'local'"
+                    )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_permission_tenant_scope "
+                    "ON permission_requests(tenant_id, workspace_id, status, created_at)"
+                )
+                has_workspaces = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspaces'"
+                ).fetchone()
+                if has_workspaces is not None:
+                    connection.execute(
+                        "UPDATE permission_requests SET tenant_id = COALESCE(("
+                        "SELECT tenant_id FROM workspaces WHERE workspaces.id = permission_requests.workspace_id"
+                        "), 'local') WHERE tenant_id = 'local'"
+                    )
+                connection.execute(
+                    "INSERT INTO permission_schema_migrations(version, applied_at) "
+                    "VALUES (2, ?)",
+                    (self._iso(self._now()),),
+                )
+
+    @staticmethod
+    def _resolve_scope(
+        *,
+        scope: Scope | None = None,
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> tuple[str | None, str | None]:
+        if scope is not None:
+            if not isinstance(scope, Scope):
+                raise PermissionValidationError("scope must be a Scope")
+            if tenant_id not in (None, "", scope.tenant_id):
+                raise PermissionValidationError("tenant_id conflicts with scope")
+            if workspace_id not in (None, "", scope.workspace_id):
+                raise PermissionValidationError("workspace_id conflicts with scope")
+            return scope.tenant_id, scope.workspace_id
+        return tenant_id, workspace_id
+
+    @staticmethod
+    def _validate_workspace_tenant(
+        connection: sqlite3.Connection,
+        workspace_id: str,
+        tenant_id: str,
+    ) -> None:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspaces'"
+        ).fetchone() is None:
+            return
+        row = connection.execute(
+            "SELECT tenant_id FROM workspaces WHERE id = ?",
+            (workspace_id,),
+        ).fetchone()
+        if row is not None and row["tenant_id"] not in (None, "", tenant_id):
+            raise PermissionBindingError("workspace does not belong to the requested tenant")
 
     def _now(self) -> datetime:
         value = self.clock()
@@ -532,6 +601,7 @@ class PermissionStore:
             result=cls._decode_json(row["result_json"], "result"),
             result_sha256=row["result_sha256"],
             error=row["error"],
+            tenant_id=row["tenant_id"],
         )
 
     @staticmethod
@@ -540,15 +610,48 @@ class PermissionStore:
         request_id: str,
         *,
         workspace_id: str | None = None,
+        tenant_id: str | None = None,
     ) -> sqlite3.Row:
+        tenant_clause = "" if tenant_id is None else " AND tenant_id = ?"
         workspace_clause = "" if workspace_id is None else " AND workspace_id = ?"
-        parameters = (
-            (request_id,) if workspace_id is None else (request_id, workspace_id)
-        )
+        parameters: tuple[Any, ...] = (request_id,)
+        if tenant_id is not None:
+            parameters += (tenant_id,)
+        if workspace_id is not None:
+            parameters += (workspace_id,)
         row = connection.execute(
-            "SELECT * FROM permission_requests WHERE id = ?" + workspace_clause,
+            "SELECT * FROM permission_requests WHERE id = ?"
+            + tenant_clause
+            + workspace_clause,
             parameters,
         ).fetchone()
+        if row is None and tenant_id is not None and workspace_id is not None:
+            legacy = connection.execute(
+                "SELECT tenant_id FROM permission_requests "
+                "WHERE id = ? AND workspace_id = ?",
+                (request_id, workspace_id),
+            ).fetchone()
+            if legacy is not None and legacy["tenant_id"] == "local" and workspace_id != "local-default":
+                has_workspaces = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspaces'"
+                ).fetchone()
+                owner = None
+                if has_workspaces is not None:
+                    owner = connection.execute(
+                        "SELECT tenant_id FROM workspaces WHERE id = ?",
+                        (workspace_id,),
+                    ).fetchone()
+                if owner is None or owner["tenant_id"] in (None, "", tenant_id):
+                    connection.execute(
+                        "UPDATE permission_requests SET tenant_id = ? "
+                        "WHERE id = ? AND workspace_id = ? AND tenant_id = 'local'",
+                        (tenant_id, request_id, workspace_id),
+                    )
+                    row = connection.execute(
+                        "SELECT * FROM permission_requests WHERE id = ? "
+                        "AND tenant_id = ? AND workspace_id = ?",
+                        (request_id, tenant_id, workspace_id),
+                    ).fetchone()
         if row is None:
             raise PermissionNotFoundError(f"Unknown permission request: {request_id}")
         return row
@@ -559,9 +662,15 @@ class PermissionStore:
         now: str,
         *,
         workspace_id: str,
+        tenant_id: str | None = None,
         request_id: str | None = None,
     ) -> int:
-        params: list[Any] = [now, now, workspace_id]
+        params: list[Any] = [now, now]
+        tenant_clause = ""
+        params.append(workspace_id)
+        if tenant_id is not None:
+            tenant_clause = " AND tenant_id = ?"
+            params.append(tenant_id)
         request_clause = ""
         if request_id is not None:
             request_clause = " AND id = ?"
@@ -573,6 +682,7 @@ class PermissionStore:
             WHERE status IN ('pending', 'approved') AND expires_at <= ?
               AND workspace_id = ?
             """
+            + tenant_clause
             + request_clause,
             params,
         )
@@ -602,7 +712,9 @@ class PermissionStore:
     def create_request(
         self,
         *,
-        workspace_id: str,
+        workspace_id: str | None = None,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
         conversation_id: str,
         turn_id: str,
         agent_id: str,
@@ -617,7 +729,19 @@ class PermissionStore:
     ) -> PermissionRequest:
         """Create or return the exact request associated with an idempotency key."""
 
-        workspace_id = _required_text(workspace_id, "workspace_id", max_length=256)
+        if scope is not None:
+            if not isinstance(scope, Scope):
+                raise PermissionValidationError("scope must be a Scope")
+            if tenant_id not in (None, "", scope.tenant_id):
+                raise PermissionValidationError("tenant_id conflicts with scope")
+            if workspace_id not in (None, "", scope.workspace_id):
+                raise PermissionValidationError("workspace_id conflicts with scope")
+            tenant_id = scope.tenant_id
+            workspace_id = scope.workspace_id
+        tenant_id = _required_text(tenant_id or "local", "tenant_id", max_length=256)
+        workspace_id = _required_text(
+            workspace_id or "local-default", "workspace_id", max_length=256
+        )
         conversation_id = _required_text(
             conversation_id, "conversation_id", max_length=256
         )
@@ -658,6 +782,7 @@ class PermissionStore:
         payload_sha256 = hashlib.sha256(payload_canonical.encode("utf-8")).hexdigest()
 
         action_envelope = {
+            "tenant_id": tenant_id,
             "workspace_id": workspace_id,
             "conversation_id": conversation_id,
             "turn_id": turn_id,
@@ -689,13 +814,19 @@ class PermissionStore:
         expires_at = self._iso(now_value + timedelta(seconds=ttl))
 
         with self._connection(write=True) as connection:
-            self._expire_due(connection, now, workspace_id=workspace_id)
+            self._validate_workspace_tenant(connection, workspace_id, tenant_id)
+            self._expire_due(
+                connection,
+                now,
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
+            )
             existing = connection.execute(
                 """
                 SELECT * FROM permission_requests
-                WHERE workspace_id = ? AND idempotency_key = ?
+                WHERE tenant_id = ? AND workspace_id = ? AND idempotency_key = ?
                 """,
-                (workspace_id, idempotency_key),
+                (tenant_id, workspace_id, idempotency_key),
             ).fetchone()
             if existing is not None:
                 if existing["action_sha256"] != action_sha256:
@@ -708,16 +839,17 @@ class PermissionStore:
             connection.execute(
                 """
                 INSERT INTO permission_requests(
-                    id, idempotency_key, workspace_id, conversation_id,
+                    id, idempotency_key, tenant_id, workspace_id, conversation_id,
                     turn_id, agent_id, source, action, resource_json, risk,
                     required_role, status, payload_json, redacted_arguments_json,
                     payload_sha256, action_sha256, state_version, created_at,
                     expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, 0, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, 0, ?, ?)
                 """,
                 (
                     request_id,
                     idempotency_key,
+                    tenant_id,
                     workspace_id,
                     conversation_id,
                     turn_id,
@@ -743,8 +875,17 @@ class PermissionStore:
         request_id: str,
         *,
         workspace_id: str | None = None,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> PermissionRequest | None:
         request_id = _required_text(request_id, "request_id", max_length=256)
+        tenant_id, workspace_id = self._resolve_scope(
+            scope=scope,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
+        if tenant_id is not None:
+            tenant_id = _required_text(tenant_id, "tenant_id", max_length=256)
         if workspace_id is not None:
             workspace_id = _required_text(
                 workspace_id, "workspace_id", max_length=256
@@ -753,22 +894,41 @@ class PermissionStore:
         with self._connection(write=True) as connection:
             existing = connection.execute(
                 "SELECT * FROM permission_requests WHERE id = ?"
+                + (" AND tenant_id = ?" if tenant_id is not None else "")
                 + (" AND workspace_id = ?" if workspace_id is not None else ""),
-                (request_id,) if workspace_id is None else (request_id, workspace_id),
+                (
+                    (request_id,)
+                    if tenant_id is None and workspace_id is None
+                    else (
+                        (request_id, tenant_id)
+                        if workspace_id is None
+                        else (
+                            (request_id, workspace_id)
+                            if tenant_id is None
+                            else (request_id, tenant_id, workspace_id)
+                        )
+                    )
+                ),
             ).fetchone()
             if existing is not None:
                 self._expire_due(
                     connection,
                     now,
                     workspace_id=existing["workspace_id"],
+                    tenant_id=existing["tenant_id"],
                     request_id=request_id,
                 )
+            tenant_clause = "" if tenant_id is None else " AND tenant_id = ?"
             workspace_clause = "" if workspace_id is None else " AND workspace_id = ?"
-            parameters = (
-                (request_id,) if workspace_id is None else (request_id, workspace_id)
-            )
+            parameters: tuple[Any, ...] = (request_id,)
+            if tenant_id is not None:
+                parameters += (tenant_id,)
+            if workspace_id is not None:
+                parameters += (workspace_id,)
             row = connection.execute(
-                "SELECT * FROM permission_requests WHERE id = ?" + workspace_clause,
+                "SELECT * FROM permission_requests WHERE id = ?"
+                + tenant_clause
+                + workspace_clause,
                 parameters,
             ).fetchone()
         return self._from_row(row) if row is not None else None
@@ -777,6 +937,8 @@ class PermissionStore:
         self,
         *,
         workspace_id: str | None = None,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
         conversation_id: str | None = None,
         agent_id: str | None = None,
         limit: int = 100,
@@ -785,9 +947,15 @@ class PermissionStore:
 
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
             raise PermissionValidationError("limit must be between 1 and 500")
+        tenant_id, workspace_id = self._resolve_scope(
+            scope=scope,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
         clauses = ["status = 'pending'"]
         params: list[Any] = []
         for field_name, value in (
+            ("tenant_id", tenant_id),
             ("workspace_id", workspace_id),
             ("conversation_id", conversation_id),
             ("agent_id", agent_id),
@@ -800,19 +968,20 @@ class PermissionStore:
         now = self._iso(self._now())
         with self._connection(write=True) as connection:
             if workspace_id is not None:
-                workspace_ids = (workspace_id,)
+                workspace_ids = ((tenant_id, workspace_id),)
             else:
                 workspace_ids = tuple(
-                    row["workspace_id"]
+                    (row["tenant_id"], row["workspace_id"])
                     for row in connection.execute(
-                        "SELECT DISTINCT workspace_id FROM permission_requests"
+                        "SELECT DISTINCT tenant_id, workspace_id FROM permission_requests"
                     ).fetchall()
                 )
-            for scoped_workspace_id in workspace_ids:
+            for scoped_tenant_id, scoped_workspace_id in workspace_ids:
                 self._expire_due(
                     connection,
                     now,
                     workspace_id=scoped_workspace_id,
+                    tenant_id=scoped_tenant_id,
                 )
             rows = connection.execute(
                 "SELECT * FROM permission_requests WHERE "
@@ -831,6 +1000,8 @@ class PermissionStore:
         actor_role: PermissionRole,
         expected_version: int,
         workspace_id: str | None = None,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
         acknowledged_risk: PermissionRisk | None = None,
     ) -> PermissionRequest:
         """Atomically approve or reject one still-pending request."""
@@ -846,6 +1017,13 @@ class PermissionStore:
                 f"unsupported acknowledged_risk: {acknowledged_risk}"
             )
         expected_version = _state_version(expected_version)
+        tenant_id, workspace_id = self._resolve_scope(
+            scope=scope,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
+        if tenant_id is not None:
+            tenant_id = _required_text(tenant_id, "tenant_id", max_length=256)
         if workspace_id is not None:
             workspace_id = _required_text(
                 workspace_id, "workspace_id", max_length=256
@@ -854,19 +1032,25 @@ class PermissionStore:
 
         with self._connection(write=True) as connection:
             current = self._request_row(
-                connection, request_id, workspace_id=workspace_id
+                connection,
+                request_id,
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
             )
+            scoped_tenant_id = current["tenant_id"]
             scoped_workspace_id = current["workspace_id"]
             self._expire_due(
                 connection,
                 now,
                 workspace_id=scoped_workspace_id,
+                tenant_id=scoped_tenant_id,
                 request_id=request_id,
             )
             current = self._request_row(
                 connection,
                 request_id,
                 workspace_id=scoped_workspace_id,
+                tenant_id=scoped_tenant_id,
             )
             if current["status"] != "pending" or int(
                 current["state_version"]
@@ -891,7 +1075,8 @@ class PermissionStore:
                 UPDATE permission_requests
                 SET status = ?, decided_at = ?, decided_by = ?, decided_role = ?,
                     state_version = state_version + 1
-                WHERE id = ? AND workspace_id = ? AND status = 'pending'
+                WHERE id = ? AND tenant_id = ? AND workspace_id = ?
+                  AND status = 'pending'
                   AND state_version = ?
                 """,
                 (
@@ -900,13 +1085,19 @@ class PermissionStore:
                     actor_id,
                     actor_role,
                     request_id,
+                    scoped_tenant_id,
                     scoped_workspace_id,
                     expected_version,
                 ),
             )
             if cursor.rowcount != 1:
                 raise PermissionConflictError("permission decision lost a race")
-            row = self._request_row(connection, request_id)
+            row = self._request_row(
+                connection,
+                request_id,
+                tenant_id=scoped_tenant_id,
+                workspace_id=scoped_workspace_id,
+            )
         return self._from_row(row)
 
     def claim_execution(
@@ -918,12 +1109,21 @@ class PermissionStore:
         expected_payload_sha256: str | None = None,
         expected_action_sha256: str | None = None,
         workspace_id: str | None = None,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> PermissionRequest:
         """Consume an approval exactly once before performing the side effect."""
 
         request_id = _required_text(request_id, "request_id", max_length=256)
         execution_id = _required_text(execution_id, "execution_id", max_length=256)
         expected_version = _state_version(expected_version)
+        tenant_id, workspace_id = self._resolve_scope(
+            scope=scope,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
+        if tenant_id is not None:
+            tenant_id = _required_text(tenant_id, "tenant_id", max_length=256)
         expected_payload_sha256 = self._validate_digest(
             expected_payload_sha256, "expected_payload_sha256"
         )
@@ -938,19 +1138,25 @@ class PermissionStore:
 
         with self._connection(write=True) as connection:
             current = self._request_row(
-                connection, request_id, workspace_id=workspace_id
+                connection,
+                request_id,
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
             )
+            scoped_tenant_id = current["tenant_id"]
             scoped_workspace_id = current["workspace_id"]
             self._expire_due(
                 connection,
                 now,
                 workspace_id=scoped_workspace_id,
+                tenant_id=scoped_tenant_id,
                 request_id=request_id,
             )
             current = self._request_row(
                 connection,
                 request_id,
                 workspace_id=scoped_workspace_id,
+                tenant_id=scoped_tenant_id,
             )
             if not self._action_is_allowed(current["action"]):
                 raise PermissionError(
@@ -982,13 +1188,15 @@ class PermissionStore:
                     UPDATE permission_requests
                         SET status = 'executing', execution_id = ?,
                         execution_started_at = ?, state_version = state_version + 1
-                    WHERE id = ? AND workspace_id = ? AND status = 'approved'
+                    WHERE id = ? AND tenant_id = ? AND workspace_id = ?
+                      AND status = 'approved'
                       AND state_version = ?
                     """,
                     (
                         execution_id,
                         now,
                         request_id,
+                        scoped_tenant_id,
                         scoped_workspace_id,
                         expected_version,
                     ),
@@ -999,7 +1207,12 @@ class PermissionStore:
                 ) from error
             if cursor.rowcount != 1:
                 raise PermissionConflictError("permission execution claim lost a race")
-            row = self._request_row(connection, request_id)
+            row = self._request_row(
+                connection,
+                request_id,
+                tenant_id=scoped_tenant_id,
+                workspace_id=scoped_workspace_id,
+            )
         return self._from_row(row)
 
     def complete_execution(
@@ -1012,6 +1225,8 @@ class PermissionStore:
         result: Any = None,
         error: str | None = None,
         workspace_id: str | None = None,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> PermissionRequest:
         """Finalize the exact execution that claimed an approved request."""
 
@@ -1020,6 +1235,13 @@ class PermissionStore:
         if not isinstance(success, bool):
             raise PermissionValidationError("success must be a boolean")
         expected_version = _state_version(expected_version)
+        tenant_id, workspace_id = self._resolve_scope(
+            scope=scope,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
+        if tenant_id is not None:
+            tenant_id = _required_text(tenant_id, "tenant_id", max_length=256)
         if workspace_id is not None:
             workspace_id = _required_text(
                 workspace_id, "workspace_id", max_length=256
@@ -1039,19 +1261,25 @@ class PermissionStore:
 
         with self._connection(write=True) as connection:
             current = self._request_row(
-                connection, request_id, workspace_id=workspace_id
+                connection,
+                request_id,
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
             )
+            scoped_tenant_id = current["tenant_id"]
             scoped_workspace_id = current["workspace_id"]
             self._expire_due(
                 connection,
                 now,
                 workspace_id=scoped_workspace_id,
+                tenant_id=scoped_tenant_id,
                 request_id=request_id,
             )
             current = self._request_row(
                 connection,
                 request_id,
                 workspace_id=scoped_workspace_id,
+                tenant_id=scoped_tenant_id,
             )
             if (
                 current["status"] != "executing"
@@ -1067,7 +1295,7 @@ class PermissionStore:
                 SET status = ?, completed_at = ?, result_json = ?,
                     result_sha256 = ?, error = ?, state_version = state_version + 1
                 WHERE id = ? AND status = 'executing'
-                  AND workspace_id = ? AND execution_id = ?
+                  AND tenant_id = ? AND workspace_id = ? AND execution_id = ?
                   AND state_version = ?
                 """,
                 (
@@ -1077,6 +1305,7 @@ class PermissionStore:
                     result_sha256,
                     error,
                     request_id,
+                    scoped_tenant_id,
                     scoped_workspace_id,
                     execution_id,
                     expected_version,
@@ -1084,7 +1313,12 @@ class PermissionStore:
             )
             if cursor.rowcount != 1:
                 raise PermissionConflictError("permission completion lost a race")
-            row = self._request_row(connection, request_id)
+            row = self._request_row(
+                connection,
+                request_id,
+                tenant_id=scoped_tenant_id,
+                workspace_id=scoped_workspace_id,
+            )
         return self._from_row(row)
 
 

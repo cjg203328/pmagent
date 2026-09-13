@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 import re
 from typing import Any, Iterator
 
+from .scope import Scope
+
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
@@ -126,6 +128,11 @@ class TenantContext:
         bound["tenant_id"] = self.tenant_id
         bound["workspace_id"] = self.workspace_id
         return bound
+
+    def to_scope(self) -> Scope:
+        """Return the canonical orchestration scope for this identity."""
+
+        return Scope.from_context(self)
 
 
 _CURRENT: ContextVar[TenantContext | None] = ContextVar(

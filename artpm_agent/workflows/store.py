@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -16,6 +16,7 @@ from .models import (
     APPROVAL_RANK,
     ApprovalRequirement,
     ApprovalStatus,
+    RetryErrorClass,
     RunStatus,
     WorkflowApproval,
     WorkflowDefinition,
@@ -24,6 +25,8 @@ from .models import (
     WorkflowRun,
     WorkflowStepRun,
 )
+from .risk_policy import DEFAULT_RISK_POLICY
+from artpm_agent.tenancy.scope import Scope
 
 
 class WorkflowConflictError(RuntimeError):
@@ -33,7 +36,7 @@ class WorkflowConflictError(RuntimeError):
 class WorkflowStore:
     """Own workflow tables in the same SQLite database as conversations."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 3
     BUSY_TIMEOUT_MS = 10_000
     MAX_JSON_BYTES = 256 * 1024
 
@@ -140,12 +143,11 @@ class WorkflowStore:
                 raise RuntimeError(
                     "Workflow database schema is newer than this application supports"
                 )
-            if current_version >= 1:
-                return
-
-            conn.executescript(
-                """
+            if current_version < 1:
+                conn.executescript(
+                    """
                 CREATE TABLE workflow_definitions (
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
                     workspace_id TEXT NOT NULL,
                     profile_id TEXT NOT NULL,
                     workflow_id TEXT NOT NULL,
@@ -159,6 +161,7 @@ class WorkflowStore:
                 );
 
                 CREATE TABLE workflow_overrides (
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
                     workspace_id TEXT NOT NULL,
                     profile_id TEXT NOT NULL,
                     workflow_id TEXT NOT NULL,
@@ -182,6 +185,7 @@ class WorkflowStore:
                     idempotency_key TEXT NOT NULL,
                     workflow_id TEXT NOT NULL,
                     workflow_version INTEGER NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
                     workspace_id TEXT NOT NULL,
                     profile_id TEXT NOT NULL,
                     conversation_id TEXT NOT NULL,
@@ -209,6 +213,7 @@ class WorkflowStore:
                 CREATE TABLE workflow_steps (
                     run_id TEXT NOT NULL,
                     step_index INTEGER NOT NULL CHECK(step_index >= 0 AND step_index < 8),
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
                     step_id TEXT NOT NULL,
                     skill_id TEXT NOT NULL,
                     status TEXT NOT NULL CHECK(status IN (
@@ -220,6 +225,9 @@ class WorkflowStore:
                     input_json TEXT NOT NULL,
                     output_json TEXT NOT NULL,
                     error TEXT,
+                    error_class TEXT,
+                    next_retry_at TEXT,
+                    compensation_skill_id TEXT,
                     started_at TEXT,
                     completed_at TEXT,
                     PRIMARY KEY(run_id, step_index),
@@ -230,6 +238,7 @@ class WorkflowStore:
                     id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL,
                     step_index INTEGER NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
                     requirement TEXT NOT NULL CHECK(requirement IN ('none', 'user', 'admin')),
                     status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected')),
                     actor TEXT,
@@ -245,6 +254,7 @@ class WorkflowStore:
                 CREATE TABLE workflow_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
                     event_type TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -257,25 +267,233 @@ class WorkflowStore:
                     ON workflow_runs(status, updated_at);
                 CREATE INDEX idx_workflow_events_run
                     ON workflow_events(run_id, id);
-                """
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO workflow_schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (1, self._now()),
+                )
+                current_version = 1
+
+            if current_version < 2:
+                self._migrate_tenant_columns(conn)
+                conn.execute(
+                    "INSERT INTO workflow_schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (2, self._now()),
+                )
+                current_version = 2
+
+            if current_version < 3:
+                self._migrate_retry_columns(conn)
+                conn.execute(
+                    "INSERT INTO workflow_schema_migrations(version, applied_at) "
+                    "VALUES (?, ?)",
+                    (3, self._now()),
+                )
+
+    @staticmethod
+    def _migrate_tenant_columns(conn: sqlite3.Connection) -> None:
+        """Add tenant ownership to databases created by schema version 1."""
+
+        for table in (
+            "workflow_definitions",
+            "workflow_overrides",
+            "workflow_runs",
+            "workflow_steps",
+            "workflow_approvals",
+            "workflow_events",
+        ):
+            columns = {
+                str(item[1]) for item in conn.execute(f"PRAGMA table_info({table})")
+            }
+            if "tenant_id" not in columns:
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'local'"
+                )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workflow_definitions_tenant "
+            "ON workflow_definitions(tenant_id, workspace_id, profile_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workflow_runs_tenant "
+            "ON workflow_runs(tenant_id, workspace_id, profile_id, created_at DESC)"
+        )
+        has_workspaces = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspaces'"
+        ).fetchone()
+        if has_workspaces is None:
+            return
+        conn.execute(
+            "UPDATE workflow_definitions SET tenant_id = COALESCE(("
+            "SELECT tenant_id FROM workspaces WHERE workspaces.id = workflow_definitions.workspace_id"
+            "), 'local') WHERE tenant_id = 'local'"
+        )
+        conn.execute(
+            "UPDATE workflow_overrides SET tenant_id = COALESCE(("
+            "SELECT tenant_id FROM workspaces WHERE workspaces.id = workflow_overrides.workspace_id"
+            "), 'local') WHERE tenant_id = 'local'"
+        )
+        conn.execute(
+            "UPDATE workflow_runs SET tenant_id = COALESCE(("
+            "SELECT tenant_id FROM workspaces WHERE workspaces.id = workflow_runs.workspace_id"
+            "), 'local') WHERE tenant_id = 'local'"
+        )
+        conn.execute(
+            "UPDATE workflow_steps SET tenant_id = COALESCE(("
+            "SELECT tenant_id FROM workflow_runs WHERE workflow_runs.id = workflow_steps.run_id"
+            "), 'local') WHERE tenant_id = 'local'"
+        )
+        conn.execute(
+            "UPDATE workflow_approvals SET tenant_id = COALESCE(("
+            "SELECT tenant_id FROM workflow_runs WHERE workflow_runs.id = workflow_approvals.run_id"
+            "), 'local') WHERE tenant_id = 'local'"
+        )
+        conn.execute(
+            "UPDATE workflow_events SET tenant_id = COALESCE(("
+            "SELECT tenant_id FROM workflow_runs WHERE workflow_runs.id = workflow_events.run_id"
+            "), 'local') WHERE tenant_id = 'local'"
+        )
+
+    @staticmethod
+    def _migrate_retry_columns(conn: sqlite3.Connection) -> None:
+        """Add retry and recovery bookkeeping to existing workflow steps."""
+
+        columns = {
+            str(item[1]) for item in conn.execute("PRAGMA table_info(workflow_steps)")
+        }
+        for name, definition in (
+            ("error_class", "TEXT"),
+            ("next_retry_at", "TEXT"),
+            ("compensation_skill_id", "TEXT"),
+        ):
+            if name not in columns:
+                conn.execute(
+                    f"ALTER TABLE workflow_steps ADD COLUMN {name} {definition}"
+                )
+
+    @staticmethod
+    def _scope_values(
+        *,
+        scope: Scope | None = None,
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
+        default_workspace: str = "local-default",
+    ) -> tuple[str, str]:
+        if scope is not None:
+            if not isinstance(scope, Scope):
+                raise TypeError("scope must be a Scope")
+            if tenant_id not in (None, "", scope.tenant_id):
+                raise ValueError("tenant_id conflicts with scope")
+            if workspace_id not in (None, default_workspace, scope.workspace_id):
+                raise ValueError("workspace_id conflicts with scope")
+            return scope.tenant_id, scope.workspace_id
+        return tenant_id or "local", workspace_id or default_workspace
+
+    def tenant_for_workspace(self, workspace_id: str) -> str:
+        """Return the persisted tenant for a workspace, or the local default."""
+
+        with self._connection() as conn:
+            has_workspaces = conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'workspaces'"
+            ).fetchone()
+            if has_workspaces is None:
+                return "local"
+            row = conn.execute(
+                "SELECT tenant_id FROM workspaces WHERE id = ?",
+                (workspace_id,),
+            ).fetchone()
+        if row is None or not str(row["tenant_id"] or "").strip():
+            return "local"
+        return str(row["tenant_id"])
+
+    @staticmethod
+    def _scope_filter(
+        *,
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
+        scope: Scope | None = None,
+        alias: str = "",
+    ) -> tuple[str, tuple[Any, ...]]:
+        if scope is not None:
+            if not isinstance(scope, Scope):
+                raise TypeError("scope must be a Scope")
+            if tenant_id not in (None, "", scope.tenant_id):
+                raise ValueError("tenant_id conflicts with scope")
+            if workspace_id not in (None, "", scope.workspace_id):
+                raise ValueError("workspace_id conflicts with scope")
+            tenant_id = scope.tenant_id
+            workspace_id = scope.workspace_id
+        prefix = f"{alias}." if alias else ""
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if tenant_id is not None:
+            clauses.append(f" AND {prefix}tenant_id = ?")
+            parameters.append(tenant_id)
+        if workspace_id is not None:
+            clauses.append(f" AND {prefix}workspace_id = ?")
+            parameters.append(workspace_id)
+        return "".join(clauses), tuple(parameters)
+
+    def _mutation_scope(
+        self,
+        *,
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
+        scope: Scope | None = None,
+    ) -> tuple[str, str | None]:
+        """Resolve the identity filter used by workflow state mutations."""
+
+        if scope is not None:
+            return self._scope_values(
+                scope=scope,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
             )
+        if tenant_id is None:
+            tenant_id = (
+                self.tenant_for_workspace(workspace_id)
+                if workspace_id is not None
+                else "local"
+            )
+        return tenant_id, workspace_id
+
+    @staticmethod
+    def _validate_workspace_tenant(
+        conn: sqlite3.Connection,
+        workspace_id: str,
+        tenant_id: str,
+    ) -> None:
+        if (
             conn.execute(
-                "INSERT INTO workflow_schema_migrations(version, applied_at) VALUES (?, ?)",
-                (1, self._now()),
-            )
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspaces'"
+            ).fetchone()
+            is None
+        ):
+            return
+        row = conn.execute(
+            "SELECT tenant_id FROM workspaces WHERE id = ?",
+            (workspace_id,),
+        ).fetchone()
+        if row is not None and row["tenant_id"] not in (None, "", tenant_id):
+            raise ValueError("workspace does not belong to the requested tenant")
 
     def put_definition(self, definition: WorkflowDefinition) -> WorkflowDefinition:
         """Install one immutable definition version; identical writes are idempotent."""
         raw = self._definition_json(definition)
         checksum = self._definition_checksum(definition)
         with self._connection(write=True) as conn:
+            self._validate_workspace_tenant(
+                conn, definition.workspace_id, definition.tenant_id
+            )
             existing = conn.execute(
                 """
                 SELECT checksum FROM workflow_definitions
-                WHERE workspace_id = ? AND profile_id = ?
+                WHERE tenant_id = ? AND workspace_id = ? AND profile_id = ?
                   AND workflow_id = ? AND version = ?
                 """,
                 (
+                    definition.tenant_id,
                     definition.workspace_id,
                     definition.profile_id,
                     definition.id,
@@ -291,11 +509,12 @@ class WorkflowStore:
             conn.execute(
                 """
                 INSERT INTO workflow_definitions(
-                    workspace_id, profile_id, workflow_id, version,
+                    tenant_id, workspace_id, profile_id, workflow_id, version,
                     source, read_only, definition_json, checksum, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    definition.tenant_id,
                     definition.workspace_id,
                     definition.profile_id,
                     definition.id,
@@ -314,8 +533,18 @@ class WorkflowStore:
         *,
         workspace_id: str = "local-default",
         profile_id: str = "local-default",
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> None:
         """Install the immutable built-in catalog in one workspace scope."""
+
+        if tenant_id is None and scope is None:
+            tenant_id = self.tenant_for_workspace(workspace_id)
+        tenant_id, workspace_id = self._scope_values(
+            scope=scope,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
 
         for definition in get_builtin_workflows():
             scoped = WorkflowDefinition.model_validate(
@@ -323,6 +552,7 @@ class WorkflowStore:
                     **definition.model_dump(mode="python"),
                     "workspace_id": workspace_id,
                     "profile_id": profile_id,
+                    "tenant_id": tenant_id,
                 }
             )
             self.put_definition(scoped)
@@ -331,13 +561,17 @@ class WorkflowStore:
         """Upsert activation/priority settings without changing definition content."""
         now = self._now()
         with self._connection(write=True) as conn:
+            self._validate_workspace_tenant(
+                conn, override.workspace_id, override.tenant_id
+            )
             exists = conn.execute(
                 """
                 SELECT 1 FROM workflow_definitions
-                WHERE workspace_id = ? AND profile_id = ?
+                WHERE tenant_id = ? AND workspace_id = ? AND profile_id = ?
                   AND workflow_id = ? AND version = ?
                 """,
                 (
+                    override.tenant_id,
                     override.workspace_id,
                     override.profile_id,
                     override.workflow_id,
@@ -346,12 +580,27 @@ class WorkflowStore:
             ).fetchone()
             if exists is None:
                 raise KeyError("unknown workflow definition version")
+            conflicting = conn.execute(
+                """
+                SELECT tenant_id FROM workflow_overrides
+                WHERE workspace_id = ? AND profile_id = ?
+                  AND workflow_id = ? AND workflow_version = ?
+                """,
+                (
+                    override.workspace_id,
+                    override.profile_id,
+                    override.workflow_id,
+                    override.workflow_version,
+                ),
+            ).fetchone()
+            if conflicting is not None and conflicting["tenant_id"] != override.tenant_id:
+                raise ValueError("workflow override belongs to another tenant")
             conn.execute(
                 """
                 INSERT INTO workflow_overrides(
-                    workspace_id, profile_id, workflow_id, workflow_version,
+                    tenant_id, workspace_id, profile_id, workflow_id, workflow_version,
                     enabled, priority, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(
                     workspace_id, profile_id, workflow_id, workflow_version
                 ) DO UPDATE SET
@@ -360,6 +609,7 @@ class WorkflowStore:
                     updated_at = excluded.updated_at
                 """,
                 (
+                    override.tenant_id,
                     override.workspace_id,
                     override.profile_id,
                     override.workflow_id,
@@ -379,22 +629,44 @@ class WorkflowStore:
         version: int,
         workspace_id: str = "local-default",
         profile_id: str = "local-default",
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> bool:
         """Remove a user override and restore the immutable definition defaults."""
+        resolved_tenant, resolved_workspace = self._scope_values(
+            scope=scope,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
+        workspace_id = resolved_workspace
+        tenant_id = resolved_tenant
         with self._connection(write=True) as conn:
             cursor = conn.execute(
                 """
                 DELETE FROM workflow_overrides
-                WHERE workspace_id = ? AND profile_id = ?
+                WHERE tenant_id = ? AND workspace_id = ? AND profile_id = ?
                   AND workflow_id = ? AND workflow_version = ?
                 """,
-                (workspace_id, profile_id, workflow_id, version),
+                (
+                    tenant_id,
+                    workspace_id,
+                    profile_id,
+                    workflow_id,
+                    version,
+                ),
             )
         return cursor.rowcount > 0
 
     @staticmethod
     def _resolved_definition(row: sqlite3.Row) -> WorkflowDefinition:
         definition = WorkflowDefinition.model_validate_json(row["definition_json"])
+        definition = definition.model_copy(
+            update={
+                "tenant_id": row["tenant_id"],
+                "workspace_id": row["workspace_id"],
+                "profile_id": row["profile_id"],
+            }
+        )
         updates: dict[str, Any] = {}
         if row["override_enabled"] is not None:
             updates["enabled"] = bool(row["override_enabled"])
@@ -413,24 +685,34 @@ class WorkflowStore:
         version: int | None = None,
         workspace_id: str = "local-default",
         profile_id: str = "local-default",
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> WorkflowDefinition | None:
+        if tenant_id is None and scope is None:
+            tenant_id = self.tenant_for_workspace(workspace_id)
+        tenant_id, workspace_id = self._scope_values(
+            scope=scope,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
         version_sql = "AND d.version = ?" if version is not None else ""
-        params: list[Any] = [workspace_id, profile_id, workflow_id]
+        params: list[Any] = [tenant_id, workspace_id, profile_id, workflow_id]
         if version is not None:
             params.append(version)
         with self._connection() as conn:
             row = conn.execute(
                 f"""
-                SELECT d.definition_json,
+                SELECT d.definition_json, d.tenant_id, d.workspace_id, d.profile_id,
                        o.enabled AS override_enabled,
                        o.priority AS override_priority
                 FROM workflow_definitions d
                 LEFT JOIN workflow_overrides o
-                  ON o.workspace_id = d.workspace_id
+                  ON o.tenant_id = d.tenant_id
+                 AND o.workspace_id = d.workspace_id
                  AND o.profile_id = d.profile_id
                  AND o.workflow_id = d.workflow_id
                  AND o.workflow_version = d.version
-                WHERE d.workspace_id = ? AND d.profile_id = ?
+                WHERE d.tenant_id = ? AND d.workspace_id = ? AND d.profile_id = ?
                   AND d.workflow_id = ? {version_sql}
                 ORDER BY d.version DESC
                 LIMIT 1
@@ -446,23 +728,33 @@ class WorkflowStore:
         profile_id: str = "local-default",
         latest_only: bool = True,
         enabled_only: bool = False,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> list[WorkflowDefinition]:
+        if tenant_id is None and scope is None:
+            tenant_id = self.tenant_for_workspace(workspace_id)
+        tenant_id, workspace_id = self._scope_values(
+            scope=scope,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
         with self._connection() as conn:
             rows = conn.execute(
                 """
-                SELECT d.definition_json,
+                SELECT d.definition_json, d.tenant_id, d.workspace_id, d.profile_id,
                        o.enabled AS override_enabled,
                        o.priority AS override_priority
                 FROM workflow_definitions d
                 LEFT JOIN workflow_overrides o
-                  ON o.workspace_id = d.workspace_id
+                  ON o.tenant_id = d.tenant_id
+                 AND o.workspace_id = d.workspace_id
                  AND o.profile_id = d.profile_id
                  AND o.workflow_id = d.workflow_id
                  AND o.workflow_version = d.version
-                WHERE d.workspace_id = ? AND d.profile_id = ?
+                WHERE d.tenant_id = ? AND d.workspace_id = ? AND d.profile_id = ?
                 ORDER BY d.workflow_id, d.version DESC
                 """,
-                (workspace_id, profile_id),
+                (tenant_id, workspace_id, profile_id),
             ).fetchall()
         definitions: list[WorkflowDefinition] = []
         seen: set[str] = set()
@@ -485,10 +777,18 @@ class WorkflowStore:
     ) -> None:
         conn.execute(
             """
-            INSERT INTO workflow_events(run_id, event_type, payload_json, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO workflow_events(
+                run_id, tenant_id, event_type, payload_json, created_at
+            )
+            SELECT ?, tenant_id, ?, ?, ? FROM workflow_runs WHERE id = ?
             """,
-            (run_id, event_type, self._json(payload or {}), self._now()),
+            (
+                run_id,
+                event_type,
+                self._json(payload or {}),
+                self._now(),
+                run_id,
+            ),
         )
 
     def create_run(
@@ -507,6 +807,7 @@ class WorkflowStore:
             version=definition.version,
             workspace_id=definition.workspace_id,
             profile_id=definition.profile_id,
+            tenant_id=definition.tenant_id,
         )
         if installed is None:
             raise KeyError("workflow definition is not installed")
@@ -525,12 +826,17 @@ class WorkflowStore:
         now = self._now()
 
         with self._connection(write=True) as conn:
+            self._validate_workspace_tenant(
+                conn, definition.workspace_id, definition.tenant_id
+            )
             existing = conn.execute(
                 """
                 SELECT * FROM workflow_runs
-                WHERE workspace_id = ? AND profile_id = ? AND idempotency_key = ?
+                WHERE tenant_id = ? AND workspace_id = ? AND profile_id = ?
+                  AND idempotency_key = ?
                 """,
                 (
+                    definition.tenant_id,
                     definition.workspace_id,
                     definition.profile_id,
                     idempotency_key,
@@ -557,17 +863,18 @@ class WorkflowStore:
                 """
                 INSERT INTO workflow_runs(
                     id, idempotency_key, workflow_id, workflow_version,
-                    workspace_id, profile_id, conversation_id, turn_id,
+                    tenant_id, workspace_id, profile_id, conversation_id, turn_id,
                     status, state_version, current_step,
                     definition_snapshot_json, input_json, context_json,
                     outputs_json, error, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?, ?, '{}', NULL, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?, ?, '{}', NULL, ?, ?)
                 """,
                 (
                     run_id,
                     idempotency_key,
                     definition.id,
                     definition.version,
+                    definition.tenant_id,
                     definition.workspace_id,
                     definition.profile_id,
                     conversation_id,
@@ -583,11 +890,19 @@ class WorkflowStore:
                 conn.execute(
                     """
                     INSERT INTO workflow_steps(
-                        run_id, step_index, step_id, skill_id, status,
-                        state_version, attempt, input_json, output_json
-                    ) VALUES (?, ?, ?, ?, 'pending', 0, 1, '{}', '{}')
+                        run_id, step_index, tenant_id, step_id, skill_id, status,
+                        state_version, attempt, input_json, output_json,
+                        compensation_skill_id
+                    ) VALUES (?, ?, ?, ?, ?, 'pending', 0, 1, '{}', '{}', ?)
                     """,
-                    (run_id, index, step.id, step.skill_id),
+                    (
+                        run_id,
+                        index,
+                        definition.tenant_id,
+                        step.id,
+                        step.skill_id,
+                        step.compensation_skill_id,
+                    ),
                 )
             self._event(
                 conn,
@@ -609,6 +924,7 @@ class WorkflowStore:
             workflow_version=int(row["workflow_version"]),
             workspace_id=row["workspace_id"],
             profile_id=row["profile_id"],
+            tenant_id=row["tenant_id"],
             conversation_id=row["conversation_id"],
             turn_id=row["turn_id"],
             status=row["status"],
@@ -631,6 +947,7 @@ class WorkflowStore:
     def _step_from_row(cls, row: sqlite3.Row) -> WorkflowStepRun:
         return WorkflowStepRun(
             run_id=row["run_id"],
+            tenant_id=row["tenant_id"],
             step_index=int(row["step_index"]),
             step_id=row["step_id"],
             skill_id=row["skill_id"],
@@ -640,6 +957,9 @@ class WorkflowStore:
             input_data=cls._loads(row["input_json"], {}),
             output_data=cls._loads(row["output_json"], {}),
             error=row["error"],
+            error_class=row["error_class"],
+            next_retry_at=row["next_retry_at"],
+            compensation_skill_id=row["compensation_skill_id"],
             started_at=row["started_at"],
             completed_at=row["completed_at"],
         )
@@ -649,6 +969,7 @@ class WorkflowStore:
         return WorkflowApproval(
             id=row["id"],
             run_id=row["run_id"],
+            tenant_id=row["tenant_id"],
             step_index=int(row["step_index"]),
             requirement=row["requirement"],
             status=row["status"],
@@ -664,12 +985,28 @@ class WorkflowStore:
         run_id: str,
         *,
         workspace_id: str | None = None,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> WorkflowRun | None:
+        tenant_clause = "" if tenant_id is None else " AND tenant_id = ?"
         workspace_clause = "" if workspace_id is None else " AND workspace_id = ?"
-        parameters = (run_id,) if workspace_id is None else (run_id, workspace_id)
+        if scope is not None:
+            tenant_id, workspace_id = self._scope_values(scope=scope)
+            tenant_clause = " AND tenant_id = ?"
+            workspace_clause = " AND workspace_id = ?"
+        elif tenant_id is None and workspace_id is not None:
+            tenant_id = self.tenant_for_workspace(workspace_id)
+            tenant_clause = " AND tenant_id = ?"
+        parameters: tuple[Any, ...] = (run_id,)
+        if tenant_id is not None:
+            parameters += (tenant_id,)
+        if workspace_id is not None:
+            parameters += (workspace_id,)
         with self._connection() as conn:
             row = conn.execute(
-                "SELECT * FROM workflow_runs WHERE id = ?" + workspace_clause,
+                "SELECT * FROM workflow_runs WHERE id = ?"
+                + tenant_clause
+                + workspace_clause,
                 parameters,
             ).fetchone()
         return self._run_from_row(row) if row is not None else None
@@ -682,6 +1019,8 @@ class WorkflowStore:
         workspace_id: str = "local-default",
         profile_id: str = "local-default",
         limit: int = 20,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> list[WorkflowRun]:
         """List recent runs for one scoped conversation."""
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 100:
@@ -697,8 +1036,13 @@ class WorkflowStore:
         requested = tuple(statuses or ())
         if any(status not in allowed_statuses for status in requested):
             raise ValueError("unsupported workflow run status")
+        tenant_id, workspace_id = self._scope_values(
+            scope=scope,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
         status_sql = ""
-        params: list[Any] = [conversation_id, workspace_id, profile_id]
+        params: list[Any] = [conversation_id, tenant_id, workspace_id, profile_id]
         if requested:
             placeholders = ",".join("?" for _ in requested)
             status_sql = f" AND status IN ({placeholders})"
@@ -708,7 +1052,8 @@ class WorkflowStore:
             rows = conn.execute(
                 f"""
                 SELECT * FROM workflow_runs
-                WHERE conversation_id = ? AND workspace_id = ? AND profile_id = ?
+                WHERE conversation_id = ? AND tenant_id = ?
+                  AND workspace_id = ? AND profile_id = ?
                 {status_sql}
                 ORDER BY created_at DESC, id DESC
                 LIMIT ?
@@ -723,15 +1068,23 @@ class WorkflowStore:
         *,
         workspace_id: str = "local-default",
         profile_id: str = "local-default",
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> int:
         """Delete runtime state when the user explicitly clears a conversation."""
+        tenant_id, workspace_id = self._scope_values(
+            scope=scope,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
         with self._connection(write=True) as conn:
             cursor = conn.execute(
                 """
                 DELETE FROM workflow_runs
-                WHERE conversation_id = ? AND workspace_id = ? AND profile_id = ?
+                WHERE conversation_id = ? AND tenant_id = ?
+                  AND workspace_id = ? AND profile_id = ?
                 """,
-                (conversation_id, workspace_id, profile_id),
+                (conversation_id, tenant_id, workspace_id, profile_id),
             )
         return cursor.rowcount
 
@@ -741,16 +1094,27 @@ class WorkflowStore:
         step_index: int,
         *,
         workspace_id: str | None = None,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> WorkflowStepRun | None:
+        tenant_clause = "" if tenant_id is None else " AND r.tenant_id = ?"
         workspace_clause = "" if workspace_id is None else " AND r.workspace_id = ?"
+        if scope is not None:
+            tenant_id, workspace_id = self._scope_values(scope=scope)
+            tenant_clause = " AND r.tenant_id = ?"
+            workspace_clause = " AND r.workspace_id = ?"
         parameters: tuple[Any, ...] = (run_id, step_index)
+        if tenant_id is not None:
+            parameters += (tenant_id,)
         if workspace_id is not None:
             parameters += (workspace_id,)
         with self._connection() as conn:
             row = conn.execute(
                 "SELECT s.* FROM workflow_steps s "
                 "JOIN workflow_runs r ON r.id = s.run_id "
-                "WHERE s.run_id = ? AND s.step_index = ?" + workspace_clause,
+                "WHERE s.run_id = ? AND s.step_index = ?"
+                + tenant_clause
+                + workspace_clause,
                 parameters,
             ).fetchone()
         return self._step_from_row(row) if row is not None else None
@@ -760,14 +1124,26 @@ class WorkflowStore:
         run_id: str,
         *,
         workspace_id: str | None = None,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> list[WorkflowStepRun]:
+        tenant_clause = "" if tenant_id is None else " AND r.tenant_id = ?"
         workspace_clause = "" if workspace_id is None else " AND r.workspace_id = ?"
-        parameters = (run_id,) if workspace_id is None else (run_id, workspace_id)
+        if scope is not None:
+            tenant_id, workspace_id = self._scope_values(scope=scope)
+            tenant_clause = " AND r.tenant_id = ?"
+            workspace_clause = " AND r.workspace_id = ?"
+        parameters: tuple[Any, ...] = (run_id,)
+        if tenant_id is not None:
+            parameters += (tenant_id,)
+        if workspace_id is not None:
+            parameters += (workspace_id,)
         with self._connection() as conn:
             rows = conn.execute(
                 "SELECT s.* FROM workflow_steps s "
                 "JOIN workflow_runs r ON r.id = s.run_id "
                 "WHERE s.run_id = ?"
+                + tenant_clause
                 + workspace_clause
                 + " ORDER BY s.step_index",
                 parameters,
@@ -779,20 +1155,32 @@ class WorkflowStore:
         run_id: str,
         *,
         workspace_id: str | None = None,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> list[WorkflowEvent]:
+        tenant_clause = "" if tenant_id is None else " AND r.tenant_id = ?"
         workspace_clause = "" if workspace_id is None else " AND r.workspace_id = ?"
-        parameters = (run_id,) if workspace_id is None else (run_id, workspace_id)
+        if scope is not None:
+            tenant_id, workspace_id = self._scope_values(scope=scope)
+            tenant_clause = " AND r.tenant_id = ?"
+            workspace_clause = " AND r.workspace_id = ?"
+        parameters: tuple[Any, ...] = (run_id,)
+        if tenant_id is not None:
+            parameters += (tenant_id,)
+        if workspace_id is not None:
+            parameters += (workspace_id,)
         with self._connection() as conn:
             rows = conn.execute(
                 "SELECT e.* FROM workflow_events e "
                 "JOIN workflow_runs r ON r.id = e.run_id "
-                "WHERE e.run_id = ?" + workspace_clause + " ORDER BY e.id",
+                "WHERE e.run_id = ?" + tenant_clause + workspace_clause + " ORDER BY e.id",
                 parameters,
             ).fetchall()
         return [
             WorkflowEvent(
                 id=int(row["id"]),
                 run_id=row["run_id"],
+                tenant_id=row["tenant_id"],
                 event_type=row["event_type"],
                 payload=self._loads(row["payload_json"], {}),
                 created_at=row["created_at"],
@@ -810,8 +1198,16 @@ class WorkflowStore:
         current_step: int | None = None,
         outputs: dict[str, Any] | None = None,
         error: str | None = None,
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
+        scope: Scope | None = None,
     ) -> WorkflowRun:
         """Compare-and-swap one run state transition."""
+        tenant_id, workspace_id = self._mutation_scope(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            scope=scope,
+        )
         now = self._now()
         fields = ["status = ?", "state_version = state_version + 1", "updated_at = ?"]
         params: list[Any] = [new_status, now]
@@ -830,12 +1226,17 @@ class WorkflowStore:
         if new_status in {"succeeded", "failed", "cancelled"}:
             fields.append("completed_at = ?")
             params.append(now)
-        params.extend([run_id, expected_status, expected_version])
+        params.extend([run_id, tenant_id])
+        if workspace_id is not None:
+            params.append(workspace_id)
+        params.extend([expected_status, expected_version])
+        workspace_clause = " AND workspace_id = ?" if workspace_id is not None else ""
         with self._connection(write=True) as conn:
             cursor = conn.execute(
                 f"""
                 UPDATE workflow_runs SET {", ".join(fields)}
-                WHERE id = ? AND status = ? AND state_version = ?
+                WHERE id = ? AND tenant_id = ?{workspace_clause}
+                  AND status = ? AND state_version = ?
                 """,
                 params,
             )
@@ -848,7 +1249,10 @@ class WorkflowStore:
                 {"from": expected_status, "to": new_status},
             )
             row = conn.execute(
-                "SELECT * FROM workflow_runs WHERE id = ?", (run_id,)
+                "SELECT * FROM workflow_runs WHERE id = ? AND tenant_id = ?"
+                + workspace_clause,
+                (run_id, tenant_id)
+                + ((workspace_id,) if workspace_id is not None else ()),
             ).fetchone()
         return self._run_from_row(row)
 
@@ -857,17 +1261,39 @@ class WorkflowStore:
         run_id: str,
         step_index: int,
         input_data: dict[str, Any],
+        *,
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
+        scope: Scope | None = None,
     ) -> tuple[WorkflowRun, WorkflowStepRun]:
         """Atomically claim a pending step so concurrent engines cannot duplicate it."""
+        tenant_id, workspace_id = self._mutation_scope(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            scope=scope,
+        )
         now = self._now()
         input_json = self._json(input_data)
+        workspace_clause = " AND r.workspace_id = ?" if workspace_id is not None else ""
+        run_workspace_clause = (
+            " AND workspace_id = ?" if workspace_id is not None else ""
+        )
+        run_parameters: tuple[Any, ...] = (run_id, tenant_id)
+        if workspace_id is not None:
+            run_parameters += (workspace_id,)
         with self._connection(write=True) as conn:
             run = conn.execute(
-                "SELECT * FROM workflow_runs WHERE id = ?", (run_id,)
+                "SELECT * FROM workflow_runs WHERE id = ? AND tenant_id = ?"
+                + run_workspace_clause,
+                run_parameters,
             ).fetchone()
             step = conn.execute(
-                "SELECT * FROM workflow_steps WHERE run_id = ? AND step_index = ?",
-                (run_id, step_index),
+                "SELECT s.* FROM workflow_steps s "
+                "JOIN workflow_runs r ON r.id = s.run_id "
+                "WHERE s.run_id = ? AND s.step_index = ? AND r.tenant_id = ?"
+                + workspace_clause,
+                (run_id, step_index, tenant_id)
+                + ((workspace_id,) if workspace_id is not None else ()),
             ).fetchone()
             if run is None or step is None:
                 raise KeyError("unknown run or step")
@@ -879,36 +1305,47 @@ class WorkflowStore:
                 """
                 UPDATE workflow_steps
                 SET status = 'running', state_version = state_version + 1,
-                    input_json = ?, started_at = ?
-                WHERE run_id = ? AND step_index = ?
+                    input_json = ?, error = NULL, error_class = NULL,
+                    next_retry_at = NULL, started_at = ?, completed_at = NULL
+                WHERE run_id = ? AND tenant_id = ? AND step_index = ?
                   AND status = 'pending' AND state_version = ?
                 """,
                 (
                     input_json,
                     now,
                     run_id,
+                    tenant_id,
                     step_index,
                     int(step["state_version"]),
                 ),
             )
             run_cursor = conn.execute(
-                """
+                f"""
                 UPDATE workflow_runs
                 SET status = 'running', state_version = state_version + 1,
                     updated_at = ?, started_at = COALESCE(started_at, ?)
-                WHERE id = ? AND state_version = ? AND status IN ('pending', 'running')
+                WHERE id = ? AND tenant_id = ?{run_workspace_clause}
+                  AND state_version = ? AND status IN ('pending', 'running')
                 """,
-                (now, now, run_id, int(run["state_version"])),
+                (now, now, run_id, tenant_id)
+                + ((workspace_id,) if workspace_id is not None else ())
+                + (int(run["state_version"]),),
             )
             if step_cursor.rowcount != 1 or run_cursor.rowcount != 1:
                 raise WorkflowConflictError("step claim lost a compare-and-swap race")
             self._event(conn, run_id, "step.started", {"step_index": step_index})
             run = conn.execute(
-                "SELECT * FROM workflow_runs WHERE id = ?", (run_id,)
+                "SELECT * FROM workflow_runs WHERE id = ? AND tenant_id = ?"
+                + run_workspace_clause,
+                run_parameters,
             ).fetchone()
             step = conn.execute(
-                "SELECT * FROM workflow_steps WHERE run_id = ? AND step_index = ?",
-                (run_id, step_index),
+                "SELECT s.* FROM workflow_steps s "
+                "JOIN workflow_runs r ON r.id = s.run_id "
+                "WHERE s.run_id = ? AND s.step_index = ? AND r.tenant_id = ?"
+                + workspace_clause,
+                (run_id, step_index, tenant_id)
+                + ((workspace_id,) if workspace_id is not None else ()),
             ).fetchone()
         return self._run_from_row(run), self._step_from_row(step)
 
@@ -918,17 +1355,39 @@ class WorkflowStore:
         step_index: int,
         output_key: str,
         output_data: dict[str, Any],
+        *,
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
+        scope: Scope | None = None,
     ) -> WorkflowRun:
         """Persist output and atomically advance to the next step or success."""
+        tenant_id, workspace_id = self._mutation_scope(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            scope=scope,
+        )
         output_json = self._json(output_data)
         now = self._now()
+        workspace_clause = " AND r.workspace_id = ?" if workspace_id is not None else ""
+        run_workspace_clause = (
+            " AND workspace_id = ?" if workspace_id is not None else ""
+        )
+        run_parameters: tuple[Any, ...] = (run_id, tenant_id)
+        if workspace_id is not None:
+            run_parameters += (workspace_id,)
         with self._connection(write=True) as conn:
             run = conn.execute(
-                "SELECT * FROM workflow_runs WHERE id = ?", (run_id,)
+                "SELECT * FROM workflow_runs WHERE id = ? AND tenant_id = ?"
+                + run_workspace_clause,
+                run_parameters,
             ).fetchone()
             step = conn.execute(
-                "SELECT * FROM workflow_steps WHERE run_id = ? AND step_index = ?",
-                (run_id, step_index),
+                "SELECT s.* FROM workflow_steps s "
+                "JOIN workflow_runs r ON r.id = s.run_id "
+                "WHERE s.run_id = ? AND s.step_index = ? AND r.tenant_id = ?"
+                + workspace_clause,
+                (run_id, step_index, tenant_id)
+                + ((workspace_id,) if workspace_id is not None else ()),
             ).fetchone()
             if run is None or step is None:
                 raise KeyError("unknown run or step")
@@ -947,13 +1406,14 @@ class WorkflowStore:
                 UPDATE workflow_steps
                 SET status = 'succeeded', state_version = state_version + 1,
                     output_json = ?, completed_at = ?
-                WHERE run_id = ? AND step_index = ?
+                WHERE run_id = ? AND tenant_id = ? AND step_index = ?
                   AND status = 'running' AND state_version = ?
                 """,
                 (
                     output_json,
                     now,
                     run_id,
+                    tenant_id,
                     step_index,
                     int(step["state_version"]),
                 ),
@@ -964,7 +1424,8 @@ class WorkflowStore:
                 SET status = ?, state_version = state_version + 1,
                     current_step = ?, outputs_json = ?, updated_at = ?,
                     completed_at = {"?" if final else "completed_at"}
-                WHERE id = ? AND status = 'running' AND state_version = ?
+                WHERE id = ? AND tenant_id = ?{run_workspace_clause}
+                  AND status = 'running' AND state_version = ?
                 """,
                 (
                     *(
@@ -973,6 +1434,8 @@ class WorkflowStore:
                         else [next_status, next_step, self._json(outputs), now]
                     ),
                     run_id,
+                    tenant_id,
+                    *((workspace_id,) if workspace_id is not None else ()),
                     int(run["state_version"]),
                 ),
             )
@@ -987,20 +1450,364 @@ class WorkflowStore:
             if final:
                 self._event(conn, run_id, "run.succeeded")
             row = conn.execute(
-                "SELECT * FROM workflow_runs WHERE id = ?", (run_id,)
+                "SELECT * FROM workflow_runs WHERE id = ? AND tenant_id = ?"
+                + run_workspace_clause,
+                run_parameters,
             ).fetchone()
         return self._run_from_row(row)
 
-    def fail_step(self, run_id: str, step_index: int, error: str) -> WorkflowRun:
-        """Fail a claimed step and its run without retrying side effects."""
-        now = self._now()
+    def schedule_retry(
+        self,
+        run_id: str,
+        step_index: int,
+        error: str,
+        *,
+        error_class: RetryErrorClass = "transient",
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
+        scope: Scope | None = None,
+        backoff_seconds: float = 0.0,
+    ) -> WorkflowRun:
+        """Persist a bounded retry without replaying an unsafe side effect."""
+
+        if error_class not in {"transient", "timeout", "network", "rate_limit", "unknown"}:
+            raise ValueError("unsupported workflow error class")
+        if (
+            isinstance(backoff_seconds, bool)
+            or not isinstance(backoff_seconds, (int, float))
+            or backoff_seconds < 0
+        ):
+            raise ValueError("backoff_seconds must be a non-negative number")
+        tenant_id, workspace_id = self._mutation_scope(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            scope=scope,
+        )
+        now = datetime.now(timezone.utc)
+        next_retry_at = (now + timedelta(seconds=float(backoff_seconds))).isoformat(
+            timespec="microseconds"
+        )
+        now_text = now.isoformat(timespec="microseconds")
+        run_workspace_clause = (
+            " AND workspace_id = ?" if workspace_id is not None else ""
+        )
+        run_parameters: tuple[Any, ...] = (run_id, tenant_id)
+        if workspace_id is not None:
+            run_parameters += (workspace_id,)
         with self._connection(write=True) as conn:
             run = conn.execute(
-                "SELECT * FROM workflow_runs WHERE id = ?", (run_id,)
+                "SELECT * FROM workflow_runs WHERE id = ? AND tenant_id = ?"
+                + run_workspace_clause,
+                run_parameters,
             ).fetchone()
             step = conn.execute(
-                "SELECT * FROM workflow_steps WHERE run_id = ? AND step_index = ?",
-                (run_id, step_index),
+                "SELECT s.* FROM workflow_steps s "
+                "JOIN workflow_runs r ON r.id = s.run_id "
+                "WHERE s.run_id = ? AND s.step_index = ? AND r.tenant_id = ?"
+                + (" AND r.workspace_id = ?" if workspace_id is not None else ""),
+                (run_id, step_index, tenant_id)
+                + ((workspace_id,) if workspace_id is not None else ()),
+            ).fetchone()
+            if run is None or step is None:
+                raise KeyError("unknown run or step")
+            if run["status"] != "running" or step["status"] != "running":
+                raise WorkflowConflictError("only a running step can be retried")
+            definition = WorkflowDefinition.model_validate_json(
+                run["definition_snapshot_json"]
+            )
+            step_definition = definition.steps[step_index]
+            if (
+                step_definition.on_error != "retry"
+                or not step_definition.retryable
+                or not step_definition.idempotent
+                or int(step["attempt"]) > step_definition.max_retries
+                or error_class not in step_definition.retry_on
+            ):
+                raise WorkflowConflictError("step has no valid retry contract")
+            next_attempt = int(step["attempt"]) + 1
+            cursor = conn.execute(
+                """
+                UPDATE workflow_steps
+                SET status = 'pending', state_version = state_version + 1,
+                    attempt = ?, error = ?, error_class = ?, next_retry_at = ?,
+                    completed_at = NULL
+                WHERE run_id = ? AND tenant_id = ? AND step_index = ?
+                  AND status = 'running' AND state_version = ?
+                """,
+                (
+                    next_attempt,
+                    error,
+                    error_class,
+                    next_retry_at,
+                    run_id,
+                    tenant_id,
+                    step_index,
+                    int(step["state_version"]),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise WorkflowConflictError("retry scheduling lost a race")
+            run_cursor = conn.execute(
+                f"""
+                UPDATE workflow_runs
+                SET status = 'pending', state_version = state_version + 1,
+                    error = ?, updated_at = ?, completed_at = NULL
+                WHERE id = ? AND tenant_id = ?{run_workspace_clause}
+                  AND status = 'running' AND state_version = ?
+                """,
+                (error, now_text, run_id, tenant_id)
+                + ((workspace_id,) if workspace_id is not None else ())
+                + (int(run["state_version"]),),
+            )
+            if run_cursor.rowcount != 1:
+                raise WorkflowConflictError("retry run transition lost a race")
+            self._event(
+                conn,
+                run_id,
+                "step.retry_scheduled",
+                {
+                    "step_index": step_index,
+                    "attempt": next_attempt,
+                    "error_class": error_class,
+                    "next_retry_at": next_retry_at,
+                },
+            )
+            row = conn.execute(
+                "SELECT * FROM workflow_runs WHERE id = ? AND tenant_id = ?"
+                + run_workspace_clause,
+                run_parameters,
+            ).fetchone()
+        return self._run_from_row(row)
+
+    def recover_stale_run(
+        self,
+        run_id: str,
+        *,
+        stale_after_seconds: float,
+        allow_stale_retry: bool = False,
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
+        scope: Scope | None = None,
+    ) -> WorkflowRun | None:
+        """Recover or stop a run whose claimed step outlived its lease.
+
+        A stale read-only step is reset only when its definition explicitly
+        declares a bounded idempotent retry contract and the caller grants a
+        read-only recovery lease. Side-effecting steps are terminal and emit
+        a compensation event instead of being replayed.
+        """
+
+        if (
+            isinstance(stale_after_seconds, bool)
+            or not isinstance(stale_after_seconds, (int, float))
+            or stale_after_seconds < 0
+        ):
+            raise ValueError("stale_after_seconds must be a non-negative number")
+        tenant_id, workspace_id = self._mutation_scope(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            scope=scope,
+        )
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat(timespec="microseconds")
+        run_workspace_clause = (
+            " AND workspace_id = ?" if workspace_id is not None else ""
+        )
+        run_parameters: tuple[Any, ...] = (run_id, tenant_id)
+        if workspace_id is not None:
+            run_parameters += (workspace_id,)
+        with self._connection(write=True) as conn:
+            run = conn.execute(
+                "SELECT * FROM workflow_runs WHERE id = ? AND tenant_id = ?"
+                + run_workspace_clause,
+                run_parameters,
+            ).fetchone()
+            if run is None:
+                raise KeyError("unknown run")
+            if run["status"] != "running":
+                return None
+            step = conn.execute(
+                "SELECT s.* FROM workflow_steps s "
+                "JOIN workflow_runs r ON r.id = s.run_id "
+                "WHERE s.run_id = ? AND s.step_index = ? AND r.tenant_id = ?"
+                + (" AND r.workspace_id = ?" if workspace_id is not None else ""),
+                (run_id, int(run["current_step"]), tenant_id)
+                + ((workspace_id,) if workspace_id is not None else ()),
+            ).fetchone()
+            if step is None or step["status"] != "running":
+                raise WorkflowConflictError("running workflow has no active step")
+            lease_started = step["started_at"] or run["updated_at"]
+            try:
+                started_at = datetime.fromisoformat(str(lease_started).replace("Z", "+00:00"))
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                return None
+            if (now - started_at).total_seconds() < float(stale_after_seconds):
+                return None
+
+            definition = WorkflowDefinition.model_validate_json(
+                run["definition_snapshot_json"]
+            )
+            step_definition = definition.steps[int(run["current_step"])]
+            retry_available = (
+                allow_stale_retry
+                and not DEFAULT_RISK_POLICY.is_side_effect(
+                    step_definition.capability,
+                    declared_side_effect=step_definition.side_effect,
+                )
+                and step_definition.on_error == "retry"
+                and step_definition.retryable
+                and step_definition.idempotent
+                and int(step["attempt"]) <= step_definition.max_retries
+                and "timeout" in step_definition.retry_on
+            )
+            if retry_available:
+                next_attempt = int(step["attempt"]) + 1
+                step_cursor = conn.execute(
+                    """
+                    UPDATE workflow_steps
+                    SET status = 'pending', state_version = state_version + 1,
+                        attempt = ?, error = 'stale execution lease expired',
+                        error_class = 'timeout', next_retry_at = ?,
+                        completed_at = NULL
+                    WHERE run_id = ? AND tenant_id = ? AND step_index = ?
+                      AND status = 'running' AND state_version = ?
+                    """,
+                    (
+                        next_attempt,
+                        now_text,
+                        run_id,
+                        tenant_id,
+                        int(run["current_step"]),
+                        int(step["state_version"]),
+                    ),
+                )
+                run_cursor = conn.execute(
+                    f"""
+                    UPDATE workflow_runs
+                    SET status = 'pending', state_version = state_version + 1,
+                        error = NULL, updated_at = ?, completed_at = NULL
+                    WHERE id = ? AND tenant_id = ?{run_workspace_clause}
+                      AND status = 'running' AND state_version = ?
+                    """,
+                    (now_text, run_id, tenant_id)
+                    + ((workspace_id,) if workspace_id is not None else ())
+                    + (int(run["state_version"]),),
+                )
+                if step_cursor.rowcount != 1 or run_cursor.rowcount != 1:
+                    raise WorkflowConflictError("stale recovery lost a race")
+                self._event(
+                    conn,
+                    run_id,
+                    "step.recovered",
+                    {
+                        "step_index": int(run["current_step"]),
+                        "attempt": next_attempt,
+                        "reason": "stale_execution_lease",
+                    },
+                )
+            else:
+                error = "workflow step became stale; manual recovery is required"
+                step_cursor = conn.execute(
+                    """
+                    UPDATE workflow_steps
+                    SET status = 'failed', state_version = state_version + 1,
+                        error = ?, error_class = 'timeout', completed_at = ?
+                    WHERE run_id = ? AND tenant_id = ? AND step_index = ?
+                      AND status = 'running' AND state_version = ?
+                    """,
+                    (
+                        error,
+                        now_text,
+                        run_id,
+                        tenant_id,
+                        int(run["current_step"]),
+                        int(step["state_version"]),
+                    ),
+                )
+                run_cursor = conn.execute(
+                    f"""
+                    UPDATE workflow_runs
+                    SET status = 'failed', state_version = state_version + 1,
+                        error = ?, updated_at = ?, completed_at = ?
+                    WHERE id = ? AND tenant_id = ?{run_workspace_clause}
+                      AND status = 'running' AND state_version = ?
+                    """,
+                    (error, now_text, now_text, run_id, tenant_id)
+                    + ((workspace_id,) if workspace_id is not None else ())
+                    + (int(run["state_version"]),),
+                )
+                if step_cursor.rowcount != 1 or run_cursor.rowcount != 1:
+                    raise WorkflowConflictError("stale failure lost a race")
+                self._event(
+                    conn,
+                    run_id,
+                    "step.recovery_required",
+                    {
+                        "step_index": int(run["current_step"]),
+                        "reason": "stale_execution_lease",
+                        "compensation_skill_id": step["compensation_skill_id"],
+                    },
+                )
+                if step["compensation_skill_id"]:
+                    self._event(
+                        conn,
+                        run_id,
+                        "compensation.required",
+                        {
+                            "step_index": int(run["current_step"]),
+                            "skill_id": step["compensation_skill_id"],
+                        },
+                    )
+            row = conn.execute(
+                "SELECT * FROM workflow_runs WHERE id = ? AND tenant_id = ?"
+                + run_workspace_clause,
+                run_parameters,
+            ).fetchone()
+        return self._run_from_row(row)
+
+    def fail_step(
+        self,
+        run_id: str,
+        step_index: int,
+        error: str,
+        *,
+        error_class: RetryErrorClass = "unknown",
+        compensation_skill_id: str | None = None,
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
+        scope: Scope | None = None,
+    ) -> WorkflowRun:
+        """Fail a claimed step and its run without retrying side effects."""
+        if error_class not in {"transient", "timeout", "network", "rate_limit", "unknown"}:
+            raise ValueError("unsupported workflow error class")
+        tenant_id, workspace_id = self._mutation_scope(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            scope=scope,
+        )
+        now = self._now()
+        workspace_clause = " AND r.workspace_id = ?" if workspace_id is not None else ""
+        run_workspace_clause = (
+            " AND workspace_id = ?" if workspace_id is not None else ""
+        )
+        run_parameters: tuple[Any, ...] = (run_id, tenant_id)
+        if workspace_id is not None:
+            run_parameters += (workspace_id,)
+        with self._connection(write=True) as conn:
+            run = conn.execute(
+                "SELECT * FROM workflow_runs WHERE id = ? AND tenant_id = ?"
+                + run_workspace_clause,
+                run_parameters,
+            ).fetchone()
+            step = conn.execute(
+                "SELECT s.* FROM workflow_steps s "
+                "JOIN workflow_runs r ON r.id = s.run_id "
+                "WHERE s.run_id = ? AND s.step_index = ? AND r.tenant_id = ?"
+                + workspace_clause,
+                (run_id, step_index, tenant_id)
+                + ((workspace_id,) if workspace_id is not None else ()),
             ).fetchone()
             if run is None or step is None:
                 raise KeyError("unknown run or step")
@@ -1008,32 +1815,69 @@ class WorkflowStore:
                 raise WorkflowConflictError("run cannot fail from its current status")
             if step["status"] not in {"pending", "running"}:
                 raise WorkflowConflictError("step cannot fail from its current status")
-            conn.execute(
+            step_cursor = conn.execute(
                 """
                 UPDATE workflow_steps
                 SET status = 'failed', state_version = state_version + 1,
-                    error = ?, completed_at = ?
-                WHERE run_id = ? AND step_index = ? AND state_version = ?
+                    error = ?, error_class = ?, next_retry_at = NULL,
+                    compensation_skill_id = ?, completed_at = ?
+                WHERE run_id = ? AND tenant_id = ? AND step_index = ?
+                  AND state_version = ?
                 """,
-                (error, now, run_id, step_index, int(step["state_version"])),
+                (
+                    error,
+                    error_class,
+                    compensation_skill_id,
+                    now,
+                    run_id,
+                    tenant_id,
+                    step_index,
+                    int(step["state_version"]),
+                ),
             )
-            conn.execute(
-                """
+            if step_cursor.rowcount != 1:
+                raise WorkflowConflictError("step failure lost a race")
+            run_cursor = conn.execute(
+                f"""
                 UPDATE workflow_runs
                 SET status = 'failed', state_version = state_version + 1,
                     error = ?, updated_at = ?, completed_at = ?
-                WHERE id = ? AND state_version = ?
+                WHERE id = ? AND tenant_id = ?{run_workspace_clause}
+                  AND state_version = ?
                 """,
-                (error, now, now, run_id, int(run["state_version"])),
+                (error, now, now, run_id, tenant_id)
+                + ((workspace_id,) if workspace_id is not None else ())
+                + (int(run["state_version"]),),
             )
+            if run_cursor.rowcount != 1:
+                raise WorkflowConflictError("run failure lost a race")
             self._event(
                 conn,
                 run_id,
                 "step.failed",
-                {"step_index": step_index, "error": error[:1000]},
+                {
+                    "step_index": step_index,
+                    "error": error[:1000],
+                    "error_class": error_class,
+                    "compensation_skill_id": (
+                        compensation_skill_id or step["compensation_skill_id"]
+                    ),
+                },
             )
+            if compensation_skill_id or step["compensation_skill_id"]:
+                self._event(
+                    conn,
+                    run_id,
+                    "compensation.required",
+                    {
+                        "step_index": step_index,
+                        "skill_id": compensation_skill_id or step["compensation_skill_id"],
+                    },
+                )
             row = conn.execute(
-                "SELECT * FROM workflow_runs WHERE id = ?", (run_id,)
+                "SELECT * FROM workflow_runs WHERE id = ? AND tenant_id = ?"
+                + run_workspace_clause,
+                run_parameters,
             ).fetchone()
         return self._run_from_row(row)
 
@@ -1042,27 +1886,50 @@ class WorkflowStore:
         run_id: str,
         step_index: int,
         requirement: ApprovalRequirement,
+        *,
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
+        scope: Scope | None = None,
     ) -> WorkflowApproval:
         """Persist an approval gate and pause the run before Skill execution."""
         if requirement == "none":
             raise ValueError("none does not require an approval record")
+        tenant_id, workspace_id = self._mutation_scope(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            scope=scope,
+        )
         now = self._now()
+        workspace_clause = " AND r.workspace_id = ?" if workspace_id is not None else ""
+        run_workspace_clause = (
+            " AND workspace_id = ?" if workspace_id is not None else ""
+        )
+        run_parameters: tuple[Any, ...] = (run_id, tenant_id)
+        if workspace_id is not None:
+            run_parameters += (workspace_id,)
         with self._connection(write=True) as conn:
             existing = conn.execute(
-                """
-                SELECT * FROM workflow_approvals
-                WHERE run_id = ? AND step_index = ? AND requirement = ?
-                """,
-                (run_id, step_index, requirement),
+                "SELECT a.* FROM workflow_approvals a "
+                "JOIN workflow_runs r ON r.id = a.run_id "
+                "WHERE a.run_id = ? AND a.step_index = ? AND a.requirement = ?"
+                " AND r.tenant_id = ?" + workspace_clause,
+                (run_id, step_index, requirement, tenant_id)
+                + ((workspace_id,) if workspace_id is not None else ()),
             ).fetchone()
             if existing is not None:
                 return self._approval_from_row(existing)
             run = conn.execute(
-                "SELECT * FROM workflow_runs WHERE id = ?", (run_id,)
+                "SELECT * FROM workflow_runs WHERE id = ? AND tenant_id = ?"
+                + run_workspace_clause,
+                run_parameters,
             ).fetchone()
             step = conn.execute(
-                "SELECT * FROM workflow_steps WHERE run_id = ? AND step_index = ?",
-                (run_id, step_index),
+                "SELECT s.* FROM workflow_steps s "
+                "JOIN workflow_runs r ON r.id = s.run_id "
+                "WHERE s.run_id = ? AND s.step_index = ? AND r.tenant_id = ?"
+                + workspace_clause,
+                (run_id, step_index, tenant_id)
+                + ((workspace_id,) if workspace_id is not None else ()),
             ).fetchone()
             if run is None or step is None:
                 raise KeyError("unknown run or step")
@@ -1075,29 +1942,36 @@ class WorkflowStore:
             conn.execute(
                 """
                 INSERT INTO workflow_approvals(
-                    id, run_id, step_index, requirement, status, created_at
-                ) VALUES (?, ?, ?, ?, 'pending', ?)
+                    id, run_id, step_index, tenant_id, requirement, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'pending', ?)
                 """,
-                (approval_id, run_id, step_index, requirement, now),
+                (approval_id, run_id, step_index, run["tenant_id"], requirement, now),
             )
-            conn.execute(
+            step_cursor = conn.execute(
                 """
                 UPDATE workflow_steps
                 SET status = 'awaiting_approval', state_version = state_version + 1
-                WHERE run_id = ? AND step_index = ?
+                WHERE run_id = ? AND tenant_id = ? AND step_index = ?
                   AND status = 'pending' AND state_version = ?
                 """,
-                (run_id, step_index, int(step["state_version"])),
+                (run_id, tenant_id, step_index, int(step["state_version"])),
             )
-            conn.execute(
-                """
+            if step_cursor.rowcount != 1:
+                raise WorkflowConflictError("approval step transition lost a race")
+            run_cursor = conn.execute(
+                f"""
                 UPDATE workflow_runs
                 SET status = 'awaiting_approval', state_version = state_version + 1,
                     updated_at = ?
-                WHERE id = ? AND state_version = ? AND status IN ('pending', 'running')
+                WHERE id = ? AND tenant_id = ?{run_workspace_clause}
+                  AND state_version = ? AND status IN ('pending', 'running')
                 """,
-                (now, run_id, int(run["state_version"])),
+                (now, run_id, tenant_id)
+                + ((workspace_id,) if workspace_id is not None else ())
+                + (int(run["state_version"]),),
             )
+            if run_cursor.rowcount != 1:
+                raise WorkflowConflictError("approval run transition lost a race")
             self._event(
                 conn,
                 run_id,
@@ -1105,7 +1979,8 @@ class WorkflowStore:
                 {"step_index": step_index, "requirement": requirement},
             )
             row = conn.execute(
-                "SELECT * FROM workflow_approvals WHERE id = ?", (approval_id,)
+                "SELECT * FROM workflow_approvals WHERE id = ? AND tenant_id = ?",
+                (approval_id, tenant_id),
             ).fetchone()
         return self._approval_from_row(row)
 
@@ -1116,9 +1991,16 @@ class WorkflowStore:
         requirement: ApprovalRequirement,
         *,
         workspace_id: str | None = None,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> WorkflowApproval | None:
+        if scope is not None:
+            tenant_id, workspace_id = self._scope_values(scope=scope)
+        tenant_clause = "" if tenant_id is None else " AND r.tenant_id = ?"
         workspace_clause = "" if workspace_id is None else " AND r.workspace_id = ?"
         parameters: tuple[Any, ...] = (run_id, step_index, requirement)
+        if tenant_id is not None:
+            parameters += (tenant_id,)
         if workspace_id is not None:
             parameters += (workspace_id,)
         with self._connection() as conn:
@@ -1126,6 +2008,7 @@ class WorkflowStore:
                 "SELECT a.* FROM workflow_approvals a "
                 "JOIN workflow_runs r ON r.id = a.run_id "
                 "WHERE a.run_id = ? AND a.step_index = ? AND a.requirement = ?"
+                + tenant_clause
                 + workspace_clause,
                 parameters,
             ).fetchone()
@@ -1136,15 +2019,25 @@ class WorkflowStore:
         run_id: str,
         *,
         workspace_id: str | None = None,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> list[WorkflowApproval]:
         """List approval records for a run in step order."""
+        if scope is not None:
+            tenant_id, workspace_id = self._scope_values(scope=scope)
+        tenant_clause = "" if tenant_id is None else " AND r.tenant_id = ?"
         workspace_clause = "" if workspace_id is None else " AND r.workspace_id = ?"
-        parameters = (run_id,) if workspace_id is None else (run_id, workspace_id)
+        parameters: tuple[Any, ...] = (run_id,)
+        if tenant_id is not None:
+            parameters += (tenant_id,)
+        if workspace_id is not None:
+            parameters += (workspace_id,)
         with self._connection() as conn:
             rows = conn.execute(
                 "SELECT a.* FROM workflow_approvals a "
                 "JOIN workflow_runs r ON r.id = a.run_id "
                 "WHERE a.run_id = ?"
+                + tenant_clause
                 + workspace_clause
                 + " ORDER BY a.step_index, a.created_at, a.id",
                 parameters,
@@ -1160,20 +2053,29 @@ class WorkflowStore:
         actor_level: ApprovalRequirement,
         note: str | None = None,
         workspace_id: str | None = None,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> WorkflowApproval:
         """CAS an approval decision and resume or fail the paused run."""
         if decision not in {"approved", "rejected"}:
             raise ValueError("decision must be approved or rejected")
         if not actor.strip():
             raise ValueError("actor is required")
+        if scope is not None:
+            tenant_id, workspace_id = self._scope_values(scope=scope)
+        tenant_clause = "" if tenant_id is None else " AND r.tenant_id = ?"
         now = self._now()
         with self._connection(write=True) as conn:
-            scope_clause = "" if workspace_id is None else " AND r.workspace_id = ?"
-            params = (approval_id,) if workspace_id is None else (approval_id, workspace_id)
+            workspace_clause = "" if workspace_id is None else " AND r.workspace_id = ?"
+            params: tuple[Any, ...] = (approval_id,)
+            if tenant_id is not None:
+                params += (tenant_id,)
+            if workspace_id is not None:
+                params += (workspace_id,)
             approval = conn.execute(
                 "SELECT a.* FROM workflow_approvals a "
                 "JOIN workflow_runs r ON r.id = a.run_id "
-                "WHERE a.id = ?" + scope_clause,
+                "WHERE a.id = ?" + tenant_clause + workspace_clause,
                 params,
             ).fetchone()
             if approval is None:
@@ -1192,9 +2094,17 @@ class WorkflowStore:
                 """
                 UPDATE workflow_approvals
                 SET status = ?, actor = ?, actor_level = ?, note = ?, decided_at = ?
-                WHERE id = ? AND status = 'pending'
+                WHERE id = ? AND tenant_id = ? AND status = 'pending'
                 """,
-                (decision, actor.strip(), actor_level, note, now, approval_id),
+                (
+                    decision,
+                    actor.strip(),
+                    actor_level,
+                    note,
+                    now,
+                    approval_id,
+                    approval["tenant_id"],
+                ),
             )
             if cursor.rowcount != 1:
                 raise WorkflowConflictError("approval decision lost a race")
@@ -1246,12 +2156,30 @@ class WorkflowStore:
                 {"step_index": step_index, "actor": actor.strip()},
             )
             row = conn.execute(
-                "SELECT * FROM workflow_approvals WHERE id = ?", (approval_id,)
+                "SELECT * FROM workflow_approvals WHERE id = ? AND tenant_id = ?",
+                (approval_id, approval["tenant_id"]),
             ).fetchone()
         return self._approval_from_row(row)
 
-    def cancel_run(self, run_id: str, *, expected_version: int) -> WorkflowRun:
-        run = self.get_run(run_id)
+    def cancel_run(
+        self,
+        run_id: str,
+        *,
+        expected_version: int,
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
+        scope: Scope | None = None,
+    ) -> WorkflowRun:
+        tenant_id, workspace_id = self._mutation_scope(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            scope=scope,
+        )
+        run = self.get_run(
+            run_id,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
         if run is None:
             raise KeyError("unknown run")
         if run.status in {"succeeded", "failed", "cancelled"}:
@@ -1261,6 +2189,8 @@ class WorkflowStore:
             expected_status=run.status,
             expected_version=expected_version,
             new_status="cancelled",
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
         )
 
     def count_rows(self, table: str) -> int:

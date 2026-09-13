@@ -62,6 +62,7 @@ class WorkflowSelector:
             definition
             for definition in definitions
             if definition.enabled
+            and definition.tenant_id == context.tenant_id
             and definition.workspace_id == context.workspace_id
             and definition.profile_id == context.profile_id
             and definition_is_allowed(definition, self.capability_allowlist)

@@ -58,6 +58,7 @@ Thumbs.db
 # 环境配置
 .env
 .env.local
+.env.backup
 
 # 测试
 .pytest_cache/

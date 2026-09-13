@@ -19,6 +19,7 @@ from .models import (
     QuotePolicy,
     apply_profile_patch,
 )
+from artpm_agent.tenancy.scope import Scope
 
 
 class ProfileConflictError(RuntimeError):
@@ -28,7 +29,7 @@ class ProfileConflictError(RuntimeError):
 class AgentProfileStore:
     """Persist profile snapshots in the workspace/conversation SQLite database."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
     BUSY_TIMEOUT_MS = 10_000
     MAX_JSON_BYTES = 64 * 1024
 
@@ -125,11 +126,11 @@ class AgentProfileStore:
                 raise RuntimeError(
                     "Agent Profile schema is newer than this application supports"
                 )
-            if current >= 1:
-                return
-            conn.executescript(
-                """
+            if current < 1:
+                conn.executescript(
+                    """
                 CREATE TABLE agent_profiles (
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
                     workspace_id TEXT NOT NULL,
                     profile_id TEXT NOT NULL,
                     revision INTEGER NOT NULL CHECK(revision >= 1),
@@ -143,6 +144,7 @@ class AgentProfileStore:
                 CREATE TABLE agent_profile_proposals (
                     id TEXT PRIMARY KEY,
                     idempotency_key TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
                     workspace_id TEXT NOT NULL,
                     profile_id TEXT NOT NULL,
                     conversation_id TEXT,
@@ -166,6 +168,7 @@ class AgentProfileStore:
 
                 CREATE TABLE agent_profile_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id TEXT NOT NULL DEFAULT 'local',
                     workspace_id TEXT NOT NULL,
                     profile_id TEXT NOT NULL,
                     proposal_id TEXT,
@@ -186,48 +189,117 @@ class AgentProfileStore:
                     );
                 CREATE INDEX idx_agent_profile_events_workspace
                     ON agent_profile_events(workspace_id, profile_id, id);
-                """
-            )
-            conn.execute(
-                """
-                INSERT INTO agent_profile_schema_migrations(version, applied_at)
-                VALUES (1, ?)
-                """,
-                (self._now(),),
-            )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO agent_profile_schema_migrations(version, applied_at)
+                    VALUES (1, ?)
+                    """,
+                    (self._now(),),
+                )
+                current = 1
+            if current < 2:
+                self._migrate_tenant_columns(conn)
+                conn.execute(
+                    """
+                    INSERT INTO agent_profile_schema_migrations(version, applied_at)
+                    VALUES (2, ?)
+                    """,
+                    (self._now(),),
+                )
+
+    @staticmethod
+    def _migrate_tenant_columns(conn: sqlite3.Connection) -> None:
+        for table in (
+            "agent_profiles",
+            "agent_profile_proposals",
+            "agent_profile_events",
+        ):
+            columns = {
+                str(item[1]) for item in conn.execute(f"PRAGMA table_info({table})")
+            }
+            if "tenant_id" not in columns:
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'local'"
+                )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_profiles_tenant "
+            "ON agent_profiles(tenant_id, workspace_id, profile_id, revision DESC)"
+        )
+        conn.execute(
+            "UPDATE agent_profiles SET tenant_id = COALESCE(("
+            "SELECT tenant_id FROM workspaces WHERE workspaces.id = agent_profiles.workspace_id"
+            "), 'local') WHERE tenant_id = 'local'"
+        )
+        conn.execute(
+            "UPDATE agent_profile_proposals SET tenant_id = COALESCE(("
+            "SELECT tenant_id FROM workspaces WHERE workspaces.id = agent_profile_proposals.workspace_id"
+            "), 'local') WHERE tenant_id = 'local'"
+        )
+        conn.execute(
+            "UPDATE agent_profile_events SET tenant_id = COALESCE(("
+            "SELECT tenant_id FROM workspaces WHERE workspaces.id = agent_profile_events.workspace_id"
+            "), 'local') WHERE tenant_id = 'local'"
+        )
+
+    @staticmethod
+    def _scope_values(
+        *,
+        tenant_id: str | None = None,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        scope: Scope | None = None,
+    ) -> tuple[str | None, str]:
+        if scope is not None:
+            if not isinstance(scope, Scope):
+                raise TypeError("scope must be a Scope")
+            if tenant_id not in (None, "", scope.tenant_id):
+                raise ValueError("tenant_id conflicts with scope")
+            if workspace_id not in (DEFAULT_WORKSPACE_ID, scope.workspace_id):
+                raise ValueError("workspace_id conflicts with scope")
+            return scope.tenant_id, scope.workspace_id
+        return tenant_id, workspace_id
 
     @staticmethod
     def _workspace(
         conn: sqlite3.Connection,
         workspace_id: str,
+        tenant_id: str | None = None,
     ) -> sqlite3.Row:
         row = conn.execute(
-            "SELECT id, profile_id FROM workspaces WHERE id = ?",
+            "SELECT id, profile_id, tenant_id FROM workspaces WHERE id = ?",
             (workspace_id,),
         ).fetchone()
         if row is None:
             raise KeyError(f"unknown workspace: {workspace_id}")
+        if tenant_id is not None and row["tenant_id"] not in (None, "", tenant_id):
+            raise ValueError("workspace does not belong to the requested tenant")
         return row
 
     def _ensure_profile(
         self,
         conn: sqlite3.Connection,
         workspace_id: str,
+        tenant_id: str | None = None,
     ) -> AgentProfile:
-        workspace = self._workspace(conn, workspace_id)
+        workspace = self._workspace(conn, workspace_id, tenant_id)
+        resolved_tenant = str(workspace["tenant_id"] or tenant_id or "local")
         profile_id = workspace["profile_id"]
         row = conn.execute(
             """
-            SELECT profile_json FROM agent_profiles
-            WHERE workspace_id = ? AND profile_id = ?
+            SELECT profile_json, tenant_id FROM agent_profiles
+            WHERE tenant_id = ? AND workspace_id = ? AND profile_id = ?
             ORDER BY revision DESC LIMIT 1
             """,
-            (workspace_id, profile_id),
+            (resolved_tenant, workspace_id, profile_id),
         ).fetchone()
         if row is not None:
-            return AgentProfile.model_validate_json(row["profile_json"])
+            return AgentProfile.model_validate_json(row["profile_json"]).model_copy(
+                update={"tenant_id": row["tenant_id"]}
+            )
         now = self._now()
         profile = AgentProfile(
+            tenant_id=resolved_tenant,
             workspace_id=workspace_id,
             profile_id=profile_id,
             revision=1,
@@ -238,10 +310,11 @@ class AgentProfileStore:
         conn.execute(
             """
             INSERT INTO agent_profiles(
-                workspace_id, profile_id, revision, profile_json, created_at
-            ) VALUES (?, ?, 1, ?, ?)
+                tenant_id, workspace_id, profile_id, revision, profile_json, created_at
+            ) VALUES (?, ?, ?, 1, ?, ?)
             """,
             (
+                resolved_tenant,
                 workspace_id,
                 profile_id,
                 self._json(profile.model_dump(mode="json")),
@@ -255,6 +328,7 @@ class AgentProfileStore:
             None,
             "profile.created",
             {"revision": 1},
+            tenant_id=resolved_tenant,
         )
         return profile
 
@@ -266,15 +340,18 @@ class AgentProfileStore:
         proposal_id: str | None,
         event_type: str,
         payload: dict[str, Any] | None = None,
+        *,
+        tenant_id: str = "local",
     ) -> None:
         conn.execute(
             """
             INSERT INTO agent_profile_events(
-                workspace_id, profile_id, proposal_id,
+                tenant_id, workspace_id, profile_id, proposal_id,
                 event_type, payload_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                tenant_id,
                 workspace_id,
                 profile_id,
                 proposal_id,
@@ -287,9 +364,17 @@ class AgentProfileStore:
     def get_effective_profile(
         self,
         workspace_id: str = DEFAULT_WORKSPACE_ID,
+        *,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> AgentProfile:
+        tenant_id, workspace_id = self._scope_values(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            scope=scope,
+        )
         with self._connection(write=True) as conn:
-            return self._ensure_profile(conn, workspace_id)
+            return self._ensure_profile(conn, workspace_id, tenant_id)
 
     @staticmethod
     def _proposal_from_row(row: sqlite3.Row) -> ProfileChangeProposal:
@@ -298,6 +383,7 @@ class AgentProfileStore:
             idempotency_key=row["idempotency_key"],
             workspace_id=row["workspace_id"],
             profile_id=row["profile_id"],
+            tenant_id=row["tenant_id"],
             conversation_id=row["conversation_id"],
             turn_id=row["turn_id"],
             base_revision=int(row["base_revision"]),
@@ -316,6 +402,8 @@ class AgentProfileStore:
         patch: AgentProfilePatch,
         *,
         workspace_id: str = DEFAULT_WORKSPACE_ID,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
         turn_id: str | None = None,
         summary: str = "更新 Workspace Agent Profile",
         idempotency_key: str | None = None,
@@ -328,8 +416,14 @@ class AgentProfileStore:
         idempotency_key = idempotency_key or uuid4().hex
         patch_json = self._json(patch.model_dump(mode="json"))
         now = self._now()
+        tenant_id, workspace_id = self._scope_values(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            scope=scope,
+        )
         with self._connection(write=True) as conn:
-            profile = self._ensure_profile(conn, workspace_id)
+            profile = self._ensure_profile(conn, workspace_id, tenant_id)
+            resolved_tenant = profile.tenant_id
             conversation = conn.execute(
                 """
                 SELECT 1 FROM conversations
@@ -344,9 +438,10 @@ class AgentProfileStore:
             existing = conn.execute(
                 """
                 SELECT * FROM agent_profile_proposals
-                WHERE workspace_id = ? AND profile_id = ? AND idempotency_key = ?
+                WHERE tenant_id = ? AND workspace_id = ? AND profile_id = ?
+                  AND idempotency_key = ?
                 """,
-                (workspace_id, profile.profile_id, idempotency_key),
+                (resolved_tenant, workspace_id, profile.profile_id, idempotency_key),
             ).fetchone()
             if existing is not None:
                 if (
@@ -358,14 +453,15 @@ class AgentProfileStore:
             conn.execute(
                 """
                 INSERT INTO agent_profile_proposals(
-                    id, idempotency_key, workspace_id, profile_id,
+                    id, idempotency_key, tenant_id, workspace_id, profile_id,
                     conversation_id, turn_id, base_revision, status,
                     patch_json, summary, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
                 """,
                 (
                     proposal_id,
                     idempotency_key,
+                    resolved_tenant,
                     workspace_id,
                     profile.profile_id,
                     conversation_id,
@@ -383,6 +479,7 @@ class AgentProfileStore:
                 proposal_id,
                 "proposal.created",
                 {"base_revision": profile.revision},
+                tenant_id=resolved_tenant,
             )
             row = conn.execute(
                 "SELECT * FROM agent_profile_proposals WHERE id = ?",
@@ -390,11 +487,32 @@ class AgentProfileStore:
             ).fetchone()
         return self._proposal_from_row(row)
 
-    def get_proposal(self, proposal_id: str) -> ProfileChangeProposal | None:
+    def get_proposal(
+        self,
+        proposal_id: str,
+        *,
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
+        scope: Scope | None = None,
+    ) -> ProfileChangeProposal | None:
+        if scope is not None:
+            tenant_id, workspace_id = self._scope_values(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id or DEFAULT_WORKSPACE_ID,
+                scope=scope,
+            )
+        clauses = ""
+        params: list[Any] = [proposal_id]
+        if tenant_id is not None:
+            clauses += " AND tenant_id = ?"
+            params.append(tenant_id)
+        if workspace_id is not None:
+            clauses += " AND workspace_id = ?"
+            params.append(workspace_id)
         with self._connection() as conn:
             row = conn.execute(
-                "SELECT * FROM agent_profile_proposals WHERE id = ?",
-                (proposal_id,),
+                "SELECT * FROM agent_profile_proposals WHERE id = ?" + clauses,
+                params,
             ).fetchone()
         return self._proposal_from_row(row) if row is not None else None
 
@@ -402,17 +520,29 @@ class AgentProfileStore:
         self,
         *,
         workspace_id: str = DEFAULT_WORKSPACE_ID,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
         conversation_id: str | None = None,
     ) -> list[ProfileChangeProposal]:
+        tenant_id, workspace_id = self._scope_values(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            scope=scope,
+        )
         conversation_sql = "AND conversation_id = ?" if conversation_id else ""
-        params: list[Any] = [workspace_id]
+        params: list[Any] = [tenant_id, workspace_id]
         if conversation_id:
             params.append(conversation_id)
         with self._connection() as conn:
+            if tenant_id is None:
+                workspace = self._workspace(conn, workspace_id)
+                tenant_id = str(workspace["tenant_id"] or "local")
+            params[0] = tenant_id
             rows = conn.execute(
                 f"""
                 SELECT * FROM agent_profile_proposals
-                WHERE workspace_id = ? AND status = 'pending' {conversation_sql}
+                WHERE tenant_id = ? AND workspace_id = ?
+                  AND status = 'pending' {conversation_sql}
                 ORDER BY created_at DESC, id DESC
                 """,
                 params,
@@ -424,6 +554,9 @@ class AgentProfileStore:
         proposal_id: str,
         *,
         actor: str,
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
+        scope: Scope | None = None,
     ) -> AgentProfile:
         """CAS-confirm a proposal and append one immutable profile revision."""
         if not actor.strip():
@@ -431,27 +564,45 @@ class AgentProfileStore:
         conflict = False
         result: AgentProfile | None = None
         with self._connection(write=True) as conn:
+            if scope is not None:
+                tenant_id, workspace_id = self._scope_values(
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id or DEFAULT_WORKSPACE_ID,
+                    scope=scope,
+                )
+            clauses = ""
+            params: list[Any] = [proposal_id]
+            if tenant_id is not None:
+                clauses += " AND tenant_id = ?"
+                params.append(tenant_id)
+            if workspace_id is not None:
+                clauses += " AND workspace_id = ?"
+                params.append(workspace_id)
             row = conn.execute(
-                "SELECT * FROM agent_profile_proposals WHERE id = ?",
-                (proposal_id,),
+                "SELECT * FROM agent_profile_proposals WHERE id = ?" + clauses,
+                params,
             ).fetchone()
             if row is None:
                 raise KeyError("unknown profile proposal")
             proposal = self._proposal_from_row(row)
-            current = self._ensure_profile(conn, proposal.workspace_id)
+            current = self._ensure_profile(conn, proposal.workspace_id, proposal.tenant_id)
             if proposal.status == "confirmed":
                 revision_row = conn.execute(
                     """
                     SELECT profile_json FROM agent_profiles
-                    WHERE workspace_id = ? AND profile_id = ? AND revision = ?
+                    WHERE tenant_id = ? AND workspace_id = ?
+                      AND profile_id = ? AND revision = ?
                     """,
                     (
+                        proposal.tenant_id,
                         proposal.workspace_id,
                         proposal.profile_id,
                         proposal.applied_revision,
                     ),
                 ).fetchone()
-                return AgentProfile.model_validate_json(revision_row["profile_json"])
+                return AgentProfile.model_validate_json(
+                    revision_row["profile_json"]
+                ).model_copy(update={"tenant_id": proposal.tenant_id})
             if proposal.status != "pending":
                 raise ProfileConflictError(
                     f"proposal cannot be confirmed from {proposal.status}"
@@ -462,9 +613,16 @@ class AgentProfileStore:
                     """
                     UPDATE agent_profile_proposals
                     SET status = 'conflict', actor = ?, decided_at = ?
-                    WHERE id = ? AND status = 'pending'
+                    WHERE id = ? AND tenant_id = ? AND workspace_id = ?
+                      AND status = 'pending'
                     """,
-                    (actor.strip(), now, proposal_id),
+                    (
+                        actor.strip(),
+                        now,
+                        proposal_id,
+                        proposal.tenant_id,
+                        proposal.workspace_id,
+                    ),
                 )
                 self._event(
                     conn,
@@ -476,6 +634,7 @@ class AgentProfileStore:
                         "base_revision": proposal.base_revision,
                         "current_revision": current.revision,
                     },
+                    tenant_id=proposal.tenant_id,
                 )
                 conflict = True
             else:
@@ -488,11 +647,12 @@ class AgentProfileStore:
                 conn.execute(
                     """
                     INSERT INTO agent_profiles(
-                        workspace_id, profile_id, revision,
+                        tenant_id, workspace_id, profile_id, revision,
                         profile_json, created_at
-                    ) VALUES (?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        result.tenant_id,
                         result.workspace_id,
                         result.profile_id,
                         result.revision,
@@ -505,9 +665,17 @@ class AgentProfileStore:
                     UPDATE agent_profile_proposals
                     SET status = 'confirmed', actor = ?,
                         applied_revision = ?, decided_at = ?
-                    WHERE id = ? AND status = 'pending'
+                    WHERE id = ? AND tenant_id = ? AND workspace_id = ?
+                      AND status = 'pending'
                     """,
-                    (actor.strip(), result.revision, now, proposal_id),
+                    (
+                        actor.strip(),
+                        result.revision,
+                        now,
+                        proposal_id,
+                        proposal.tenant_id,
+                        proposal.workspace_id,
+                    ),
                 )
                 if cursor.rowcount != 1:
                     raise ProfileConflictError("proposal confirmation lost a race")
@@ -518,6 +686,7 @@ class AgentProfileStore:
                     proposal_id,
                     "proposal.confirmed",
                     {"applied_revision": result.revision},
+                    tenant_id=proposal.tenant_id,
                 )
         if conflict:
             raise ProfileConflictError("profile changed after the proposal was created")
@@ -528,14 +697,31 @@ class AgentProfileStore:
         proposal_id: str,
         *,
         actor: str,
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
+        scope: Scope | None = None,
     ) -> ProfileChangeProposal:
         if not actor.strip():
             raise ValueError("actor is required")
         now = self._now()
         with self._connection(write=True) as conn:
+            clauses = ""
+            params: list[Any] = [proposal_id]
+            if scope is not None:
+                tenant_id, workspace_id = self._scope_values(
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id or DEFAULT_WORKSPACE_ID,
+                    scope=scope,
+                )
+            if tenant_id is not None:
+                clauses += " AND tenant_id = ?"
+                params.append(tenant_id)
+            if workspace_id is not None:
+                clauses += " AND workspace_id = ?"
+                params.append(workspace_id)
             row = conn.execute(
-                "SELECT * FROM agent_profile_proposals WHERE id = ?",
-                (proposal_id,),
+                "SELECT * FROM agent_profile_proposals WHERE id = ?" + clauses,
+                params,
             ).fetchone()
             if row is None:
                 raise KeyError("unknown profile proposal")
@@ -550,9 +736,16 @@ class AgentProfileStore:
                 """
                 UPDATE agent_profile_proposals
                 SET status = 'rejected', actor = ?, decided_at = ?
-                WHERE id = ? AND status = 'pending'
+                WHERE id = ? AND tenant_id = ? AND workspace_id = ?
+                  AND status = 'pending'
                 """,
-                (actor.strip(), now, proposal_id),
+                (
+                    actor.strip(),
+                    now,
+                    proposal_id,
+                    proposal.tenant_id,
+                    proposal.workspace_id,
+                ),
             )
             if cursor.rowcount != 1:
                 raise ProfileConflictError("proposal rejection lost a race")
@@ -562,24 +755,36 @@ class AgentProfileStore:
                 proposal.profile_id,
                 proposal_id,
                 "proposal.rejected",
+                tenant_id=proposal.tenant_id,
             )
             row = conn.execute(
-                "SELECT * FROM agent_profile_proposals WHERE id = ?",
-                (proposal_id,),
+                "SELECT * FROM agent_profile_proposals WHERE id = ?"
+                " AND tenant_id = ? AND workspace_id = ?",
+                (proposal_id, proposal.tenant_id, proposal.workspace_id),
             ).fetchone()
         return self._proposal_from_row(row)
 
     def list_events(
         self,
         workspace_id: str = DEFAULT_WORKSPACE_ID,
+        *,
+        tenant_id: str | None = None,
+        scope: Scope | None = None,
     ) -> list[dict[str, Any]]:
+        tenant_id, workspace_id = self._scope_values(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            scope=scope,
+        )
         with self._connection() as conn:
+            if tenant_id is None:
+                workspace = self._workspace(conn, workspace_id)
+                tenant_id = str(workspace["tenant_id"] or "local")
+            clauses = "WHERE tenant_id = ? AND workspace_id = ?"
+            params: list[Any] = [tenant_id, workspace_id]
             rows = conn.execute(
-                """
-                SELECT * FROM agent_profile_events
-                WHERE workspace_id = ? ORDER BY id
-                """,
-                (workspace_id,),
+                "SELECT * FROM agent_profile_events " + clauses + " ORDER BY id",
+                params,
             ).fetchall()
         return [
             {

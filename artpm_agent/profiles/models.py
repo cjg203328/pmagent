@@ -108,6 +108,7 @@ class AgentProfile(StrictProfileModel):
 
     workspace_id: Identifier = DEFAULT_WORKSPACE_ID
     profile_id: Identifier = DEFAULT_PROFILE_ID
+    tenant_id: Identifier = "local"
     revision: int = Field(default=1, ge=1)
     identity: AgentIdentity = Field(default_factory=AgentIdentity)
     quote_policy: QuotePolicy = Field(default_factory=QuotePolicy)
@@ -215,6 +216,7 @@ class ProfileChangeProposal(StrictProfileModel):
     idempotency_key: Identifier
     workspace_id: Identifier
     profile_id: Identifier
+    tenant_id: Identifier = "local"
     conversation_id: Identifier | None = None
     turn_id: Identifier | None = None
     base_revision: int = Field(ge=1)
@@ -260,6 +262,7 @@ def apply_profile_patch(
             }
         )
     return AgentProfile(
+        tenant_id=profile.tenant_id,
         workspace_id=profile.workspace_id,
         profile_id=profile.profile_id,
         revision=revision,

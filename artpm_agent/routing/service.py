@@ -29,6 +29,7 @@ class IntentDecision:
     candidates: tuple[str, ...] = ()
     margin: float = 0.0
     clarification_required: bool = False
+    explicit: bool = False
 
     def __post_init__(self) -> None:
         intent = str(self.intent).strip() if self.intent is not None else ""
@@ -54,6 +55,7 @@ class IntentDecision:
         object.__setattr__(self, "candidates", normalized_candidates)
         object.__setattr__(self, "margin", max(0.0, margin))
         object.__setattr__(self, "clarification_required", bool(self.clarification_required))
+        object.__setattr__(self, "explicit", bool(self.explicit))
 
     def as_dict(self) -> dict[str, Any]:
         """Return JSON-safe metadata for context, events, and API responses."""
@@ -65,6 +67,7 @@ class IntentDecision:
             "candidates": list(self.candidates),
             "margin": self.margin,
             "clarification_required": self.clarification_required,
+            "explicit": self.explicit,
         }
 
 
@@ -351,6 +354,19 @@ class IntentRouter:
         self._embedding_min_margin = 0.05
         self._clarification_min_margin = 0.05
 
+    _EXECUTION_CONFIDENCE_FLOORS = {
+        "keyword": 0.80,
+        "embedding": 0.65,
+        "llm": 0.70,
+        "legacy": 0.95,
+    }
+    _EXECUTION_MARGIN_FLOORS = {
+        "keyword": 0.05,
+        "embedding": 0.05,
+        "llm": 0.0,
+        "legacy": 0.0,
+    }
+
     # ── Public detection API ──
 
     def detect(self, user_input: str) -> Optional[str]:
@@ -382,6 +398,11 @@ class IntentRouter:
                 tier="keyword",
                 rankings=keyword_rankings,
                 margin=self._relative_margin(kw_score, second_score),
+                clarification_required=(
+                    len(keyword_rankings) > 1
+                    and self._relative_margin(kw_score, second_score)
+                    < self._clarification_min_margin
+                ),
             )
         else:
             if self._intent_embeddings is None:
@@ -450,6 +471,7 @@ class IntentRouter:
         rankings: list[tuple[str, float]],
         margin: float,
         clarification_required: bool = False,
+        explicit: bool = False,
     ) -> IntentDecision:
         return IntentDecision(
             intent=intent,
@@ -458,6 +480,22 @@ class IntentRouter:
             candidates=tuple(name for name, _score in rankings[:3]),
             margin=margin,
             clarification_required=clarification_required,
+            explicit=explicit,
+        )
+
+    def execution_gate(
+        self,
+        decision: IntentDecision,
+        *,
+        explicit: bool = False,
+    ) -> tuple[bool, str]:
+        """Return whether a decision is safe to enter Skill execution."""
+        return _execution_gate(
+            decision,
+            confidence_floors=self._EXECUTION_CONFIDENCE_FLOORS,
+            margin_floors=self._EXECUTION_MARGIN_FLOORS,
+            clarification_margin=self._clarification_min_margin,
+            explicit=explicit,
         )
 
     @staticmethod
@@ -747,3 +785,48 @@ class IntentRouter:
             return bool(self._config.get("llm.intent_classification_enabled", False))
         except Exception:
             return False
+
+
+def _execution_gate(
+    decision: IntentDecision,
+    *,
+    confidence_floors: Mapping[str, float],
+    margin_floors: Mapping[str, float],
+    clarification_margin: float = 0.05,
+    explicit: bool = False,
+) -> tuple[bool, str]:
+    """Apply the execution gate without performing detection or side effects."""
+
+    if not isinstance(decision, IntentDecision):
+        raise TypeError("decision must be an IntentDecision")
+    if not decision.intent:
+        return False, "missing_intent"
+    is_explicit = explicit or decision.explicit
+    if decision.clarification_required and not is_explicit:
+        return False, "clarification_required"
+    tier = decision.tier.casefold()
+    confidence_floor = confidence_floors.get(tier, confidence_floors["legacy"])
+    margin_floor = margin_floors.get(tier, clarification_margin)
+    if is_explicit:
+        confidence_floor = min(confidence_floor, 0.55)
+        margin_floor = 0.0
+    if decision.confidence < confidence_floor:
+        return False, "low_confidence"
+    if not is_explicit and decision.margin < margin_floor:
+        return False, "low_margin"
+    return True, "allowed"
+
+
+def execution_gate_for_decision(
+    decision: IntentDecision,
+    *,
+    explicit: bool = False,
+) -> tuple[bool, str]:
+    """Use the shared default gate at framework compatibility boundaries."""
+
+    return _execution_gate(
+        decision,
+        confidence_floors=IntentRouter._EXECUTION_CONFIDENCE_FLOORS,
+        margin_floors=IntentRouter._EXECUTION_MARGIN_FLOORS,
+        explicit=explicit,
+    )

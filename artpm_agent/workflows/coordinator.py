@@ -109,14 +109,17 @@ class WorkflowCoordinator:
         capability_allowlist: CapabilityAllowlist | None = None,
         workspace_id: str = "local-default",
         profile_id: str = "local-default",
+        tenant_id: str | None = None,
     ) -> None:
         self.store = store
         self.agent = agent
         self.workspace_id = workspace_id
         self.profile_id = profile_id
+        self.tenant_id = tenant_id or store.tenant_for_workspace(workspace_id)
         store.ensure_builtins(
             workspace_id=self.workspace_id,
             profile_id=self.profile_id,
+            tenant_id=self.tenant_id,
         )
         router = getattr(agent, "router", None)
         execute_skill = getattr(router, "execute_skill", None)
@@ -132,6 +135,7 @@ class WorkflowCoordinator:
             store,
             execute_skill,
             capability_allowlist=capability_allowlist,
+            tenant_id=self.tenant_id,
         )
 
     def create_task_orchestrator(
@@ -303,6 +307,7 @@ class WorkflowCoordinator:
             conversation_id=conversation_id,
             workspace_id=self.workspace_id,
             profile_id=self.profile_id,
+            tenant_id=self.tenant_id,
             explicit_workflow_id=explicit_workflow_id,
             project_status=(
                 str(context_data["project_status"])
@@ -317,6 +322,7 @@ class WorkflowCoordinator:
             self.store.list_definitions(
                 workspace_id=self.workspace_id,
                 profile_id=self.profile_id,
+                tenant_id=self.tenant_id,
                 enabled_only=True,
             ),
         )

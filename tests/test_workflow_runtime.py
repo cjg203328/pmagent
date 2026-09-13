@@ -51,6 +51,21 @@ def custom_workflow(*steps, workflow_id="custom_flow", version=1, trigger=None):
     )
 
 
+def retryable_step(**overrides):
+    values = {
+        "id": "retry",
+        "skill_id": "first_skill",
+        "capability": "test.read",
+        "on_error": "retry",
+        "retryable": True,
+        "idempotent": True,
+        "max_retries": 2,
+        "retry_backoff": "none",
+    }
+    values.update(overrides)
+    return WorkflowStepDefinition(**values)
+
+
 def test_models_are_strict_forbid_extra_and_limit_steps():
     step = WorkflowStepDefinition(
         id="step",
@@ -76,6 +91,26 @@ def test_models_are_strict_forbid_extra_and_limit_steps():
         )
     with pytest.raises(ValidationError):
         custom_workflow(*([step] * 9))
+
+
+def test_retry_contract_requires_explicit_bounded_idempotency():
+    with pytest.raises(ValidationError, match="retryable, idempotent"):
+        WorkflowStepDefinition(
+            id="retry_without_contract",
+            skill_id="first_skill",
+            capability="test.read",
+            on_error="retry",
+            retryable=True,
+            max_retries=1,
+        )
+
+    with pytest.raises(ValidationError, match="retryable and idempotent"):
+        WorkflowStepDefinition(
+            id="bounded_without_contract",
+            skill_id="first_skill",
+            capability="test.read",
+            max_retries=1,
+        )
 
 
 def test_builtin_workflows_are_read_only_and_versioned():
@@ -331,6 +366,57 @@ def test_server_side_effect_policy_cannot_be_disabled_by_definition(tmp_path):
     assert calls[0][1]["idempotency_key"] != "user-controlled"
 
 
+def test_idempotent_side_effect_can_retry_normal_failure_with_fixed_key(tmp_path):
+    _, _, conversation, store = make_runtime(tmp_path)
+    definition = custom_workflow(
+        WorkflowStepDefinition(
+            id="dispatch",
+            skill_id="reminder_bot",
+            capability="reminders.dispatch",
+            side_effect=True,
+            approval="user",
+            on_error="retry",
+            retryable=True,
+            idempotent=True,
+            max_retries=1,
+            retry_backoff="none",
+        ),
+        workflow_id="retry_side_effect",
+    )
+    store.put_definition(definition)
+    calls = []
+
+    def execute(_skill_id, inputs):
+        calls.append(inputs)
+        if len(calls) == 1:
+            raise TimeoutError("dispatch timed out")
+        return {"success": True}
+
+    engine = WorkflowEngine(store, execute, capability_allowlist=ALLOWLIST)
+    waiting = engine.start(
+        definition,
+        conversation["id"],
+        idempotency_key="retry-side-effect",
+    )
+    assert waiting.run.status == "awaiting_approval"
+
+    result = engine.decide_approval(
+        waiting.run.id,
+        0,
+        decision="approved",
+        actor="user",
+        actor_level="user",
+    )
+
+    assert result.run.status == "succeeded"
+    assert len(calls) == 2
+    assert calls[0]["idempotency_key"] == calls[1]["idempotency_key"]
+    assert any(
+        event.event_type == "step.retry_scheduled"
+        for event in store.list_events(result.run.id)
+    )
+
+
 def test_missing_input_and_skill_failure_are_persisted_without_retry(tmp_path):
     _, _, conversation, store = make_runtime(tmp_path)
     definition = custom_workflow(
@@ -360,3 +446,184 @@ def test_missing_input_and_skill_failure_are_persisted_without_retry(tmp_path):
     assert calls == []
     assert engine.resume(failed.run.id).run.status == "failed"
     assert calls == []
+
+
+def test_transient_failure_retries_only_with_an_explicit_idempotency_contract(tmp_path):
+    _, _, conversation, store = make_runtime(tmp_path)
+    definition = custom_workflow(retryable_step(), workflow_id="retry_once")
+    store.put_definition(definition)
+    calls = []
+
+    def execute(_skill_id, _inputs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise TimeoutError("upstream timed out")
+        return {"success": True, "value": "ok"}
+
+    engine = WorkflowEngine(store, execute, capability_allowlist=ALLOWLIST)
+    result = engine.start(
+        definition,
+        conversation["id"],
+        idempotency_key="retry-once",
+    )
+
+    assert result.run.status == "succeeded"
+    assert len(calls) == 2
+    assert result.steps[0].attempt == 2
+    assert any(
+        event.event_type == "step.retry_scheduled"
+        for event in store.list_events(result.run.id)
+    )
+
+
+def test_retry_limit_persists_terminal_failure(tmp_path):
+    _, _, conversation, store = make_runtime(tmp_path)
+    definition = custom_workflow(
+        retryable_step(max_retries=1),
+        workflow_id="retry-limit",
+    )
+    store.put_definition(definition)
+    calls = []
+    engine = WorkflowEngine(
+        store,
+        lambda _skill_id, _inputs: calls.append(1)
+        or (_ for _ in ()).throw(ConnectionError("network unavailable")),
+        capability_allowlist=ALLOWLIST,
+    )
+
+    result = engine.start(
+        definition,
+        conversation["id"],
+        idempotency_key="retry-limit",
+    )
+
+    assert result.run.status == "failed"
+    assert len(calls) == 2
+    assert result.steps[0].attempt == 2
+    assert result.steps[0].error_class == "network"
+
+
+def test_backoff_pauses_before_retry(tmp_path):
+    _, _, conversation, store = make_runtime(tmp_path)
+    definition = custom_workflow(
+        retryable_step(retry_backoff="fixed", retry_backoff_seconds=60),
+        workflow_id="retry-delay",
+    )
+    store.put_definition(definition)
+    calls = []
+    engine = WorkflowEngine(
+        store,
+        lambda _skill_id, _inputs: calls.append(1)
+        or (_ for _ in ()).throw(TimeoutError("timeout")),
+        capability_allowlist=ALLOWLIST,
+    )
+
+    result = engine.start(
+        definition,
+        conversation["id"],
+        idempotency_key="retry-delay",
+    )
+
+    assert result.run.status == "pending"
+    assert result.steps[0].next_retry_at is not None
+    assert len(calls) == 1
+    assert engine.resume(result.run.id).run.status == "pending"
+    assert len(calls) == 1
+
+
+def test_stale_safe_step_is_recovered_but_stale_side_effect_is_not_replayed(tmp_path):
+    _, _, conversation, store = make_runtime(tmp_path)
+    safe = custom_workflow(
+        retryable_step(),
+        workflow_id="stale-safe",
+    )
+    store.put_definition(safe)
+    safe_run = store.create_run(safe, conversation["id"], idempotency_key="stale-safe")
+    store.claim_step(safe_run.id, 0, {}, tenant_id="local")
+    safe_calls = []
+    safe_engine = WorkflowEngine(
+        store,
+        lambda _skill_id, _inputs: safe_calls.append(1)
+        or {"success": True},
+        capability_allowlist=ALLOWLIST,
+        stale_after_seconds=0,
+    )
+
+    safe_result = safe_engine.resume(safe_run.id)
+
+    assert safe_result.run.status == "succeeded"
+    assert safe_calls == [1]
+    assert any(
+        event.event_type == "step.recovered"
+        for event in store.list_events(safe_run.id)
+    )
+
+    side_effect = custom_workflow(
+        WorkflowStepDefinition(
+            id="send",
+            skill_id="reminder_bot",
+            capability="test.read",
+            side_effect=True,
+            compensation_skill_id="undo_send",
+        ),
+        workflow_id="stale-side-effect",
+    )
+    store.put_definition(side_effect)
+    side_run = store.create_run(
+        side_effect,
+        conversation["id"],
+        idempotency_key="stale-side-effect",
+    )
+    store.claim_step(side_run.id, 0, {}, tenant_id="local")
+    side_calls = []
+    side_engine = WorkflowEngine(
+        store,
+        lambda _skill_id, _inputs: side_calls.append(1) or {"success": True},
+        capability_allowlist={"reminder_bot": {"test.read"}},
+        stale_after_seconds=0,
+    )
+
+    side_result = side_engine.resume(side_run.id)
+
+    assert side_result.run.status == "failed"
+    assert side_calls == []
+    assert any(
+        event.event_type == "compensation.required"
+        for event in store.list_events(side_run.id)
+    )
+
+
+def test_stale_policy_side_effect_is_not_replayed_when_definition_omits_flag(tmp_path):
+    _, _, conversation, store = make_runtime(tmp_path)
+    definition = custom_workflow(
+        WorkflowStepDefinition(
+            id="dispatch",
+            skill_id="reminder_bot",
+            capability="reminders.dispatch",
+            idempotent=True,
+            on_error="retry",
+            retryable=True,
+            max_retries=2,
+            compensation_skill_id="undo_send",
+        ),
+        workflow_id="stale-policy-side-effect",
+    )
+    store.put_definition(definition)
+    run = store.create_run(
+        definition,
+        conversation["id"],
+        idempotency_key="stale-policy-side-effect",
+    )
+    store.claim_step(run.id, 0, {}, tenant_id="local")
+
+    recovered = store.recover_stale_run(
+        run.id,
+        stale_after_seconds=0,
+        tenant_id="local",
+    )
+
+    assert recovered.status == "failed"
+    assert any(
+        event.event_type == "compensation.required"
+        for event in store.list_events(run.id)
+    )

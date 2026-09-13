@@ -34,6 +34,14 @@ NonEmptyText = Annotated[
 
 ApprovalRequirement = Literal["none", "user", "admin"]
 ApprovalStatus = Literal["pending", "approved", "rejected"]
+RetryErrorClass = Literal[
+    "transient",
+    "timeout",
+    "network",
+    "rate_limit",
+    "unknown",
+]
+RetryBackoff = Literal["none", "fixed", "exponential"]
 RunStatus = Literal[
     "pending",
     "awaiting_approval",
@@ -105,7 +113,33 @@ class WorkflowStepDefinition(StrictModel):
     output_key: Identifier | None = None
     side_effect: bool = False
     approval: ApprovalRequirement = "none"
-    on_error: Literal["stop"] = "stop"
+    on_error: Literal["stop", "retry"] = "stop"
+    retryable: bool = False
+    idempotent: bool = False
+    max_retries: int = Field(default=0, ge=0, le=5)
+    retry_backoff: RetryBackoff = "exponential"
+    retry_backoff_seconds: float = Field(default=0.0, ge=0, le=300)
+    retry_on: tuple[RetryErrorClass, ...] = (
+        "transient",
+        "timeout",
+        "network",
+        "rate_limit",
+    )
+    compensation_skill_id: Identifier | None = None
+
+    @model_validator(mode="after")
+    def validate_retry_contract(self) -> WorkflowStepDefinition:
+        if self.on_error == "retry" and (
+            not self.retryable or not self.idempotent or self.max_retries < 1
+        ):
+            raise ValueError(
+                "retrying steps must be explicitly retryable, idempotent, and bounded"
+            )
+        if self.max_retries > 0 and (not self.retryable or not self.idempotent):
+            raise ValueError(
+                "max_retries requires explicit retryable and idempotent declarations"
+            )
+        return self
 
     @property
     def resolved_output_key(self) -> str:
@@ -121,6 +155,7 @@ class WorkflowDefinition(StrictModel):
     description: NonEmptyText
     workspace_id: Identifier = DEFAULT_WORKSPACE_ID
     profile_id: Identifier = DEFAULT_PROFILE_ID
+    tenant_id: Identifier = "local"
     source: Literal["builtin", "custom"]
     read_only: bool
     enabled: bool = True
@@ -151,6 +186,7 @@ class WorkflowOverride(StrictModel):
     workflow_version: int = Field(ge=1)
     workspace_id: Identifier = DEFAULT_WORKSPACE_ID
     profile_id: Identifier = DEFAULT_PROFILE_ID
+    tenant_id: Identifier = "local"
     enabled: bool | None = None
     priority: int | None = Field(default=None, ge=-1000, le=1000)
 
@@ -175,6 +211,7 @@ class WorkflowSelectionContext(StrictModel):
     conversation_id: Identifier
     workspace_id: Identifier = DEFAULT_WORKSPACE_ID
     profile_id: Identifier = DEFAULT_PROFILE_ID
+    tenant_id: Identifier = "local"
     explicit_workflow_id: Identifier | None = None
     explicit_workflow_version: int | None = Field(default=None, ge=1)
     project_status: NonEmptyText | None = None
@@ -209,6 +246,7 @@ class WorkflowRun(StrictModel):
     workflow_version: int = Field(ge=1)
     workspace_id: Identifier
     profile_id: Identifier
+    tenant_id: Identifier = "local"
     conversation_id: Identifier
     turn_id: Identifier | None = None
     status: RunStatus
@@ -229,6 +267,7 @@ class WorkflowStepRun(StrictModel):
     """Persisted execution state for one workflow step."""
 
     run_id: Identifier
+    tenant_id: Identifier = "local"
     step_index: int = Field(ge=0, lt=MAX_WORKFLOW_STEPS)
     step_id: Identifier
     skill_id: Identifier
@@ -238,6 +277,9 @@ class WorkflowStepRun(StrictModel):
     input_data: dict[str, JsonValue] = Field(default_factory=dict)
     output_data: dict[str, JsonValue] = Field(default_factory=dict)
     error: str | None = None
+    error_class: RetryErrorClass | None = None
+    next_retry_at: str | None = None
+    compensation_skill_id: Identifier | None = None
     started_at: str | None = None
     completed_at: str | None = None
 
@@ -247,6 +289,7 @@ class WorkflowApproval(StrictModel):
 
     id: Identifier
     run_id: Identifier
+    tenant_id: Identifier = "local"
     step_index: int = Field(ge=0, lt=MAX_WORKFLOW_STEPS)
     requirement: ApprovalRequirement
     status: ApprovalStatus
@@ -262,6 +305,7 @@ class WorkflowEvent(StrictModel):
 
     id: int = Field(ge=1)
     run_id: Identifier
+    tenant_id: Identifier = "local"
     event_type: Identifier
     payload: dict[str, JsonValue] = Field(default_factory=dict)
     created_at: str

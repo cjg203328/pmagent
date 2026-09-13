@@ -71,6 +71,13 @@ class HarnessRuntime(Protocol):
 
     def detect_intent_decision(self, user_input: str) -> IntentDecision: ...
 
+    def intent_execution_gate(
+        self,
+        decision: IntentDecision,
+        *,
+        explicit: bool = False,
+    ) -> tuple[bool, str]: ...
+
     def skill_names(self) -> set[str]: ...
 
     def skill_metadata(self, skill_name: str) -> Mapping[str, Any]: ...
@@ -144,6 +151,16 @@ class BaseHarnessRuntime:
     def detect_intent_decision(self, user_input: str) -> IntentDecision:
         result = self.detect_intent(user_input)
         return _coerce_intent_decision(result, tier="legacy")
+
+    def intent_execution_gate(
+        self,
+        decision: IntentDecision,
+        *,
+        explicit: bool = False,
+    ) -> tuple[bool, str]:
+        from artpm_agent.routing.service import execution_gate_for_decision
+
+        return execution_gate_for_decision(decision, explicit=explicit)
 
     def skill_names(self) -> set[str]:
         return set()
@@ -296,6 +313,23 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
         if callable(method):
             return _coerce_intent_decision(method(user_input), tier="legacy")
         return _coerce_intent_decision(self.detect_intent(user_input), tier="legacy")
+
+    def intent_execution_gate(
+        self,
+        decision: IntentDecision,
+        *,
+        explicit: bool = False,
+    ) -> tuple[bool, str]:
+        method = getattr(self.target, "_intent_router", None)
+        if callable(method):
+            try:
+                router = method()
+                gate = getattr(router, "execution_gate", None)
+                if callable(gate):
+                    return gate(decision, explicit=explicit)
+            except Exception:
+                pass
+        return super().intent_execution_gate(decision, explicit=explicit)
 
     def skill_names(self) -> set[str]:
         skills = getattr(self._router, "skills", {})
@@ -516,6 +550,7 @@ def _coerce_intent_decision(value: Any, *, tier: str = "legacy") -> IntentDecisi
                 candidates=tuple(candidates or ()),
                 margin=value.get("margin", 0.0),
                 clarification_required=value.get("clarification_required", False),
+                explicit=value.get("explicit", False),
             )
         except (TypeError, ValueError):
             return IntentDecision(tier="invalid", clarification_required=True)

@@ -91,6 +91,7 @@ def permission_preflight(
     conversation_id = _text(context.get("conversation_id"), "unknown-conversation")
     turn_id = _text(context.get("turn_id"), "unknown-turn")
     workspace_id = _text(context.get("workspace_id"), "local-default")
+    tenant_id = _text(context.get("tenant_id"), "local")
     agent_id = _text(context.get("agent_id"), "artpm-agent")
     call_id = _text(getattr(call, "id", None), "unknown-call")
 
@@ -109,7 +110,8 @@ def permission_preflight(
     idempotency_key = f"tool:{conversation_id}:{turn_id}:{call_id}:{tool.name}"
     try:
         request = store.create_request(
-            workspace_id=workspace_id,
+        workspace_id=workspace_id,
+        tenant_id=tenant_id,
             conversation_id=conversation_id,
             turn_id=turn_id,
             agent_id=agent_id,

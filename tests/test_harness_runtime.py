@@ -13,6 +13,7 @@ from artpm_agent.harness import (
     TurnScope,
     run_turn,
 )
+from artpm_agent.routing.service import IntentDecision
 from artpm_agent.security import PermissionStore
 from artpm_agent.tenancy import TenantContext
 from artpm_agent.memory.conversation_store import ConversationStore
@@ -119,6 +120,58 @@ def test_intent_detection_is_cached_for_one_turn() -> None:
     assert detections == 1
     assert context.intent_checked is True
     assert context.intent == "external_lookup"
+
+
+def test_low_confidence_intent_is_clarified_before_skill_execution() -> None:
+    class AmbiguousRuntime(ExternalSkillRuntime):
+        def detect_intent_decision(self, _user_input: str) -> IntentDecision:
+            return IntentDecision(
+                intent="external_lookup",
+                confidence=0.40,
+                tier="embedding",
+                candidates=("external_lookup", "other_skill"),
+                margin=0.01,
+            )
+
+    runtime = AmbiguousRuntime()
+    context = TurnContext(
+        turn_id="intent-low-confidence",
+        conversation_id="conversation-1",
+        user_input="do something",
+        runtime=runtime,
+    )
+
+    result = run_turn(context)
+
+    assert result.handled_by == "intent_clarification"
+    assert result.metadata["intent_execution"]["reason"] == "low_confidence"
+    assert runtime.calls == []
+
+
+def test_explicit_intent_can_use_lower_gate_without_bypassing_decision() -> None:
+    class ExplicitRuntime(ExternalSkillRuntime):
+        def detect_intent_decision(self, _user_input: str) -> IntentDecision:
+            return IntentDecision(
+                intent="external_lookup",
+                confidence=0.60,
+                tier="embedding",
+                candidates=("external_lookup", "other_skill"),
+                margin=0.0,
+                explicit=True,
+            )
+
+    runtime = ExplicitRuntime()
+    context = TurnContext(
+        turn_id="intent-explicit",
+        conversation_id="conversation-1",
+        user_input="run external lookup",
+        runtime=runtime,
+    )
+
+    result = run_turn(context)
+
+    assert result.handled_by == "skill:external_lookup"
+    assert runtime.calls == [("external_lookup", {"query": "run external lookup"})]
 
 
 def test_turn_and_skill_events_are_persisted_in_order(tmp_path) -> None:

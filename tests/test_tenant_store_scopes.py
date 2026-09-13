@@ -11,7 +11,8 @@ from artpm_agent.security.permission_store import (
     PermissionStore,
 )
 from artpm_agent.tenancy import TenantContext, WorkspaceStoreGuard
-from artpm_agent.workflows.store import WorkflowStore
+from artpm_agent.workflows.defaults import get_builtin_workflows
+from artpm_agent.workflows.store import WorkflowConflictError, WorkflowStore
 
 
 def _context(workspace_id: str) -> TenantContext:
@@ -95,3 +96,98 @@ def test_workflow_run_children_are_hidden_from_other_workspace(tmp_path):
     assert store.list_approvals(run.id, workspace_id="workspace-b") == []
     scoped = WorkspaceStoreGuard(store, TenantContext.local())
     assert scoped.call("get_run", run.id).workspace_id == "local-default"
+
+
+def test_workflow_mutations_are_bound_to_the_request_tenant(tmp_path):
+    db_path = tmp_path / "workflow-mutations.db"
+    conversations = ConversationStore(db_path)
+    now = conversations._utc_now()  # noqa: SLF001
+    with conversations._connection(write=True) as connection:  # noqa: SLF001
+        connection.execute(
+            """
+            INSERT INTO workspaces(
+                id, profile_id, name, tenant_id, settings_json, created_at, updated_at
+            ) VALUES ('workspace-a', 'local-default', 'Workspace A', 'tenant-a', '{}', ?, ?)
+            """,
+            (now, now),
+        )
+    conversation = conversations.create_conversation(
+        "Scoped workflow", workspace_id="workspace-a"
+    )
+    store = WorkflowStore(db_path, install_builtins=False)
+    definition = get_builtin_workflows()[0].model_copy(
+        update={"tenant_id": "tenant-a", "workspace_id": "workspace-a"}
+    )
+    store.put_definition(definition)
+    run = store.create_run(
+        definition,
+        conversation["id"],
+        input_data={"quote_amount": 100, "cost": 80},
+        idempotency_key="tenant-mutation-test",
+    )
+
+    with pytest.raises(WorkflowConflictError):
+        store.transition_run(
+            run.id,
+            expected_status="pending",
+            expected_version=0,
+            new_status="cancelled",
+            tenant_id="tenant-b",
+        )
+    with pytest.raises(KeyError):
+        store.claim_step(
+            run.id,
+            0,
+            {"quote_amount": 100},
+            tenant_id="tenant-b",
+        )
+    with pytest.raises(KeyError):
+        store.request_approval(
+            run.id,
+            0,
+            "user",
+            tenant_id="tenant-b",
+        )
+    with pytest.raises(KeyError):
+        store.cancel_run(
+            run.id,
+            expected_version=run.state_version,
+            tenant_id="tenant-b",
+        )
+
+    claimed_run, _ = store.claim_step(
+        run.id,
+        0,
+        {"quote_amount": 100, "cost": 80},
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+    )
+    with pytest.raises(KeyError):
+        store.complete_step(
+            run.id,
+            0,
+            "quote",
+            {"success": True},
+            tenant_id="tenant-b",
+        )
+    with pytest.raises(KeyError):
+        store.fail_step(
+            run.id,
+            0,
+            "should not mutate",
+            tenant_id="tenant-b",
+        )
+
+    current = store.get_run(
+        run.id,
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+    )
+    assert current is not None
+    assert current.status == claimed_run.status == "running"
+    assert current.state_version == claimed_run.state_version
+    assert store.list_events(
+        run.id,
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+    )[-1].event_type == "step.started"

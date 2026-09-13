@@ -73,7 +73,7 @@ def test_schema_is_idempotent_in_conversation_db_and_installs_builtins(tmp_path)
         "workflow_approvals",
         "workflow_events",
     }.issubset(tables)
-    assert versions == [(1,)]
+    assert versions == [(1,), (2,), (3,)]
     assert journal_mode.lower() == "wal"
     assert {item.id for item in reopened.list_definitions()} == {
         "quote_assessment",
@@ -134,6 +134,30 @@ def test_override_changes_resolution_without_mutating_definition_snapshot(tmp_pa
     )
     assert run.definition_snapshot.enabled is False
     assert run.definition_snapshot.priority == 99
+
+
+def test_clear_override_restores_definition_defaults_in_scoped_workspace(tmp_path):
+    _, _, _, store = make_stores(tmp_path)
+    definition = store.get_definition("quote_assessment")
+    store.set_override(
+        WorkflowOverride(
+            workflow_id=definition.id,
+            workflow_version=definition.version,
+            enabled=False,
+            priority=99,
+        )
+    )
+
+    assert store.get_definition(definition.id).enabled is False
+    assert store.clear_override(
+        definition.id,
+        version=definition.version,
+        workspace_id="local-default",
+        profile_id="local-default",
+    ) is True
+    restored = store.get_definition(definition.id)
+    assert restored.enabled is True
+    assert restored.priority == definition.priority
 
 
 def test_run_snapshot_and_idempotency_key_are_persisted(tmp_path):

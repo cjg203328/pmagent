@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from inspect import Parameter, signature
 from threading import RLock
 from typing import Any, Callable, List, Optional
@@ -178,6 +179,142 @@ def _record_confidence(record: Any) -> float | None:
     return None
 
 
+_REJECTED_MEMORY_STATUSES = frozenset(
+    {"draft", "pending", "proposed", "rejected", "revoked", "conflict", "superseded"}
+)
+_APPROVED_MEMORY_STATUSES = frozenset(
+    {"active", "accepted", "approved", "published", "complete"}
+)
+
+
+def _record_containers(record: Any) -> tuple[Mapping[str, Any], ...]:
+    """Return common record layers without trusting nested arbitrary objects."""
+
+    if not isinstance(record, Mapping):
+        return ()
+    containers: list[Mapping[str, Any]] = [record]
+    for key in ("metadata", "data", "source"):
+        value = record.get(key)
+        if isinstance(value, Mapping):
+            containers.append(value)
+    return tuple(containers)
+
+
+def _record_field(record: Any, *names: str) -> Any:
+    for container in _record_containers(record):
+        for name in names:
+            value = container.get(name)
+            if value not in (None, ""):
+                return value
+    return None
+
+
+def _record_status(record: Any) -> str:
+    value = _record_field(
+        record,
+        "approval_status",
+        "knowledge_status",
+        "consolidation_status",
+        "status",
+    )
+    return str(value or "").strip().casefold()
+
+
+def _record_expired(record: Any) -> bool:
+    value = _record_field(record, "expires_at", "expiry", "valid_until")
+    if value in (None, ""):
+        return False
+    try:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            expiry = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        else:
+            text = str(value).strip().replace("Z", "+00:00")
+            expiry = datetime.fromisoformat(text)
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+        return expiry <= datetime.now(timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        # An invalid expiry is not a reason to silently trust the record.
+        return True
+
+
+def _record_provenance(
+    record: Any,
+    *,
+    default_kind: str,
+    default_source: str,
+) -> dict[str, Any]:
+    """Normalize trust metadata for prompt rendering and audit inspection."""
+
+    status = _record_status(record)
+    confidence = _record_confidence(record)
+    source_type = _record_field(record, "source_type", "type")
+    source_id = _record_field(record, "source_id", "id")
+    source_uri = _record_field(record, "source_uri", "uri")
+    version = _record_field(record, "current_version", "version")
+    updated_at = _record_field(record, "updated_at", "created_at")
+    if isinstance(version, Mapping):
+        version = version.get("version")
+    if status in _REJECTED_MEMORY_STATUSES:
+        kind = "skip"
+    elif default_kind == "rule" and status in {"accepted", "approved"}:
+        kind = "rule"
+    elif status in _APPROVED_MEMORY_STATUSES and confidence is not None:
+        kind = default_kind
+    elif status in _APPROVED_MEMORY_STATUSES and default_kind in {"fact", "rule"}:
+        kind = default_kind
+    else:
+        # Legacy records without an explicit approval/quality contract remain
+        # visible for compatibility, but are never presented as established
+        # facts.
+        kind = "pending"
+    return {
+        "kind": kind,
+        "status": status or "unverified",
+        "confidence": confidence,
+        "source_type": str(source_type or default_source),
+        "source_id": str(source_id or ""),
+        "source_uri": str(source_uri or ""),
+        "version": version,
+        "updated_at": str(updated_at or ""),
+    }
+
+
+def _evidence_text(
+    record: Any,
+    text: str,
+    *,
+    title: str = "",
+    default_kind: str = "fact",
+    default_source: str = "memory",
+) -> str:
+    """Render memory as evidence, never as an unqualified instruction."""
+
+    provenance = _record_provenance(
+        record,
+        default_kind=default_kind,
+        default_source=default_source,
+    )
+    labels = {"fact": "事实", "rule": "规则", "pending": "待确认"}
+    label = labels.get(provenance["kind"], "待确认")
+    source = provenance["source_type"]
+    if provenance["source_id"]:
+        source = f"{source}/{provenance['source_id']}"
+    details = [f"来源:{source}"]
+    if provenance["version"] not in (None, ""):
+        details.append(f"版本:{provenance['version']}")
+    if provenance["updated_at"]:
+        details.append(f"时间:{provenance['updated_at']}")
+    if provenance["confidence"] is not None:
+        details.append(f"置信度:{provenance['confidence']:.2f}")
+    prefix = f"[{label}][{'；'.join(details)}]"
+    clean_title = str(title or "").strip()
+    clean_text = str(text or "").strip()
+    if clean_title:
+        clean_text = f"{clean_title}：{clean_text}"
+    return f"{prefix} {clean_text}".strip()
+
+
 def _passes_confidence(record: Any, floor: float) -> bool:
     confidence = _record_confidence(record)
     return confidence is None or confidence >= floor
@@ -249,7 +386,12 @@ def retrieve_memory_context(
                 buckets,
                 seen,
                 "TencentDB Agent Memory",
-                context,
+                _evidence_text(
+                    {"source_type": "tencentdb"},
+                    context,
+                    default_kind="pending",
+                    default_source="tencentdb",
+                ),
                 max_chars=min(max_total_chars, max_snippet_chars * top_k),
             )
         except Exception:  # noqa: BLE001 - recall must never break a turn
@@ -283,14 +425,27 @@ def retrieve_memory_context(
             for r in results[:top_k]:
                 if not _passes_confidence(r, confidence_floor):
                     continue
+                provenance = _record_provenance(
+                    r,
+                    default_kind="fact",
+                    default_source="long_term_memory",
+                )
+                if provenance["kind"] == "skip" or _record_expired(r):
+                    continue
                 text = _extract_text(r)
                 title = _extract_title(r)
+                evidence = _evidence_text(
+                    r,
+                    text,
+                    title=title,
+                    default_kind="fact",
+                    default_source="long_term_memory",
+                )
                 _append_snippet(
                     buckets,
                     seen,
                     "长期记忆",
-                    text,
-                    title=title,
+                    evidence,
                     max_chars=max_snippet_chars,
                 )
         except Exception:  # noqa: BLE001 - retrieval must never break a turn
@@ -315,12 +470,24 @@ def retrieve_memory_context(
                 )
                 for rule in active_rules or []:
                     if isinstance(rule, Mapping):
+                        provenance = _record_provenance(
+                            rule,
+                            default_kind="rule",
+                            default_source="workspace_rule",
+                        )
+                        if provenance["kind"] == "skip" or _record_expired(rule):
+                            continue
                         _append_snippet(
                             buckets,
                             seen,
                             "工作区规则",
-                            str(rule.get("statement") or ""),
-                            title="已采纳规则",
+                            _evidence_text(
+                                rule,
+                                str(rule.get("statement") or ""),
+                                title="已采纳规则",
+                                default_kind="rule",
+                                default_source="workspace_rule",
+                            ),
                             max_chars=max_snippet_chars,
                         )
             except Exception:  # noqa: BLE001 - rule recall is best effort
@@ -364,14 +531,26 @@ def retrieve_memory_context(
             for r in results[:top_k]:
                 if not _passes_confidence(r, confidence_floor):
                     continue
+                provenance = _record_provenance(
+                    r,
+                    default_kind="fact",
+                    default_source="workspace_knowledge",
+                )
+                if provenance["kind"] == "skip" or _record_expired(r):
+                    continue
                 text = _extract_text(r)
                 title = _extract_title(r)
                 _append_snippet(
                     buckets,
                     seen,
                     "工作区资料",
-                    text,
-                    title=title,
+                    _evidence_text(
+                        r,
+                        text,
+                        title=title,
+                        default_kind="fact",
+                        default_source="workspace_knowledge",
+                    ),
                     max_chars=max_snippet_chars,
                 )
 
@@ -611,7 +790,14 @@ def format_feedback_context(
         content = str(e.content or "").strip()
         if not content:
             continue
-        lines.append(f"- [{label}]{scope} {content[:300].rstrip()}")
+        entry_id = str(getattr(e, "id", "") or "")[:48]
+        provenance = "来源:用户反馈"
+        if entry_id:
+            provenance += f"/{entry_id}"
+        lines.append(
+            f"- [{label}][偏好][{provenance}][状态:已记录]{scope} "
+            f"{content[:300].rstrip()}"
+        )
     if not lines:
         return ""
     return ("【用户偏好与纠正】\n" + "\n".join(lines))[:max_chars].rstrip()
@@ -626,11 +812,20 @@ def format_strategy_context(
     """Render active evolution strategies as an instructional block."""
     if not strategies:
         return ""
-    lines = [
-        f"- {str(s.rule_text or '').strip()[:300].rstrip()}"
-        for s in strategies[:max_entries]
-        if str(s.rule_text or "").strip()
-    ]
+    lines = []
+    for strategy in strategies[:max_entries]:
+        rule_text = str(strategy.rule_text or "").strip()
+        if not rule_text:
+            continue
+        source = str(getattr(strategy, "source", "reflection") or "reflection").strip()
+        strategy_id = str(getattr(strategy, "id", "") or "")[:48]
+        provenance = f"来源:{source}"
+        if strategy_id:
+            provenance += f"/{strategy_id}"
+        lines.append(
+            f"- [建议][{provenance}][状态:已采纳] "
+            f"{rule_text[:300].rstrip()}"
+        )
     if not lines:
         return ""
     return ("【优化策略（来自经验复盘）】\n" + "\n".join(lines))[:max_chars].rstrip()

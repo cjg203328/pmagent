@@ -31,6 +31,7 @@ from artpm_agent.runtime.request_services import TurnServiceBundle
 from artpm_agent.runtime.turn_events import recorder_for_turn
 from artpm_agent.utils.chat_intent import is_local_fast_intent
 from artpm_agent.routing.service import IntentDecision
+from artpm_agent.tenancy.scope import Scope
 
 logger = logging.getLogger(__name__)
 
@@ -78,26 +79,24 @@ def _classify_turn_error(error: BaseException) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class TurnScope:
+class TurnScope(Scope):
     """Trusted request scope carried alongside the conversational payload."""
 
     tenant_id: str = "local"
     workspace_id: str = "local-default"
-    actor_id: str = "local-user"
-    actor_role: str = "user"
+    @property
+    def actor_id(self) -> str:
+        return self.principal_id
 
     @classmethod
     def from_tenant_context(cls, context: Any) -> "TurnScope":
-        roles = getattr(context, "roles", frozenset())
-        actor_role = "admin" if "admin" in roles else "user"
+        scope = Scope.from_context(context)
         return cls(
-            tenant_id=str(getattr(context, "tenant_id", "local")),
-            workspace_id=str(
-                getattr(context, "workspace_id", "local-default")
-                or "local-default"
-            ),
-            actor_id=str(getattr(context, "principal_id", "local-user")),
-            actor_role=actor_role,
+            tenant_id=scope.tenant_id,
+            workspace_id=scope.workspace_id,
+            principal_id=scope.principal_id,
+            actor_role=scope.actor_role,
+            request_id=scope.request_id,
         )
 
     @classmethod
@@ -112,8 +111,9 @@ class TurnScope:
             return cls(
                 tenant_id=scope.tenant_id,
                 workspace_id=scope.workspace_id,
-                actor_id=scope.actor_id,
+                principal_id=scope.principal_id,
                 actor_role=actor_role,
+                request_id=values.get("request_id"),
             )
         return cls(
             tenant_id=str(
@@ -126,13 +126,14 @@ class TurnScope:
                 or getattr(tenant_context, "workspace_id", None)
                 or "local-default"
             ),
-            actor_id=str(
+            principal_id=str(
                 values.get("actor_id")
                 or values.get("principal_id")
                 or getattr(tenant_context, "principal_id", None)
                 or "local-user"
             ),
             actor_role=str(values.get("actor_role") or "user"),
+            request_id=values.get("request_id"),
         )
 
 

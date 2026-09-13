@@ -8,6 +8,7 @@ from .context import (
     tenant_context_from_host,
 )
 from .scoped_store import UnsafeStoreOperation, WorkspaceStoreGuard
+from .scope import Scope, ScopeError, resolve_scope
 
 __all__ = [
     "TenantContext",
@@ -16,5 +17,8 @@ __all__ = [
     "UnsafeStoreOperation",
     "WorkspaceAccessDenied",
     "WorkspaceStoreGuard",
+    "Scope",
+    "ScopeError",
+    "resolve_scope",
     "tenant_context_from_host",
 ]
