@@ -3,7 +3,9 @@ Memory Manager - Unified interface for short-term and long-term memory
 """
 from hashlib import sha256
 import json
+from math import isfinite
 import re
+from collections.abc import Mapping
 from typing import Dict, Any, List, Optional
 
 from artpm_agent.memory.embeddings import DeterministicEmbeddingProvider, EmbeddingProvider
@@ -22,6 +24,8 @@ class MemoryManager:
 
     DEFAULT_TENANT_ID = "local"
     DEFAULT_WORKSPACE_ID = "local-default"
+    MAX_RETRIEVE_QUERY_CHARS = 4_000
+    MAX_RETRIEVE_TOP_K = 100
 
     def __init__(
         self,
@@ -192,6 +196,23 @@ class MemoryManager:
         Returns:
             List of matching documents
         """
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query must be a non-empty string")
+        query = query.strip()
+        if len(query) > self.MAX_RETRIEVE_QUERY_CHARS:
+            raise ValueError(
+                "query cannot exceed "
+                f"{self.MAX_RETRIEVE_QUERY_CHARS} characters"
+            )
+        if (
+            isinstance(top_k, bool)
+            or not isinstance(top_k, int)
+            or not 1 <= top_k <= self.MAX_RETRIEVE_TOP_K
+        ):
+            raise ValueError(
+                "top_k must be between 1 and "
+                f"{self.MAX_RETRIEVE_TOP_K}"
+            )
         tenant_scope, scope, scoped_filters = self._resolve_retrieval_scope(
             filters,
             workspace_id=workspace_id,
@@ -229,12 +250,26 @@ class MemoryManager:
                 # against stale/malformed metadata and keeps compatibility
                 # backends from returning an unscoped row.
                 filtered = []
-                for r in vector_results:
+                for r in vector_results or []:
+                    if not isinstance(r, Mapping):
+                        continue
                     meta = r.get("metadata") or {}
+                    if not isinstance(meta, Mapping):
+                        continue
                     if all(
                         meta.get(key) == value
                         for key, value in scoped_filters.items()
                     ):
+                        raw_score = r.get("score")
+                        if isinstance(raw_score, bool):
+                            continue
+                        try:
+                            if not isfinite(float(raw_score)):
+                                continue
+                        except (TypeError, ValueError, OverflowError):
+                            continue
+                        if not r.get("id"):
+                            continue
                         filtered.append(r)
                 vector_results = filtered
 

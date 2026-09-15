@@ -418,6 +418,8 @@ class VectorStore:
                     f"Expected vector dimension {self.dimension}, got {len(vector)}"
                 )
         matrix = np.asarray(vectors, dtype=np.float32)
+        if not np.isfinite(matrix).all():
+            raise ValueError("vector values must be finite numbers")
         norms = np.linalg.norm(matrix, axis=1, keepdims=True)
         np.divide(matrix, norms, out=matrix, where=norms > 0)
         return np.ascontiguousarray(matrix, dtype=np.float32)

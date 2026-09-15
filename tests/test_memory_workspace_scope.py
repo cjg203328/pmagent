@@ -44,6 +44,45 @@ def test_memory_manager_retrieval_is_scoped_to_workspace(tmp_path):
     assert "workspace-b confidential" not in context
 
 
+def test_memory_manager_rejects_empty_query_and_invalid_top_k(tmp_path):
+    memory = MemoryManager(str(tmp_path / "memory.db"), str(tmp_path / "vectors"))
+
+    for query in ("", "   ", None, 123):
+        with pytest.raises(ValueError, match="query"):
+            memory.retrieve(query, top_k=1)  # type: ignore[arg-type]
+
+    for top_k in (0, -1, True, 1.5, "2", None):
+        with pytest.raises(ValueError, match="top_k"):
+            memory.retrieve("anything", top_k=top_k)  # type: ignore[arg-type]
+
+
+def test_memory_manager_drops_malformed_vector_rows_before_hydration(tmp_path):
+    memory = MemoryManager(str(tmp_path / "memory.db"), str(tmp_path / "vectors"))
+    memory.save_document({"id": "valid", "raw_text": "valid memory"})
+
+    class DirtyVectorStore:
+        available = True
+
+        def search(self, *_args, **_kwargs):
+            return [
+                {"id": "missing", "score": float("nan"), "metadata": {}},
+                {"id": "missing", "score": 0.8, "metadata": []},
+                {
+                    "id": "valid",
+                    "score": 0.7,
+                    "metadata": {
+                        "tenant_id": "local",
+                        "workspace_id": "local-default",
+                    },
+                },
+            ]
+
+    memory.vector_db = DirtyVectorStore()
+    results = memory.retrieve("valid", top_k=3)
+
+    assert [item["id"] for item in results] == ["valid"]
+
+
 def test_memory_manager_migrates_legacy_document_table_to_local_workspace(tmp_path):
     database_path = tmp_path / "legacy-memory.db"
     with sqlite3.connect(database_path) as connection:

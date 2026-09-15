@@ -10,6 +10,62 @@
 - **FastAPI REST 网关**：供外部系统集成，默认监听 `127.0.0.1:8765`。
 - **CLI**：使用 `python main.py` 或安装后的 `artpm-agent` 命令。
 
+## 应用场景
+
+ArtPM Agent 面向游戏美术外包团队、制作人和项目管理者，适合把报价、资源资料、任务
+执行和交付复盘放在同一个工作区中管理。典型工作流包括：
+
+- 读取报价单、合同、需求文档和本地素材，生成结构化成本、风险和交付建议。
+- 按工作区检索项目规则、历史资料和复盘经验，再进入对话、任务分配或工作流审批。
+- 通过 Streamlit 处理人工操作，通过 REST/SSE 接入内部系统，通过嵌入端点接入受信任网站。
+- 在没有 LLM、Redis、Qdrant 或外部 MCP 时保持离线可用；启用外部服务后只增加增强能力。
+
+## 技术栈与职责
+
+| 层 | 当前实现 | 主要路径 |
+| --- | --- | --- |
+| UI | Streamlit 1.59.x | `artpm_agent/app.py`、`artpm_agent/views/` |
+| API | FastAPI 0.135.x、Uvicorn 0.51.x | `artpm_agent/api/` |
+| Agent 主链 | Harness `run_turn()`、typed events、审批边界 | `artpm_agent/harness/`、`artpm_agent/runtime/` |
+| 路由与技能 | 关键词/语义路由、业务技能、MCP 适配 | `artpm_agent/routing/`、`artpm_agent/skills/` |
+| Provider | OpenAI、Anthropic、DeepSeek、智谱及自定义网关 | `artpm_agent/providers/` |
+| 业务与记忆 | SQLite/SQLAlchemy/Alembic、会话库、记忆库、知识库 | `artpm_agent/database/`、`artpm_agent/memory/`、`alembic/` |
+| 检索 | 本地 FAISS，按需 Qdrant；字面检索兜底 | `artpm_agent/retrieval/`、`artpm_agent/memory/*vector*` |
+| 可选基础设施 | Redis、OpenTelemetry、Sentry、MinerU、OCR、LiveKit、MCP | `pyproject.toml` optional extras、`artpm_agent/core/`、`artpm_agent/voice/` |
+| 生产部署 | Docker Compose、Caddy、PostgreSQL/RLS、Qdrant、Redis | `docker-compose.yml`、`Caddyfile`、`deploy/` |
+
+根目录的 `agent.py`、`app.py`、`config.py`、`main.py` 和 `health_check.py` 是兼容 shim；
+新增业务逻辑应进入 `artpm_agent/`，不要在兼容层继续扩展旧实现。
+
+## 结构树与数据边界
+
+```text
+pmagent/
+├── artpm_agent/       唯一正式源码包
+│   ├── api/            REST 网关、身份和请求模型
+│   ├── harness/        回合编排、记忆注入、技能/模型 handler
+│   ├── runtime/        AgentLoop、事件总线、工具、计划和子 Agent
+│   ├── retrieval/      workspace-scoped RetrievalPlan/Hit 适配层
+│   ├── memory/         Conversation/Session/Knowledge/Vector stores
+│   ├── providers/      模型路由、故障转移、结构化输出和缓存
+│   ├── skills/         业务技能及路由
+│   ├── tenancy/security/ 租户上下文、权限和审批
+│   └── views/ui_*.py   Streamlit 页面与 UI 兼容层
+├── tests/              单元、契约、慢速 UI 和显式集成测试
+├── benchmarks/         离线性能门禁
+├── scripts/            启动、迁移、质量检查和维护脚本
+├── alembic/            PostgreSQL/业务数据库迁移
+├── deploy/             Compose、PostgreSQL 和可观测部署资源
+├── docs/               当前架构、运维、指南和归档文档
+├── data/               运行时数据库、附件和向量索引（不提交）
+└── logs/               运行时日志（不提交）
+```
+
+数据边界保持明确：`ConversationStore` 只负责用户可见会话消息和工作区元数据；
+`SessionStore/EventBus` 负责回合及工具事件；`MemoryManager` 负责长期记忆；
+`WorkspaceKnowledgeStore` 负责工作区资源、版本和已接受规则；FAISS/Qdrant 只是派生索引；
+Redis 只是缓存加速层。所有 API、缓存和向量查询都必须带可信 `tenant_id/workspace_id`。
+
 ## 运行方式
 
 | 场景 | 安装方式 | 入口 | 默认依赖 |
@@ -60,7 +116,7 @@ Copy-Item .env.example .env
 # 检查配置。无 LLM Key 也可以通过离线检查
 python -m artpm_agent.tools.check_config
 
-# 同时启动 FastAPI 和 Streamlit
+# 同时启动 FastAPI 和 Streamlit；启动器会等待 /ready
 python start_with_checks.py
 ```
 
@@ -68,6 +124,7 @@ python start_with_checks.py
 
 - UI：`http://127.0.0.1:8501`
 - API 健康检查：`http://127.0.0.1:8765/health`
+- API 就绪检查：`http://127.0.0.1:8765/ready`
 - API 文档：`http://127.0.0.1:8765/docs`
 
 只启动离线 UI：
@@ -95,7 +152,8 @@ python -m artpm_agent.tools.check_config
 python start_with_checks.py
 ```
 
-也可以使用 `./start.sh`。脚本会启动相同的本地 UI + API 栈。
+也可以使用 `./start.sh`。脚本会启动相同的本地 UI + API 栈；Linux/macOS 脚本在检测到
+FastAPI 缺失时会自动安装 `.[api]`，Windows `start.bat` 会提示使用同一安装命令。
 
 ## 配置
 
@@ -137,6 +195,9 @@ VECTOR_DB_PATH=./data/vector_store
 Compose 对外只暴露 Caddy 的 `80/443`；Streamlit `8501` 和 REST API `8765` 只在容器网络内
 供 Caddy 访问。Grafana 仅绑定宿主机 `127.0.0.1:3000`。完整部署说明见
 [`docs/operations/DEPLOY.md`](docs/operations/DEPLOY.md)。
+
+Compose 会强制 `ARTPM_DEPLOYMENT_MODE=server`，生产 UI 不提供桌面文件选择器；数据目录只能
+通过 `DATA_ROOT` 和宿主挂载管理。不要把该值改回 `local` 来绕过服务端边界。
 
 首次部署前，在 `.env` 中设置以下必填值：
 
@@ -182,6 +243,7 @@ python -m artpm_agent.api
 - `GET /v1/workspaces`
 - `POST /v1/workspaces`（需要 admin）
 - `POST /v1/search`（工作区范围检索）
+- 可选语音：`GET /v1/voice/status`、`POST /v1/voice/sessions`
 - 权限审批：`/v1/permissions/*`
 - 工作流及运行记录：`/v1/workflows/*`、`/v1/workflow-runs/*`
 
@@ -194,6 +256,20 @@ python -m artpm_agent.api
 `session` 和 `chat` 四个端点；发布令牌只在服务端交换，浏览器只拿短期来源绑定会话令牌。
 配置、限流和 `frame-ancestors` 约束见
 [`docs/guides/WORKSPACE_RETRIEVAL_API.md`](docs/guides/WORKSPACE_RETRIEVAL_API.md)。
+
+最小配置示例：
+
+```dotenv
+ARTPM_EMBED_ENABLED=1
+ARTPM_EMBED_SECRET=replace-with-a-long-random-secret
+ARTPM_EMBED_CHANNEL=default
+ARTPM_EMBED_PUBLISH_TOKEN=server-only-publish-token
+ARTPM_EMBED_WORKSPACE_ID=local-default
+ARTPM_EMBED_ALLOWED_ORIGINS=https://app.example.com
+```
+
+发布令牌只能由服务端调用 `exchange`，不能写入浏览器脚本。Origin 必须是精确的
+`http(s)` origin；不要使用 `*`、凭据、路径或把长期密钥放入前端。
 
 ## 可选能力
 
@@ -295,6 +371,9 @@ python scripts/coverage_core.py
 - [`docs/operations/CURRENT_STATUS.md`](docs/operations/CURRENT_STATUS.md)：当前架构、质量门禁和外部验证状态。
 - [`docs/operations/QUALITY_GATES.md`](docs/operations/QUALITY_GATES.md)：测试分层和质量命令。
 - [`docs/operations/DEPENDENCY_PROFILES.md`](docs/operations/DEPENDENCY_PROFILES.md)：本地、API、开发和生产依赖。
+- [`docs/architecture/CURRENT.md`](docs/architecture/CURRENT.md)：当前 Harness、工作区、检索和嵌入契约。
+- [`docs/architecture/STORAGE_CONTRACT.md`](docs/architecture/STORAGE_CONTRACT.md)：业务库、会话库、知识库、向量和缓存边界。
+- [`docs/architecture/OPTIMIZATION_STRATEGY.md`](docs/architecture/OPTIMIZATION_STRATEGY.md)：大模块拆分、兼容层和风险治理策略。
 - [`docs/architecture/PROJECT_STRUCTURE.md`](docs/architecture/PROJECT_STRUCTURE.md)：仓库目录、入口和数据目录说明。
 - [`docs/architecture/EXECUTION_MAP.md`](docs/architecture/EXECUTION_MAP.md)：请求编排、上下文、记忆、工具和记录的执行映射。
 - [`docs/guides/QUICK_REFERENCE.md`](docs/guides/QUICK_REFERENCE.md)：常用模块和命令速查。
@@ -305,6 +384,8 @@ python scripts/coverage_core.py
 - [`docs/integrations/LOCAL_MCP_GUIDE.md`](docs/integrations/LOCAL_MCP_GUIDE.md)：本地 MCP 工具。
 - [`docs/operations/PRODUCTION_MODERNIZATION.md`](docs/operations/PRODUCTION_MODERNIZATION.md)：生产现代化边界。
 - [`docs/operations/TROUBLESHOOTING.md`](docs/operations/TROUBLESHOOTING.md)：故障排查。
+
+`docs/archive/` 下的文档仅用于历史追溯，不作为当前架构或配置契约。
 
 ## 故障排查
 

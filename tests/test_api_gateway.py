@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import math
 import sqlite3
 from types import SimpleNamespace
 
@@ -121,6 +122,19 @@ def test_health_and_identity_contract(gateway):
         headers={"x-workspace-id": "bad workspace", "x-actor-id": "alice"},
     )
     assert malformed.status_code == 401
+
+
+def test_health_normalizes_non_finite_diagnostics(gateway):
+    client, services, _ = gateway
+    services.health_handler = lambda: {
+        "status": "ok",
+        "checks": {"latency": {"seconds": math.inf}},
+    }
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["checks"]["latency"]["seconds"] is None
 
 
 def test_insecure_header_identity_is_local_only_and_rejects_forwarded_requests():
@@ -311,6 +325,27 @@ def test_failed_chat_outcome_is_structured_and_does_not_leak_provider_error(gate
     assert "secret provider" not in str(messages[-1]["metadata"])
 
 
+def test_chat_normalizes_non_finite_provider_metadata(gateway):
+    client, services, _ = gateway
+    services.chat_handler = lambda _command: ChatOutcome(
+        response="ok",
+        metadata={"nan": math.nan, "positive_inf": math.inf, "negative_inf": -math.inf},
+    )
+
+    response = client.post(
+        "/v1/chat",
+        headers=_headers(),
+        json={"message": "finite response"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["metadata"] == {
+        "nan": None,
+        "positive_inf": None,
+        "negative_inf": None,
+    }
+
+
 def test_chat_handler_exception_persists_a_safe_error_callback(gateway):
     client, services, _ = gateway
 
@@ -383,6 +418,31 @@ def test_cors_wildcard_is_rejected(monkeypatch, gateway):
     _, services, _ = gateway
     monkeypatch.setenv("ARTPM_CORS_ORIGINS", "*")
     with pytest.raises(RuntimeError, match="explicit origins"):
+        create_app(services)
+
+
+def test_cors_origins_normalize_browser_equivalent_forms(monkeypatch, gateway):
+    _, services, _ = gateway
+    monkeypatch.setenv("ARTPM_CORS_ORIGINS", "HTTPS://EXAMPLE.COM:443/")
+    client = TestClient(create_app(services))
+
+    preflight = client.options(
+        "/v1/chat",
+        headers={
+            "Origin": "https://example.com",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert preflight.status_code == 200
+    assert preflight.headers["access-control-allow-origin"] == "https://example.com"
+
+
+def test_cors_origins_reject_invalid_values(monkeypatch, gateway):
+    _, services, _ = gateway
+    monkeypatch.setenv("ARTPM_CORS_ORIGINS", "https://user:secret@example.com")
+
+    with pytest.raises(RuntimeError, match=r"valid http\(s\) origins"):
         create_app(services)
 
 

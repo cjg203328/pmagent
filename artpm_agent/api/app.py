@@ -14,6 +14,7 @@ from dataclasses import asdict, is_dataclass
 import inspect
 import json
 import logging
+import math
 import os
 import sqlite3
 from typing import Any, Callable
@@ -79,12 +80,26 @@ API_VERSION = "v1"
 def _cors_origins() -> list[str]:
     """Return an explicit CORS allowlist for browser-to-gateway deployments."""
     configured = os.getenv("ARTPM_CORS_ORIGINS", "")
-    origins = [item.strip().rstrip("/") for item in configured.split(",") if item.strip()]
-    if origins:
-        if "*" in origins:
-            raise RuntimeError("ARTPM_CORS_ORIGINS must list explicit origins; '*' is not allowed")
-        return origins
-    return ["http://127.0.0.1:8501", "http://localhost:8501"]
+    raw_origins = [item.strip() for item in configured.split(",") if item.strip()]
+    if not raw_origins:
+        return ["http://127.0.0.1:8501", "http://localhost:8501"]
+    if "*" in raw_origins:
+        raise RuntimeError("ARTPM_CORS_ORIGINS must list explicit origins; '*' is not allowed")
+
+    origins: list[str] = []
+    for value in raw_origins:
+        try:
+            # Browser Origin headers omit default ports and never contain a
+            # trailing slash. Reuse the embed boundary's canonical parser so
+            # CORS and embed allowlists accept the same equivalent forms.
+            normalized = _origin(value)
+        except EmbedError as error:
+            raise RuntimeError(
+                "ARTPM_CORS_ORIGINS must contain valid http(s) origins"
+            ) from error
+        if normalized not in origins:
+            origins.append(normalized)
+    return origins
 
 
 class GatewayError(Exception):
@@ -121,8 +136,13 @@ def _json_safe(value: Any, *, depth: int = 0) -> Any:
 
     if depth > 16:
         return "[depth limited]"
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, (str, int, bool)):
         return value
+    if isinstance(value, float):
+        # Starlette's JSONResponse uses allow_nan=False. Provider telemetry
+        # can still contain NaN/Infinity, so normalize those values before
+        # they turn an otherwise valid response into a serialization failure.
+        return value if math.isfinite(value) else None
     if isinstance(value, Mapping):
         return {str(k): _json_safe(v, depth=depth + 1) for k, v in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):
@@ -639,7 +659,11 @@ def create_app(
             status_code = 200 if result["ready"] else 503
         else:
             status_code = 200 if result.get("status") in {"ok", "degraded"} else 503
-        return JSONResponse(status_code=status_code, content=result, headers={"x-request-id": _request_id(request)})
+        return JSONResponse(
+            status_code=status_code,
+            content=_json_safe(result),
+            headers={"x-request-id": _request_id(request)},
+        )
 
     @app.get("/health", tags=["system"])
     def health(request: Request):
@@ -876,7 +900,7 @@ def create_app(
         metadata = _json_safe(outcome.metadata)
         return JSONResponse(
             status_code=202 if outcome.awaiting_approval else (200 if outcome.success else 502),
-            content={
+            content=_json_safe({
                 "conversation_id": conversation["id"],
                 "turn_id": turn_id,
                 "response": outcome.response or "请求未返回有效内容。",
@@ -885,7 +909,7 @@ def create_app(
                 "handled_by": outcome.handled_by,
                 "metadata": metadata,
                 "artifacts": _json_safe(outcome.artifacts),
-            },
+            }),
             headers={**gateway.response_headers(configured_channel), "x-request-id": _request_id(request)},
         )
 
@@ -1148,7 +1172,7 @@ def create_app(
             }
         return JSONResponse(
             status_code=status_code,
-            content=response_body,
+            content=_json_safe(response_body),
             headers={"x-request-id": _request_id(request)},
         )
 

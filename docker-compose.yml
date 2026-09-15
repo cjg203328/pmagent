@@ -34,6 +34,8 @@ services:
       # 数据根目录：所有库与缓存都派生自此（见 artpm_agent.config.resolve_data_root）
       - DATA_ROOT=/app/data
       - ARTPM_LOG_DIR=/app/logs
+      # Container deployments must not expose desktop-only folder pickers.
+      - ARTPM_DEPLOYMENT_MODE=server
       - STREAMLIT_SERVER_HEADLESS=true
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
       # The UI probes the API over the Compose network. Browser/API traffic is
@@ -91,6 +93,7 @@ services:
       - ARTPM_API_HOST=0.0.0.0
       - ARTPM_API_PORT=8765
       - ARTPM_ENV=production
+      - ARTPM_DEPLOYMENT_MODE=server
       - ARTPM_GATEWAY_SHARED_SECRET=${ARTPM_GATEWAY_SHARED_SECRET:?Set ARTPM_GATEWAY_SHARED_SECRET in .env before deploying}
       - ARTPM_CORS_ORIGINS=${ARTPM_CORS_ORIGINS:-}
       - REDIS_URL=redis://redis:6379/0

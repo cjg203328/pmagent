@@ -18,6 +18,7 @@
 ```bash
 # 1) 准备环境变量（API Key 等），参考 .env.example
 cp .env.example .env
+# Compose 会固定使用服务端部署模式，禁止桌面文件选择器；无需手动改写此值。
 #   编辑 .env，至少填一个 LLM 提供商 Key
 
 # 2)（可选）指定对外域名；不填则默认 localhost（本机 HTTPS 测试用）
@@ -50,6 +51,10 @@ docker compose logs -f            # 看全部服务日志
 数据落在宿主 `./data` 与 `./logs`，**重启 / 重建镜像都不丢**知识库、对话历史与缓存；
 Caddy 证书与配置落在具名卷 `caddy-data` / `caddy-config`，续期状态同样持久化；
 Redis 数据落在 `redis-data` 卷（AOF 持久化）。
+
+Compose 会对 `artpm-agent` 和 `artpm-api` 显式注入
+`ARTPM_DEPLOYMENT_MODE=server`。该值不能改回 `local`：服务端模式隐藏桌面文件选择器，
+数据目录只能通过 `DATA_ROOT` 和宿主挂载管理，避免把容器外部路径暴露给浏览器会话。
 
 ## 身份验证（basicauth，强制开启，无默认凭据）
 

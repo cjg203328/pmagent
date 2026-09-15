@@ -478,6 +478,42 @@ def test_excluding_current_chat_fetches_extra_candidates_before_top_k(tmp_path):
     assert [item.source_conversation for item in results] == ["other-chat"]
 
 
+def test_cross_session_retrieval_bounds_legacy_backend_rows(tmp_path):
+    from artpm_agent.memory.cross_session_memory import CrossSessionMemory
+
+    class LegacyStore:
+        MAX_SEARCH_LIMIT = 100
+
+        def search(self, *_args, **kwargs):
+            assert kwargs["max_text_chars"] >= 100
+            return [
+                None,
+                {"id": "bad-score", "text": "ignored", "confidence": "NaN"},
+                {"id": "long", "text": "x" * 1000, "confidence": 0.9},
+                {"id": "short", "text": "ok", "confidence": 0.8},
+            ]
+
+    memory = CrossSessionMemory(
+        LegacyStore(), max_injection_chars=100, confidence_floor=0.1
+    )
+    results = memory.retrieve("query", top_k=2, max_chars=20)
+
+    assert [item.id for item in results] == ["long"]
+    assert results[0].content == "x" * 20
+
+
+def test_cross_session_retrieval_rejects_empty_and_invalid_bounds(tmp_path):
+    from artpm_agent.memory.cross_session_memory import CrossSessionMemory
+    from artpm_agent.memory.workspace_knowledge_store import WorkspaceKnowledgeStore
+
+    memory = CrossSessionMemory(
+        WorkspaceKnowledgeStore(tmp_path / "kb.db", enable_vector_search=False)
+    )
+    assert memory.retrieve("", top_k=1) == []
+    assert memory.retrieve("query", top_k=-1) == []
+    assert memory.retrieve("query", max_chars=-1) == []
+
+
 def test_conversation_compression_persists_to_the_selected_workspace():
     from artpm_agent.memory.conversation_compressor import ConversationCompressor
 

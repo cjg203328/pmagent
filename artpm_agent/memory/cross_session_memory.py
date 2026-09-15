@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import json
 import logging
+from math import isfinite
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -87,6 +89,30 @@ class CrossSessionMemory:
         max_injection_chars: int = DEFAULT_MAX_INJECTION_CHARS,
         confidence_floor: float = DEFAULT_CONFIDENCE_FLOOR,
     ):
+        if (
+            isinstance(retrieve_top_k, bool)
+            or not isinstance(retrieve_top_k, int)
+            or not 1 <= retrieve_top_k <= 100
+        ):
+            raise ValueError("retrieve_top_k must be between 1 and 100")
+        if (
+            isinstance(max_injection_chars, bool)
+            or not isinstance(max_injection_chars, int)
+            or not 1 <= max_injection_chars <= 100_000
+        ):
+            raise ValueError(
+                "max_injection_chars must be between 1 and 100000"
+            )
+        if isinstance(confidence_floor, bool) or not isinstance(
+            confidence_floor, (int, float)
+        ):
+            raise ValueError("confidence_floor must be between 0 and 1")
+        try:
+            confidence_floor = float(confidence_floor)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("confidence_floor must be between 0 and 1") from error
+        if not isfinite(confidence_floor) or not 0.0 <= confidence_floor <= 1.0:
+            raise ValueError("confidence_floor must be between 0 and 1")
         self.store = knowledge_store
         self.retrieve_top_k = retrieve_top_k
         self.max_injection_chars = max_injection_chars
@@ -264,8 +290,23 @@ class CrossSessionMemory:
         Returns:
             相关 MemoryItem 列表（按相关性排序）
         """
-        top_k = top_k or self.retrieve_top_k
-        max_chars = max_chars or self.max_injection_chars
+        if not isinstance(query, str) or not query.strip():
+            return []
+        query = query.strip()
+        if len(query) > 4_000:
+            return []
+        if isinstance(top_k, bool) or not isinstance(top_k, int):
+            return []
+        if top_k == 0:
+            top_k = self.retrieve_top_k
+        elif not 1 <= top_k <= 100:
+            return []
+        if isinstance(max_chars, bool) or not isinstance(max_chars, int):
+            return []
+        if max_chars == 0:
+            max_chars = self.max_injection_chars
+        elif not 1 <= max_chars <= 100_000:
+            return []
 
         resource_types = (
             [self.TYPE_MAP.get(t, t) for t in memory_types]
@@ -273,7 +314,13 @@ class CrossSessionMemory:
         )
         candidate_limit = top_k
         if exclude_conversation:
-            max_search_limit = int(getattr(self.store, "MAX_SEARCH_LIMIT", 100))
+            try:
+                max_search_limit = int(
+                    getattr(self.store, "MAX_SEARCH_LIMIT", 100)
+                )
+            except (TypeError, ValueError, OverflowError):
+                max_search_limit = 100
+            max_search_limit = max(1, min(max_search_limit, 100))
             candidate_limit = min(max_search_limit, max(top_k * 4, top_k + 4))
 
         try:
@@ -284,7 +331,10 @@ class CrossSessionMemory:
                 limit=candidate_limit,
                 resource_types=resource_types,
                 include_rules=False,
-                max_text_chars=max_chars,
+                # WorkspaceKnowledgeStore requires at least 100 characters,
+                # while this compatibility layer allows smaller injection
+                # budgets. Fetch the minimum accepted excerpt and trim below.
+                max_text_chars=max(100, max_chars),
                 use_confidence=True,
                 confidence_floor=self.confidence_floor,
             )
@@ -293,13 +343,19 @@ class CrossSessionMemory:
             seen_ids: set = set()
             total_chars = 0
 
-            for r in results:
-                rid = r.get("id", "")
+            for r in results or []:
+                if not isinstance(r, Mapping):
+                    continue
+                rid = str(r.get("id") or "").strip()
+                if not rid:
+                    continue
                 if rid in seen_ids:
                     continue
 
                 src_conv = ""
-                version = r.get("version") or {}
+                version = r.get("version")
+                if not isinstance(version, Mapping):
+                    version = {}
                 struct = r.get("structured_data") or version.get(
                     "structured_data"
                 ) or {}
@@ -315,8 +371,24 @@ class CrossSessionMemory:
                 if exclude_conversation and src_conv == exclude_conversation:
                     continue
 
-                text = r.get("text") or r.get("searchable_text") or ""
-                mtype = r.get("resource_type", "fact")
+                text = str(r.get("text") or r.get("searchable_text") or "")
+                text = text[:max_chars]
+                if not text:
+                    continue
+                mtype = str(r.get("resource_type") or "fact")
+
+                raw_confidence = r.get("confidence", 1.0)
+                if isinstance(raw_confidence, bool):
+                    continue
+                try:
+                    confidence = float(raw_confidence)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if not isfinite(confidence):
+                    continue
+                metadata = r.get("metadata")
+                if not isinstance(metadata, Mapping):
+                    metadata = {}
 
                 # 字符预算控制
                 if total_chars + len(text) > max_chars and items:
@@ -328,8 +400,8 @@ class CrossSessionMemory:
                     content=text,
                     source_conversation=src_conv,
                     source_type="memory",
-                    confidence=float(r.get("confidence", 1.0)),
-                    metadata=r.get("metadata", {}),
+                    confidence=confidence,
+                    metadata=dict(metadata),
                 )
                 items.append(item)
                 seen_ids.add(rid)

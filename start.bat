@@ -23,7 +23,7 @@ if not defined PYTHON_CMD (
 "%PYTHON_CMD%" -c "import streamlit, fastapi, uvicorn" >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] The selected Python environment is missing runtime dependencies.
-    echo         Run: "%PYTHON_CMD%" -m pip install -e .
+    echo         Run: "%PYTHON_CMD%" -m pip install -e ".[api]"
     pause
     exit /b 1
 )

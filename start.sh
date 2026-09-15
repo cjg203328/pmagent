@@ -15,7 +15,7 @@ fi
 
 if ! "$PYTHON_BIN" -c "import streamlit, fastapi, uvicorn" >/dev/null 2>&1; then
     echo "Installing runtime dependencies..."
-    "$PYTHON_BIN" -m pip install -e . || exit 1
+    "$PYTHON_BIN" -m pip install -e ".[api]" || exit 1
 fi
 
 [ -f .env ] || cp .env.example .env

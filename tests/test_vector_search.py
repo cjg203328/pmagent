@@ -12,6 +12,7 @@ from artpm_agent.memory import (
     VectorStore,
     WorkspaceKnowledgeStore,
 )
+import pytest
 
 
 class SemanticTestEmbedding:
@@ -44,6 +45,15 @@ class FailingEmbedding(ConstantEmbedding):
 
     def embed(self, _text: str) -> list[float]:
         raise RuntimeError("embedding unavailable")
+
+
+def test_vector_store_rejects_non_finite_vectors(tmp_path):
+    store = VectorStore(tmp_path / "vectors", dimension=4)
+
+    with pytest.raises(ValueError, match="finite"):
+        store.add("nan", [float("nan"), 0.0, 0.0, 0.0], {})
+    with pytest.raises(ValueError, match="finite"):
+        store.search([float("inf"), 0.0, 0.0, 0.0])
 
 
 def test_vector_store_persists_upserts_and_metadata_filters(tmp_path):

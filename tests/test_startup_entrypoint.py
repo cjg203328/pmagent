@@ -170,6 +170,14 @@ def test_windows_restart_stops_identified_api_before_starting():
     assert script.index("Stop-Process") < script.index('call "%~dp0start.bat"')
 
 
+def test_platform_start_scripts_install_api_extra_for_full_stack():
+    windows = Path("start.bat").read_text(encoding="utf-8")
+    unix = Path("start.sh").read_text(encoding="utf-8")
+
+    assert 'pip install -e ".[api]"' in windows
+    assert 'pip install -e ".[api]"' in unix
+
+
 def test_legacy_health_check_entrypoint_executes_the_real_check():
     with patch("artpm_agent.health_check.run_health_check", return_value={}) as check:
         runpy.run_path("health_check.py", run_name="__main__")

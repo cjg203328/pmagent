@@ -47,6 +47,12 @@ def test_compose_requires_database_and_observability_secrets():
     assert "GRAFANA_ADMIN_PASSWORD:-admin" not in text
 
 
+def test_compose_forces_server_deployment_mode_for_app_and_api():
+    text = COMPOSE.read_text(encoding="utf-8")
+
+    assert text.count("ARTPM_DEPLOYMENT_MODE=server") == 2
+
+
 def test_compose_redis_is_wired_and_failure_safe():
     text = COMPOSE.read_text(encoding="utf-8")
     assert "REDIS_URL=redis://redis:6379/0" in text
