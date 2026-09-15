@@ -52,8 +52,7 @@ class WorkflowStore:
         self._enable_wal()
         self._migrate()
         if install_builtins:
-            for definition in get_builtin_workflows():
-                self.put_definition(definition)
+            self.ensure_builtins()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(
@@ -478,17 +477,106 @@ class WorkflowStore:
         if row is not None and row["tenant_id"] not in (None, "", tenant_id):
             raise ValueError("workspace does not belong to the requested tenant")
 
-    def put_definition(self, definition: WorkflowDefinition) -> WorkflowDefinition:
-        """Install one immutable definition version; identical writes are idempotent."""
+    def _put_definition_locked(
+        self,
+        conn: sqlite3.Connection,
+        definition: WorkflowDefinition,
+    ) -> WorkflowDefinition:
+        """Install one definition while the caller owns the write transaction."""
+
         raw = self._definition_json(definition)
         checksum = self._definition_checksum(definition)
+        self._validate_workspace_tenant(
+            conn, definition.workspace_id, definition.tenant_id
+        )
+        existing = conn.execute(
+            """
+            SELECT checksum FROM workflow_definitions
+            WHERE tenant_id = ? AND workspace_id = ? AND profile_id = ?
+              AND workflow_id = ? AND version = ?
+            """,
+            (
+                definition.tenant_id,
+                definition.workspace_id,
+                definition.profile_id,
+                definition.id,
+                definition.version,
+            ),
+        ).fetchone()
+        if existing is not None:
+            if existing["checksum"] != checksum:
+                raise ValueError(
+                    "workflow versions are immutable; create a new version"
+                )
+            return definition
+        conn.execute(
+            """
+            INSERT INTO workflow_definitions(
+                tenant_id, workspace_id, profile_id, workflow_id, version,
+                source, read_only, definition_json, checksum, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                definition.tenant_id,
+                definition.workspace_id,
+                definition.profile_id,
+                definition.id,
+                definition.version,
+                definition.source,
+                int(definition.read_only),
+                raw,
+                checksum,
+                self._now(),
+            ),
+        )
+        return definition
+
+    def put_definition(self, definition: WorkflowDefinition) -> WorkflowDefinition:
+        """Install one immutable definition version; identical writes are idempotent."""
+
         with self._connection(write=True) as conn:
-            self._validate_workspace_tenant(
-                conn, definition.workspace_id, definition.tenant_id
-            )
+            return self._put_definition_locked(conn, definition)
+
+    def _install_builtin_definition(
+        self, definition: WorkflowDefinition
+    ) -> WorkflowDefinition:
+        """Install a builtin without rewriting an older immutable snapshot.
+
+        Builtin definitions live in source control, so their behavior can evolve
+        while existing databases still contain an older checksum at the same
+        source version. Preserve that snapshot and publish the changed builtin
+        as the next version instead of making startup fail or mutating history.
+        """
+
+        checksum = self._definition_checksum(definition)
+        with self._connection(write=True) as conn:
+            try:
+                return self._put_definition_locked(conn, definition)
+            except ValueError as error:
+                if str(error) != "workflow versions are immutable; create a new version":
+                    raise
+
+            exact = conn.execute(
+                """
+                SELECT version FROM workflow_definitions
+                WHERE tenant_id = ? AND workspace_id = ? AND profile_id = ?
+                  AND workflow_id = ? AND checksum = ?
+                ORDER BY version DESC LIMIT 1
+                """,
+                (
+                    definition.tenant_id,
+                    definition.workspace_id,
+                    definition.profile_id,
+                    definition.id,
+                    checksum,
+                ),
+            ).fetchone()
+            if exact is not None:
+                return definition.model_copy(update={"version": int(exact["version"])})
+
             existing = conn.execute(
                 """
-                SELECT checksum FROM workflow_definitions
+                SELECT version, source FROM workflow_definitions
                 WHERE tenant_id = ? AND workspace_id = ? AND profile_id = ?
                   AND workflow_id = ? AND version = ?
                 """,
@@ -500,33 +588,76 @@ class WorkflowStore:
                     definition.version,
                 ),
             ).fetchone()
-            if existing is not None:
-                if existing["checksum"] != checksum:
-                    raise ValueError(
-                        "workflow versions are immutable; create a new version"
-                    )
-                return definition
-            conn.execute(
+            if existing is None or existing["source"] != "builtin":
+                raise ValueError(
+                    "workflow versions are immutable; create a new version"
+                )
+            latest = conn.execute(
                 """
-                INSERT INTO workflow_definitions(
-                    tenant_id, workspace_id, profile_id, workflow_id, version,
-                    source, read_only, definition_json, checksum, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                SELECT COALESCE(MAX(version), 0) AS version
+                FROM workflow_definitions
+                WHERE tenant_id = ? AND workspace_id = ? AND profile_id = ?
+                  AND workflow_id = ?
                 """,
                 (
                     definition.tenant_id,
                     definition.workspace_id,
                     definition.profile_id,
                     definition.id,
-                    definition.version,
-                    definition.source,
-                    int(definition.read_only),
-                    raw,
-                    checksum,
-                    self._now(),
                 ),
-            )
-        return definition
+            ).fetchone()
+            next_version = max(int(latest["version"]), definition.version) + 1
+
+            upgraded = definition.model_copy(update={"version": next_version})
+            self._put_definition_locked(conn, upgraded)
+            self._copy_builtin_override_locked(conn, definition, upgraded)
+            return upgraded
+
+    def _copy_builtin_override_locked(
+        self,
+        conn: sqlite3.Connection,
+        previous: WorkflowDefinition,
+        current: WorkflowDefinition,
+    ) -> None:
+        """Carry a prior builtin's user override onto its replacement version."""
+
+        row = conn.execute(
+            """
+            SELECT enabled, priority, created_at, updated_at
+            FROM workflow_overrides
+            WHERE tenant_id = ? AND workspace_id = ? AND profile_id = ?
+              AND workflow_id = ? AND workflow_version = ?
+            """,
+            (
+                previous.tenant_id,
+                previous.workspace_id,
+                previous.profile_id,
+                previous.id,
+                previous.version,
+            ),
+        ).fetchone()
+        if row is None:
+            return
+        now = self._now()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO workflow_overrides(
+                tenant_id, workspace_id, profile_id, workflow_id,
+                workflow_version, enabled, priority, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                current.tenant_id,
+                current.workspace_id,
+                current.profile_id,
+                current.id,
+                current.version,
+                row["enabled"],
+                row["priority"],
+                row["created_at"] or now,
+                now,
+            ),
+        )
 
     def ensure_builtins(
         self,
@@ -555,7 +686,7 @@ class WorkflowStore:
                     "tenant_id": tenant_id,
                 }
             )
-            self.put_definition(scoped)
+            self._install_builtin_definition(scoped)
 
     def set_override(self, override: WorkflowOverride) -> WorkflowOverride:
         """Upsert activation/priority settings without changing definition content."""

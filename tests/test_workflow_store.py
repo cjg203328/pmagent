@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+import hashlib
+import json
 from pathlib import Path
 import sqlite3
 
@@ -101,6 +103,59 @@ def test_definition_versions_are_immutable_and_latest_is_resolved(tmp_path):
     changed_same_version = first.model_copy(update={"name": "偷偷覆盖"})
     with pytest.raises(ValueError, match="immutable"):
         store.put_definition(changed_same_version)
+
+
+def test_existing_builtin_snapshot_is_upgraded_without_losing_override(tmp_path):
+    path, _, _, store = make_stores(tmp_path)
+    definition = store.get_definition("quote_assessment")
+    assert definition is not None
+    store.set_override(
+        WorkflowOverride(
+            workflow_id=definition.id,
+            workflow_version=definition.version,
+            enabled=False,
+            priority=99,
+        )
+    )
+
+    legacy_payload = definition.model_dump(mode="json")
+    legacy_payload.pop("tenant_id")
+    for field in (
+        "compensation_skill_id",
+        "idempotent",
+        "max_retries",
+        "retry_backoff",
+        "retry_backoff_seconds",
+        "retry_on",
+        "retryable",
+    ):
+        legacy_payload["steps"][0].pop(field, None)
+    legacy_payload["steps"][0]["on_error"] = "stop"
+    raw = json.dumps(
+        legacy_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    checksum = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    with store._connection(write=True) as conn:  # noqa: SLF001
+        conn.execute(
+            "UPDATE workflow_definitions SET definition_json = ?, checksum = ? "
+            "WHERE workflow_id = ? AND version = ?",
+            (raw, checksum, definition.id, definition.version),
+        )
+
+    reopened = WorkflowStore(path)
+    latest = reopened.get_definition(definition.id)
+    assert latest is not None
+    assert latest.version == 2
+    assert latest.enabled is False
+    assert latest.priority == 99
+    assert [
+        item.version
+        for item in reopened.list_definitions(latest_only=False)
+        if item.id == definition.id
+    ] == [2, 1]
 
 
 def test_override_changes_resolution_without_mutating_definition_snapshot(tmp_path):
