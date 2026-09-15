@@ -8,6 +8,7 @@ from artpm_agent.api import ChatOutcome, GatewayServices, create_app
 from artpm_agent.memory.conversation_store import ConversationStore
 from artpm_agent.security.permission_store import PermissionStore
 from artpm_agent.workflows.store import WorkflowStore
+from artpm_agent.api.embed import EmbedError, _origin
 
 
 def _services(tmp_path: Path) -> GatewayServices:
@@ -93,3 +94,42 @@ def test_embed_is_disabled_by_default(tmp_path: Path, monkeypatch):
             headers={"origin": "https://example.com"},
         )
     assert response.status_code == 404
+
+
+def test_embed_origin_normalizes_default_ports_and_rejects_credentials():
+    assert _origin("HTTPS://Example.com:443/") == "https://example.com"
+    assert _origin("http://example.com:8080") == "http://example.com:8080"
+    assert _origin("https://[::1]:443") == "https://[::1]"
+
+    for value in (
+        "https://user:secret@example.com",
+        "https://example.com:not-a-port",
+        "https://example.com:65536",
+        "https://example.com////",
+    ):
+        try:
+            _origin(value)
+        except EmbedError as error:
+            assert error.code == "invalid_embed_origin"
+        else:  # pragma: no cover - assertion documents the rejection contract
+            raise AssertionError(f"origin should be rejected: {value}")
+
+
+def test_embed_route_accepts_equivalent_browser_origin_forms(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ARTPM_EMBED_ENABLED", "1")
+    monkeypatch.setenv("ARTPM_EMBED_SECRET", "test-signing-secret")
+    monkeypatch.setenv("ARTPM_EMBED_CHANNEL", "demo")
+    monkeypatch.setenv("ARTPM_EMBED_PUBLISH_TOKEN", "publish-only")
+    monkeypatch.setenv("ARTPM_EMBED_ALLOWED_ORIGINS", "https://example.com")
+
+    with TestClient(create_app(_services(tmp_path))) as client:
+        response = client.post(
+            "/embed/demo/exchange",
+            headers={"origin": "HTTPS://EXAMPLE.COM:443/"},
+            json={
+                "origin": "https://example.com/",
+                "publish_token": "publish-only",
+            },
+        )
+
+    assert response.status_code == 200

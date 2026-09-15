@@ -90,3 +90,15 @@ def test_sqlite_manager_closes_connection_when_operation_fails(
 
     assert connections
     assert all(connection.was_closed for connection in connections)
+
+
+def test_sqlite_manager_get_by_ids_batches_and_preserves_order(tmp_path):
+    manager = SQLiteManager(tmp_path / "documents.db")
+    manager.insert("documents", {"id": "doc-a", "raw_text": "A"})
+    manager.insert("documents", {"id": "doc-b", "raw_text": "B"})
+    manager.insert("documents", {"id": "doc-c", "raw_text": "C"})
+
+    rows = manager.get_by_ids("documents", ["doc-c", "missing", "doc-a", "doc-c"])
+
+    assert [row["id"] for row in rows] == ["doc-c", "doc-a"]
+    assert manager.get_by_ids("documents", []) == []

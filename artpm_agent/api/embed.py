@@ -53,7 +53,7 @@ def _unb64(value: str) -> bytes:
 
 
 def _origin(value: str) -> str:
-    value = str(value or "").strip().rstrip("/")
+    value = str(value or "").strip()
     try:
         parsed = urlparse(value)
     except ValueError as error:
@@ -62,7 +62,23 @@ def _origin(value: str) -> str:
         raise EmbedError(400, "invalid_embed_origin", "embed origin must be an http(s) origin")
     if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
         raise EmbedError(400, "invalid_embed_origin", "embed origin must not include a path")
-    return f"{parsed.scheme}://{parsed.netloc}".lower()
+    if parsed.username is not None or parsed.password is not None:
+        raise EmbedError(400, "invalid_embed_origin", "embed origin must not include credentials")
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise EmbedError(400, "invalid_embed_origin", "embed origin has an invalid port") from error
+    hostname = parsed.hostname
+    if not hostname:
+        raise EmbedError(400, "invalid_embed_origin", "embed origin must include a host")
+    hostname = hostname.lower()
+    # URL origins omit their scheme's default port.  Normalizing here keeps
+    # config, browser Origin headers and CSP frame-ancestors equivalent.
+    default_port = 443 if parsed.scheme.lower() == "https" else 80
+    port_suffix = f":{port}" if port is not None and port != default_port else ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    return f"{parsed.scheme.lower()}://{hostname}{port_suffix}"
 
 
 def _allowed_origins(raw: Any) -> tuple[str, ...]:

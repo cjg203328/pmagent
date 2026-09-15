@@ -3,7 +3,7 @@ SQLite Database Manager
 """
 import sqlite3
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from contextlib import contextmanager
 
 
@@ -419,3 +419,32 @@ class SQLiteManager:
         """
         results = self.query(table, {"id": record_id})
         return results[0] if results else None
+
+    def get_by_ids(self, table: str, record_ids: Iterable[Any]) -> List[Dict]:
+        """Return records for several IDs with one connection and batched SQL.
+
+        SQLite limits the number of bound parameters per statement. Chunking
+        keeps this helper useful for callers beyond the small chat top-k while
+        preserving the caller's ID order in the returned rows.
+        """
+        self._validate_identifiers(table, {"id"})
+        if isinstance(record_ids, (str, bytes)):
+            ids = [record_ids]
+        else:
+            ids = list(dict.fromkeys(record_ids or ()))
+        if not ids:
+            return []
+
+        found: Dict[str, Dict[str, Any]] = {}
+        with self.get_connection() as conn:
+            for start in range(0, len(ids), 500):
+                batch = ids[start : start + 500]
+                placeholders = ", ".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT * FROM {table} WHERE id IN ({placeholders})",
+                    tuple(batch),
+                ).fetchall()
+                for row in rows:
+                    found[str(row["id"])] = dict(row)
+
+        return [found[str(record_id)] for record_id in ids if str(record_id) in found]

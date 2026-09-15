@@ -138,6 +138,96 @@ def test_default_stream_bridges_event_bus_and_redacts_failures(tmp_path: Path):
     assert frames[-1]["data"]["is_error"] is True
 
 
+def test_default_stream_drops_events_from_another_run_or_turn(tmp_path: Path):
+    bus = EventBus()
+
+    def chat(command):
+        # Same turn but a different run must not pass the gateway scope gate.
+        bus.publish(
+            AgentEvent(
+                AgentEventType.TOOL_EXECUTION_START,
+                "other-run",
+                command.turn_id,
+                tool_name="wrong-run",
+            )
+        )
+        # Same run but a different turn is equally out of scope.
+        bus.publish(
+            AgentEvent(
+                AgentEventType.TOOL_EXECUTION_START,
+                command.run_id or command.turn_id,
+                "other-turn",
+                tool_name="wrong-turn",
+            )
+        )
+        return ChatOutcome(response="ok")
+
+    services = _services(tmp_path, chat_handler=chat, event_bus=bus)
+    response = TestClient(create_app(services)).post(
+        "/v1/chat/stream",
+        headers=_headers(),
+        json={"message": "hello", "run_id": "run-scope", "turn_id": "turn-scope"},
+    )
+
+    assert response.status_code == 200
+    assert "wrong-run" not in response.text
+    assert "wrong-turn" not in response.text
+
+
+def test_default_stream_drops_unscoped_compatibility_events(tmp_path: Path):
+    class CompatibilityBus:
+        def __init__(self):
+            self._subscriber = None
+
+        def subscribe(self, subscriber):
+            self._subscriber = subscriber
+
+            def unsubscribe():
+                self._subscriber = None
+
+            return unsubscribe
+
+        def publish_unscoped(self):
+            self._subscriber({"type": "tool_execution_start", "tool_name": "unscoped"})
+
+    bus = CompatibilityBus()
+
+    def chat(_command):
+        bus.publish_unscoped()
+        return ChatOutcome(response="ok")
+
+    services = _services(tmp_path, chat_handler=chat, event_bus=bus)
+    response = TestClient(create_app(services)).post(
+        "/v1/chat/stream",
+        headers=_headers(),
+        json={"message": "hello", "run_id": "run-scope", "turn_id": "turn-scope"},
+    )
+
+    assert response.status_code == 200
+    assert "unscoped" not in response.text
+
+
+def test_stream_normalizes_provider_lifecycle_ids(tmp_path: Path):
+    services = _services(
+        tmp_path,
+        chat_handler=lambda _command: ChatOutcome(response="ok"),
+        stream_handler=lambda _command: [
+            {"type": "message_delta", "delta": "ok", "run_id": "other", "turn_id": "other"},
+            ChatOutcome(response="ok"),
+        ],
+    )
+    response = TestClient(create_app(services)).post(
+        "/v1/chat/stream",
+        headers=_headers(),
+        json={"message": "hello", "run_id": "run-scope", "turn_id": "turn-scope"},
+    )
+
+    frames = _frames(response)
+    delta = next(frame["data"] for frame in frames if frame["data"]["type"] == "message_delta")
+    assert delta["run_id"] == "run-scope"
+    assert delta["turn_id"] == "turn-scope"
+
+
 def test_default_stream_emits_one_delta_for_legacy_final_response(tmp_path: Path):
     services = _services(
         tmp_path,
@@ -185,3 +275,29 @@ def test_stream_error_event_drops_provider_metadata(tmp_path: Path):
 
     assert "provider stack" not in response.text
     assert "secret stack" not in response.text
+
+
+def test_stream_provider_failure_event_is_redacted(tmp_path: Path):
+    services = _services(
+        tmp_path,
+        chat_handler=lambda _command: ChatOutcome(response="unused"),
+        stream_handler=lambda _command: [
+            {
+                "type": "provider_failure",
+                "exception": "provider secret and local path",
+            }
+        ],
+    )
+    response = TestClient(create_app(services)).post(
+        "/v1/chat/stream",
+        headers=_headers(),
+        json={"message": "hello"},
+    )
+
+    assert response.status_code == 200
+    assert "provider secret" not in response.text
+    assert "local path" not in response.text
+    frames = _frames(response)
+    failure = next(frame["data"] for frame in frames if frame["data"]["type"] == "provider_failure")
+    assert failure["error"] == "chat_failed"
+    assert failure["is_error"] is True

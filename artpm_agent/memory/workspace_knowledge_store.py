@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+from math import isfinite
 from pathlib import Path
 import sqlite3
 from threading import Lock, RLock
@@ -41,6 +42,7 @@ class WorkspaceKnowledgeStore:
     DEFAULT_TENANT_ID = "local"
     DEFAULT_WORKSPACE_ID = "local-default"
     MAX_SEARCHABLE_TEXT_CHARS = 2_000_000
+    MAX_QUERY_CHARS = 4_000
     MAX_SEARCH_LIMIT = 100
     MAX_INGESTION_RESOURCES = 20
     MAX_INGESTION_PAYLOAD_BYTES = 2 * 1024 * 1024
@@ -2253,7 +2255,13 @@ class WorkspaceKnowledgeStore:
         tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
             raise ValueError("confidence must be a number")
-        confidence = max(0.0, min(1.0, float(confidence)))
+        try:
+            normalized_confidence = float(confidence)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("confidence must be a number") from error
+        if not isfinite(normalized_confidence):
+            raise ValueError("confidence must be a number")
+        confidence = max(0.0, min(1.0, normalized_confidence))
         with self._connection(write=True) as connection:
             cursor = connection.execute(
                 """
@@ -2717,6 +2725,8 @@ class WorkspaceKnowledgeStore:
     ) -> list[dict[str, Any]]:
         """Search current active resource versions and accepted rules."""
         query = self._required_text(query, "query")
+        if len(query) > self.MAX_QUERY_CHARS:
+            raise ValueError(f"query cannot exceed {self.MAX_QUERY_CHARS} characters")
         tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
         limit = self._validate_limit(limit)
         if (
@@ -2725,11 +2735,15 @@ class WorkspaceKnowledgeStore:
             or not 100 <= max_text_chars <= 20_000
         ):
             raise ValueError("max_text_chars must be between 100 and 20000")
-        if (
-            isinstance(confidence_floor, bool)
-            or not isinstance(confidence_floor, (int, float))
-            or not 0.0 <= confidence_floor <= 1.0
+        if isinstance(confidence_floor, bool) or not isinstance(
+            confidence_floor, (int, float)
         ):
+            raise ValueError("confidence_floor must be between 0 and 1")
+        try:
+            confidence_floor = float(confidence_floor)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("confidence_floor must be between 0 and 1") from error
+        if not isfinite(confidence_floor) or not 0.0 <= confidence_floor <= 1.0:
             raise ValueError("confidence_floor must be between 0 and 1")
         resource_type_filter = self._normalized_filter(
             resource_types, "resource_types"
@@ -2834,7 +2848,11 @@ class WorkspaceKnowledgeStore:
                 "vector" if vector_available else "literal-fallback"
             )
 
-        results_by_id: dict[str, dict[str, Any]] = {}
+        # Keep the inexpensive ranking fields separate from the full public
+        # record.  Decoding three JSON columns for every eligible resource is
+        # wasteful when the caller only asks for a small ``limit``.
+        resource_candidates: dict[str, dict[str, Any]] = {}
+        literal_scores: dict[str, float] = {}
         for hit in vector_hits:
             metadata = hit.get("metadata") or {}
             resource_id = metadata.get("resource_id")
@@ -2843,7 +2861,12 @@ class WorkspaceKnowledgeStore:
             row = eligible_rows.get(resource_id)
             if row is None:
                 continue
-            vector_score = float(hit.get("score", 0.0))
+            try:
+                vector_score = float(hit.get("score", 0.0))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not isfinite(vector_score):
+                continue
             haystack = "\n".join(
                 [
                     row["title"],
@@ -2853,66 +2876,102 @@ class WorkspaceKnowledgeStore:
                 ]
             )
             literal_score = self._literal_score(query, haystack)
+            literal_scores[resource_id] = literal_score
             if vector_score < self.VECTOR_MIN_SCORE and literal_score <= 0:
                 continue
-            current = results_by_id.get(resource_id)
+            current = resource_candidates.get(resource_id)
             if current is not None and current["vector_score"] >= vector_score:
                 continue
-            record = self._joined_resource_record(row)
             chunk_text = str(metadata.get("chunk_text") or row["searchable_text"])
-            record.update(
-                {
-                    "record_type": "resource",
-                    "retrieval_mode": "vector",
-                    "vector_score": vector_score,
-                    "literal_score": literal_score,
-                    "score": vector_score + min(literal_score, 10.0) * 0.1,
-                    "text": self._excerpt(chunk_text, query, max_text_chars),
-                }
-            )
-            results_by_id[resource_id] = record
+            resource_candidates[resource_id] = {
+                "row": row,
+                "retrieval_mode": "vector",
+                "vector_score": vector_score,
+                "literal_score": literal_score,
+                "score": vector_score + min(literal_score, 10.0) * 0.1,
+                "chunk_text": chunk_text,
+            }
 
         # Exact matching supplements FAISS and is the explicit compatibility
         # fallback when the native extension cannot be loaded.
         for resource_id, row in eligible_rows.items():
-            haystack = "\n".join(
-                [
-                    row["title"],
-                    row["searchable_text"],
-                    row["source_uri"] or "",
-                    row["structured_data_json"],
-                ]
-            )
-            literal_score = self._literal_score(query, haystack)
+            literal_score = literal_scores.get(resource_id)
+            if literal_score is None:
+                haystack = "\n".join(
+                    [
+                        row["title"],
+                        row["searchable_text"],
+                        row["source_uri"] or "",
+                        row["structured_data_json"],
+                    ]
+                )
+                literal_score = self._literal_score(query, haystack)
+                literal_scores[resource_id] = literal_score
             if literal_score <= 0:
                 continue
-            existing = results_by_id.get(resource_id)
+            existing = resource_candidates.get(resource_id)
             if existing is not None:
                 existing["literal_score"] = literal_score
                 existing["score"] = float(existing["vector_score"]) + min(
                     literal_score, 10.0
                 ) * 0.1
                 continue
+            resource_candidates[resource_id] = {
+                "row": row,
+                "retrieval_mode": (
+                    "literal-supplement"
+                    if vector_available
+                    else "literal-fallback"
+                ),
+                "vector_score": None,
+                "literal_score": literal_score,
+                "score": min(literal_score, 10.0) * 0.1,
+                "chunk_text": row["searchable_text"],
+            }
+
+        # A resource outside the top ``limit`` resources cannot enter the
+        # top ``limit`` of the combined resource/rule result set. Rank by the
+        # same effective score used below, then decode only the records needed
+        # for the response.
+        ranked_resources: list[tuple[float, dict[str, Any]]] = []
+        for candidate in resource_candidates.values():
+            try:
+                confidence = float(candidate["row"]["confidence"])
+            except (TypeError, ValueError, OverflowError):
+                confidence = 0.0
+            if not isfinite(confidence):
+                confidence = 0.0
+            if use_confidence and confidence < confidence_floor:
+                continue
+            effective_score = float(candidate["score"])
+            if use_confidence:
+                effective_score *= confidence
+            ranked_resources.append((effective_score, candidate))
+        ranked_resources.sort(
+            key=lambda item: (
+                item[0],
+                item[1]["row"]["updated_at"],
+                item[1]["row"]["id"],
+            ),
+            reverse=True,
+        )
+        results: list[dict[str, Any]] = []
+        for _effective_score, candidate in ranked_resources[:limit]:
+            row = candidate["row"]
             record = self._joined_resource_record(row)
             record.update(
                 {
                     "record_type": "resource",
-                    "retrieval_mode": (
-                        "literal-supplement"
-                        if vector_available
-                        else "literal-fallback"
-                    ),
-                    "vector_score": None,
-                    "literal_score": literal_score,
-                    "score": min(literal_score, 10.0) * 0.1,
+                    "retrieval_mode": candidate["retrieval_mode"],
+                    "vector_score": candidate["vector_score"],
+                    "literal_score": candidate["literal_score"],
+                    "score": candidate["score"],
                     "text": self._excerpt(
-                        row["searchable_text"], query, max_text_chars
+                        candidate["chunk_text"], query, max_text_chars
                     ),
                 }
             )
-            results_by_id[resource_id] = record
-
-        results = list(results_by_id.values())
+            results.append(record)
 
         if include_rules and (not resource_type_filter or "rule" in resource_type_filter):
             for row in rule_rows:
@@ -2933,7 +2992,12 @@ class WorkspaceKnowledgeStore:
         if use_confidence:
             weighted: list[dict[str, Any]] = []
             for item in results:
-                conf = float(item.get("confidence", 1.0))
+                try:
+                    conf = float(item.get("confidence", 1.0))
+                except (TypeError, ValueError, OverflowError):
+                    conf = 0.0
+                if not isfinite(conf):
+                    conf = 0.0
                 if conf < confidence_floor:
                     continue
                 item = dict(item)

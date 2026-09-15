@@ -30,7 +30,13 @@ def _visible_workspaces(store: Any, tenant_id: str) -> list[dict[str, Any]]:
     if not callable(list_workspaces):
         return []
     try:
-        items = list_workspaces(profile_id=None, limit=100)
+        try:
+            items = list_workspaces(profile_id=None, tenant_id=tenant_id, limit=100)
+        except TypeError:
+            # Older injected stores may not know the optional tenant filter;
+            # retain the post-query ownership check for that compatibility
+            # path while the built-in store filters before pagination.
+            items = list_workspaces(profile_id=None, limit=100)
     except Exception:
         return []
     return [
@@ -54,6 +60,11 @@ def switch_workspace(
         raise ValueError("workspace id is required")
     tenant_id = str(workspace.get("tenant_id") or "").strip()
     if tenant_id and tenant_id != context.tenant_id:
+        raise ValueError("workspace is outside the current tenant")
+    ensure_workspace_tenant = getattr(store, "ensure_workspace_tenant", None)
+    if callable(ensure_workspace_tenant) and not ensure_workspace_tenant(
+        workspace_id, context.tenant_id
+    ):
         raise ValueError("workspace is outside the current tenant")
 
     selected = TenantContext(

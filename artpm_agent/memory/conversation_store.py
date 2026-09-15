@@ -162,6 +162,15 @@ class ConversationStore:
                 )
 
             self._ensure_default_workspace(conn)
+            # Tenant-scoped listings are a hot path for the API and UI. Keep
+            # the ownership predicate indexable so a tenant with many other
+            # workspaces does not require a full-table scan.
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_workspaces_tenant_updated_at
+                ON workspaces(tenant_id, updated_at DESC, created_at DESC, id DESC)
+                """
+            )
             violations = conn.execute("PRAGMA foreign_key_check").fetchall()
             if violations:
                 raise RuntimeError(
@@ -458,25 +467,43 @@ class ConversationStore:
         self,
         *,
         profile_id: Optional[str] = DEFAULT_PROFILE_ID,
+        tenant_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """List workspaces for one profile, newest first; ``None`` lists all."""
+        """List workspaces for one profile/tenant, newest first.
+
+        ``None`` keeps the historical unscoped listing behavior for trusted
+        local callers. API/UI callers should always provide ``tenant_id`` so
+        filtering happens before pagination rather than after it.
+        """
         if profile_id is not None:
             profile_id = self._validate_identifier(profile_id, "profile_id")
+        if tenant_id is not None:
+            tenant_id = self._validate_identifier(tenant_id, "tenant_id")
         limit = self._validate_non_negative_integer(limit, "limit")
         offset = self._validate_non_negative_integer(offset, "offset")
         if limit == 0:
             return []
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if profile_id is not None:
+            clauses.append("profile_id = ?")
+            parameters.append(profile_id)
+        if tenant_id is not None:
+            clauses.append("tenant_id = ?")
+            parameters.append(tenant_id)
+        where = " AND ".join(clauses) if clauses else "1 = 1"
+        parameters.extend((limit, offset))
         with self._connection() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM workspaces
-                WHERE (? IS NULL OR profile_id = ?)
+                WHERE {where}
                 ORDER BY updated_at DESC, created_at DESC, id DESC
                 LIMIT ? OFFSET ?
                 """,
-                (profile_id, profile_id, limit, offset),
+                parameters,
             ).fetchall()
         return [self._workspace_from_row(row) for row in rows]
 

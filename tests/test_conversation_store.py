@@ -115,6 +115,17 @@ def test_default_workspace_is_created_and_settings_persist(tmp_path):
         store.update_workspace_settings("missing", {})
 
 
+def test_list_workspaces_filters_tenant_before_pagination(tmp_path):
+    store = ConversationStore(tmp_path / "tenant-list.sqlite")
+    store.create_workspace("target", "Target", tenant_id="tenant-a")
+    store.create_workspace("other-a", "Other A", tenant_id="tenant-b")
+    store.create_workspace("other-b", "Other B", tenant_id="tenant-b")
+
+    items = store.list_workspaces(tenant_id="tenant-a", limit=1)
+
+    assert [item["id"] for item in items] == ["target"]
+
+
 def test_conversations_and_messages_are_scoped_to_workspace(tmp_path):
     path = tmp_path / "conversations.db"
     store = ConversationStore(path)

@@ -67,6 +67,10 @@ class VectorStore:
         self._generation = 0
         self._faiss = None
         self._lock = _store_lock(self.store_path)
+        # Searches are read-heavy. Keep the in-memory snapshot when none of
+        # the atomically replaced index files changed, while still detecting
+        # writes from another process through a cheap stat signature.
+        self._disk_signature: tuple[tuple[int, int, int] | None, ...] | None = None
         self._load_or_create()
 
     @property
@@ -102,6 +106,9 @@ class VectorStore:
 
     def _reload_from_disk(self) -> None:
         """Refresh this instance while the process and disk locks are held."""
+        signature = self._disk_state_signature()
+        if self.index is not None and self._disk_signature == signature:
+            return
         files_exist = any(
             path.exists()
             for path in (
@@ -116,6 +123,7 @@ class VectorStore:
             self.metadata = {}
             self._next_vector_id = 1
             self._generation = 0
+            self._disk_signature = signature
             return
 
         try:
@@ -140,6 +148,7 @@ class VectorStore:
             )
             self._generation = max(0, int(manifest.get("generation", 0)))
             self.needs_rebuild = False
+            self._disk_signature = self._disk_state_signature()
         except (
             OSError,
             RuntimeError,
@@ -154,6 +163,24 @@ class VectorStore:
             self.metadata = {}
             self._next_vector_id = 1
             self._generation = 0
+            self._disk_signature = self._disk_state_signature()
+
+    def _disk_state_signature(self) -> tuple[tuple[int, int, int] | None, ...]:
+        """Return a cheap signature for the atomically replaced index files."""
+        signature: list[tuple[int, int, int] | None] = []
+        for path in (
+            self.index_file,
+            self.legacy_index_file,
+            self.metadata_file,
+            self.manifest_file,
+        ):
+            try:
+                stat = path.stat()
+            except OSError:
+                signature.append(None)
+            else:
+                signature.append((stat.st_mtime_ns, stat.st_size, stat.st_ino))
+        return tuple(signature)
 
     def _new_index(self):
         if self._faiss is None:
@@ -445,6 +472,7 @@ class VectorStore:
             os.replace(metadata_temp, self.metadata_file)
             os.replace(manifest_temp, self.manifest_file)
             self._generation = int(manifest["generation"])
+            self._disk_signature = self._disk_state_signature()
         finally:
             for path in (index_temp, metadata_temp, manifest_temp):
                 try:

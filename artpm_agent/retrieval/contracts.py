@@ -8,6 +8,7 @@ the internal shape returned by a vector store.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 from types import MappingProxyType
 from typing import Any, Mapping, Optional
 
@@ -57,12 +58,23 @@ class RetrievalPlan:
         if not isinstance(self.query, str) or not self.query.strip():
             raise ValueError("query must be a non-empty string")
         object.__setattr__(self, "query", self.query.strip())
-        if isinstance(self.limit, bool) or not 1 <= self.limit <= 100:
+        if len(self.query) > 4000:
+            raise ValueError("query cannot exceed 4000 characters")
+        if isinstance(self.limit, bool) or not isinstance(self.limit, int) or not 1 <= self.limit <= 100:
             raise ValueError("limit must be between 1 and 100")
-        if isinstance(self.max_text_chars, bool) or not 100 <= self.max_text_chars <= 20_000:
+        if isinstance(self.max_text_chars, bool) or not isinstance(self.max_text_chars, int) or not 100 <= self.max_text_chars <= 20_000:
             raise ValueError("max_text_chars must be between 100 and 20000")
-        if not 0.0 <= self.confidence_floor <= 1.0:
+        if isinstance(self.confidence_floor, bool) or not isinstance(
+            self.confidence_floor, (int, float)
+        ):
             raise ValueError("confidence_floor must be between 0 and 1")
+        try:
+            normalized_floor = float(self.confidence_floor)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("confidence_floor must be between 0 and 1") from error
+        if not isfinite(normalized_floor) or not 0.0 <= normalized_floor <= 1.0:
+            raise ValueError("confidence_floor must be between 0 and 1")
+        object.__setattr__(self, "confidence_floor", normalized_floor)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +98,15 @@ class RetrievalHit:
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must be a non-empty string")
             object.__setattr__(self, name, value.strip())
+        if isinstance(self.score, bool):
+            raise TypeError("score must be a finite number")
+        try:
+            score = float(self.score)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("score must be a finite number") from error
+        if not isfinite(score):
+            raise ValueError("score must be a finite number")
+        object.__setattr__(self, "score", score)
         object.__setattr__(self, "metadata", _frozen_mapping(self.metadata))
 
     @property

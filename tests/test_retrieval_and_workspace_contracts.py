@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import pytest
 
 from artpm_agent.api import GatewayServices, create_app
 from artpm_agent.api.services import ChatOutcome
@@ -115,6 +116,35 @@ def test_retriever_applies_confidence_floor(tmp_path: Path):
     hits = WorkspaceRetriever(store).search(plan)
 
     assert [hit.id for hit in hits] == ["high-confidence"]
+
+
+def test_workspace_confidence_inputs_reject_non_finite_and_overflow_values(tmp_path: Path):
+    store = WorkspaceKnowledgeStore(
+        tmp_path / "knowledge-invalid-confidence.sqlite",
+        enable_vector_search=False,
+    )
+    resource = store.ingest_resource(
+        title="Confidence input",
+        searchable_text="confidence",
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+    )
+
+    for value in ("0.5", float("nan"), float("inf"), 10**400):
+        with pytest.raises(ValueError):
+            store.set_confidence(
+                resource["id"],
+                value,
+                tenant_id="tenant-a",
+                workspace_id="workspace-a",
+            )
+        with pytest.raises(ValueError):
+            store.search(
+                "confidence",
+                tenant_id="tenant-a",
+                workspace_id="workspace-a",
+                confidence_floor=value,
+            )
 
 
 def test_workspace_and_search_api_contracts(tmp_path: Path):

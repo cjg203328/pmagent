@@ -238,10 +238,28 @@ class MemoryManager:
                         filtered.append(r)
                 vector_results = filtered
 
-                # Get full document data
-                for r in vector_results[:top_k]:
+                # Hydrate the ranked vector hits in one SQLite query. Keep a
+                # fallback for injected legacy databases that only implement
+                # the historical get_by_id() helper.
+                vector_candidates = vector_results[:top_k]
+                doc_ids = list(dict.fromkeys(item["id"] for item in vector_candidates))
+                batch_get = getattr(self.db, "get_by_ids", None)
+                if callable(batch_get):
+                    hydrated = batch_get("documents", doc_ids)
+                    documents_by_id = {
+                        str(item.get("id")): item
+                        for item in hydrated
+                        if isinstance(item, dict) and item.get("id") is not None
+                    }
+                else:
+                    documents_by_id = {
+                        str(doc_id): self.db.get_by_id("documents", doc_id)
+                        for doc_id in doc_ids
+                    }
+
+                for r in vector_candidates:
                     doc_id = r["id"]
-                    doc_record = self.db.get_by_id("documents", doc_id)
+                    doc_record = documents_by_id.get(str(doc_id))
                     if (
                         doc_record
                         and doc_record.get("tenant_id") == tenant_scope

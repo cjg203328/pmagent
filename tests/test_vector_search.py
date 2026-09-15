@@ -91,6 +91,33 @@ def test_vector_store_persists_upserts_and_metadata_filters(tmp_path):
     assert reopened.search(provider.embed("角色成本预算"))[0]["id"] == "doc-a"
 
 
+def test_vector_store_reuses_snapshot_and_detects_external_updates(tmp_path):
+    provider = DeterministicEmbeddingProvider(dimension=64)
+    path = tmp_path / "vectors"
+    store = VectorStore(
+        path,
+        dimension=provider.dimension,
+        embedding_fingerprint=provider.fingerprint,
+    )
+    store.add("doc-a", provider.embed("first"), {"workspace_id": "studio-a"})
+
+    # A read on the same instance should keep the already-loaded FAISS snapshot.
+    generation = store._backend._generation
+    assert store.search(provider.embed("first"))[0]["id"] == "doc-a"
+    assert store._backend._generation == generation
+
+    # A separate writer atomically replaces the files; the first instance must
+    # notice the changed stat signature before serving its next search.
+    writer = VectorStore(
+        path,
+        dimension=provider.dimension,
+        embedding_fingerprint=provider.fingerprint,
+    )
+    writer.add("doc-b", provider.embed("second"), {"workspace_id": "studio-a"})
+    results = store.search(provider.embed("second"), top_k=2)
+    assert {item["id"] for item in results} == {"doc-a", "doc-b"}
+
+
 def test_vector_store_recovers_from_incompatible_and_corrupt_files(tmp_path):
     path = tmp_path / "vectors"
     first = DeterministicEmbeddingProvider(dimension=64)
@@ -262,6 +289,33 @@ def test_memory_manager_rebuilds_missing_index_from_sqlite(tmp_path):
     reopened = MemoryManager(str(database_path), str(vector_path))
     assert reopened.vector_db.count == 1
     assert reopened.retrieve("角色项目报价")[0]["id"] == document_id
+
+
+def test_memory_manager_batches_vector_document_hydration(tmp_path, monkeypatch):
+    memory = MemoryManager(
+        str(tmp_path / "memory.db"),
+        str(tmp_path / "memory-vectors"),
+    )
+    first = memory.save_document({"id": "doc-a", "raw_text": "alpha budget"})
+    second = memory.save_document({"id": "doc-b", "raw_text": "alpha delivery"})
+    calls = {"batch": 0, "single": 0}
+    original_batch = memory.db.get_by_ids
+
+    def tracked_batch(table, ids):
+        calls["batch"] += 1
+        return original_batch(table, ids)
+
+    def forbidden_single(*_args, **_kwargs):
+        calls["single"] += 1
+        raise AssertionError("vector hydration must not issue N+1 get_by_id calls")
+
+    monkeypatch.setattr(memory.db, "get_by_ids", tracked_batch)
+    monkeypatch.setattr(memory.db, "get_by_id", forbidden_single)
+
+    results = memory.retrieve("alpha", top_k=2)
+
+    assert {item["id"] for item in results} == {first, second}
+    assert calls == {"batch": 1, "single": 0}
 
 
 def test_multiple_memory_managers_do_not_overwrite_each_others_vectors(tmp_path):

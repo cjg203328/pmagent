@@ -15,8 +15,6 @@ import inspect
 import json
 import logging
 import os
-from queue import Empty as QueueEmpty
-from queue import Queue
 import sqlite3
 from typing import Any, Callable
 from uuid import uuid4
@@ -72,7 +70,7 @@ from .services import (
     build_default_services,
     validate_identifier,
 )
-from .embed import EmbedError, EmbedGateway
+from .embed import EmbedError, EmbedGateway, _origin
 
 logger = logging.getLogger(__name__)
 API_VERSION = "v1"
@@ -210,11 +208,23 @@ def _stream_event_payload(value: Any, *, run_id: str, turn_id: str) -> dict[str,
     if not isinstance(payload, dict):
         return None
     payload["type"] = event_type
-    payload.setdefault("run_id", run_id)
-    payload.setdefault("turn_id", turn_id)
+    # Lifecycle identifiers belong to the gateway request boundary.  A
+    # provider/event-bus adapter must not be able to emit another turn's IDs
+    # (or make a resumable stream appear to belong to a different run).
+    payload["run_id"] = run_id
+    payload["turn_id"] = turn_id
     # Provider exception text is never a client contract. Keep the event
     # useful for rendering while exposing only a stable failure marker.
-    if payload.get("is_error") or event_type in {"runtime_error", "error"}:
+    normalized_event_type = event_type.casefold()
+    error_event = bool(
+        payload.get("is_error")
+        or payload.get("error")
+        or any(
+            marker in normalized_event_type
+            for marker in ("error", "exception", "failure", "failed")
+        )
+    )
+    if error_event:
         payload["is_error"] = True
         payload["error"] = "chat_failed"
         payload.pop("exception", None)
@@ -684,15 +694,20 @@ def create_app(
         *,
         require_header: bool = False,
     ) -> str:
-        header_origin = str(request.headers.get("origin") or "").strip()
+        try:
+            supplied_origin = _origin(supplied)
+            header_value = str(request.headers.get("origin") or "").strip()
+            header_origin = _origin(header_value) if header_value else ""
+        except EmbedError:
+            raise
         # Browsers always send Origin for these cross-site POSTs. Requiring an
         # exact match prevents a caller from authenticating one origin while
         # placing another origin in the JSON body.
         if require_header and not header_origin:
             raise EmbedError(403, "embed_origin_required", "request Origin header is required")
-        if header_origin and header_origin.rstrip("/").lower() != str(supplied).strip().rstrip("/").lower():
+        if header_origin and header_origin != supplied_origin:
             raise EmbedError(403, "embed_origin_mismatch", "request origin does not match payload origin")
-        return supplied
+        return supplied_origin
 
     def _embed_principal(
         gateway: EmbedGateway,
@@ -879,13 +894,22 @@ def create_app(
         """List workspaces visible to the authenticated tenant."""
         principal = _principal(request)
         try:
-            items = services.conversations.list_workspaces(
-                # A tenant may own workspaces backed by different agent
-                # profiles. Profile selection is an execution concern and
-                # must not hide otherwise authorized workspace metadata.
-                profile_id=None,
-                limit=100,
-            )
+            # A tenant may own workspaces backed by different agent profiles.
+            # Push the ownership predicate into the store before pagination;
+            # otherwise a busy database can fill the first page with another
+            # tenant's rows and hide valid workspaces from this response.
+            list_workspaces = services.conversations.list_workspaces
+            try:
+                items = list_workspaces(
+                    profile_id=None,
+                    tenant_id=principal.tenant_id,
+                    limit=100,
+                )
+            except TypeError:
+                # Preserve compatibility with injected legacy stores that do
+                # not yet expose the optional tenant_id keyword. The final
+                # in-memory check remains a defense-in-depth boundary.
+                items = list_workspaces(profile_id=None, limit=100)
             visible = [
                 item
                 for item in items
@@ -1313,29 +1337,57 @@ def create_app(
                     # synchronously on its EventBus while chat_async runs in a
                     # worker thread. Forward those observations without
                     # blocking the gateway event loop.
-                    event_queue: Queue[Any] = Queue()
+                    event_queue: asyncio.Queue[Any] = asyncio.Queue()
+                    event_loop = asyncio.get_running_loop()
+                    stream_complete = object()
                     event_bus = services.event_bus
 
                     def observe(event: Any) -> None:
                         event_run = str(getattr(event, "run_id", "") or "")
                         event_turn = str(getattr(event, "turn_id", "") or "")
-                        if event_run != run_id and event_turn != turn_id:
+                        # Both identifiers are part of the event scope.  The
+                        # previous ``and`` check admitted an event whenever
+                        # either value happened to match, which can leak a
+                        # different run that reused a turn ID (or vice versa).
+                        if event_run != run_id or event_turn != turn_id:
                             return
-                        # EventBus callbacks run in the provider thread. A
-                        # standard queue makes the handoff lossless even when
-                        # the provider returns immediately after publishing.
-                        event_queue.put(event)
+                        # EventBus callbacks run in the provider thread. Hand
+                        # events back to the loop without occupying an
+                        # executor thread for every polling interval.
+
+                        def enqueue() -> None:
+                            event_queue.put_nowait(event)
+
+                        try:
+                            event_loop.call_soon_threadsafe(enqueue)
+                        except RuntimeError:
+                            # The client may disconnect while a provider
+                            # thread is publishing its final event.
+                            return
+
+                    async def invoke_chat() -> Any:
+                        try:
+                            return await services.chat_async(command)
+                        finally:
+                            # EventBus publishes synchronously in the provider
+                            # call. The loop callback order therefore preserves
+                            # every event before this completion marker.
+                            try:
+                                event_loop.call_soon_threadsafe(
+                                    event_queue.put_nowait, stream_complete
+                                )
+                            except RuntimeError:
+                                # A disconnect may close the loop while the
+                                # provider task is unwinding.
+                                pass
 
                     if event_bus is not None and callable(getattr(event_bus, "subscribe", None)):
                         unsubscribe = event_bus.subscribe(observe)
-                    task = asyncio.create_task(services.chat_async(command))
+                    task = asyncio.create_task(invoke_chat())
                     while True:
-                        if task.done() and event_queue.empty():
+                        event = await event_queue.get()
+                        if event is stream_complete:
                             break
-                        try:
-                            event = await asyncio.to_thread(event_queue.get, True, 0.1)
-                        except QueueEmpty:
-                            continue
                         async for frame in emit(event):
                             yield frame
                     outcome_value = await task
