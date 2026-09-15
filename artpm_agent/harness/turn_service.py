@@ -172,6 +172,9 @@ class TurnContext:
     intent_decision: Optional[IntentDecision] = None
     intent_checked: bool = False
     memory_injected: bool = False
+    # Cache attachment parsing for the lifetime of one turn, including empty
+    # or failed parser results.
+    attachments_prepared: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.extra, dict):
@@ -844,10 +847,22 @@ def _prepare_turn_attachments(ctx: TurnContext) -> None:
     """Create one normalized attachment snapshot for every handler in a turn."""
 
     extra = ctx.extra if isinstance(ctx.extra, dict) else {}
-    if extra.get("parsed_files") and extra.get("attachment_context"):
+    if getattr(ctx, "attachments_prepared", False):
+        return
+    if extra.get("_attachments_prepared") is True:
+        ctx.attachments_prepared = True
+        return
+    # Hosts may provide a pre-parsed snapshot in the compatibility bag. An
+    # explicitly empty snapshot is still a valid result and must not be parsed
+    # again by a later handler.
+    if "parsed_files" in extra and "attachment_context" in extra:
+        ctx.attachments_prepared = True
+        extra["_attachments_prepared"] = True
         return
     runtime = ctx.runtime
     if runtime is None or not runtime.capabilities.attachment_parsing:
+        ctx.attachments_prepared = True
+        extra["_attachments_prepared"] = True
         return
     file_paths = list(extra.get("file_paths") or [])
     if not file_paths:
@@ -857,13 +872,19 @@ def _prepare_turn_attachments(ctx: TurnContext) -> None:
                 if path:
                     file_paths.append(str(path))
     if not file_paths:
+        ctx.attachments_prepared = True
+        extra["_attachments_prepared"] = True
         return
+    # Mark before invoking the parser so re-entrant calls cannot duplicate the
+    # potentially expensive document processing.
+    ctx.attachments_prepared = True
+    extra["_attachments_prepared"] = True
+    extra["file_paths"] = file_paths
     try:
         parsed_files, attachment_context = runtime.parse_attachments(
             ctx.user_input,
             {**extra, "file_paths": file_paths},
         )
-        extra["file_paths"] = file_paths
         extra["parsed_files"] = parsed_files
         extra["attachment_context"] = attachment_context
     except Exception:  # noqa: BLE001 - model fallback can still explain the failure

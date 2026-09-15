@@ -35,6 +35,9 @@ artpm-api
 - `GET /health`
 - `GET /v1/capabilities`
 - `POST /v1/chat`
+- `POST /v1/chat/stream`（SSE：turn_start、事件增量、snapshot、turn_end）
+- `GET/POST /v1/workspaces`
+- `POST /v1/search`
 - `GET /v1/permissions`、`GET /v1/permissions/{id}`
 - `POST /v1/permissions/{id}/approve`、`POST /v1/permissions/{id}/reject`
 - `GET/POST /v1/workflows`
@@ -69,5 +72,22 @@ app = create_app(services=my_services, identity_resolver=my_resolver)
 ```dotenv
 ARTPM_CORS_ORIGINS=http://127.0.0.1:8501,http://localhost:8501
 ```
+
+## 网站嵌入（可选）
+
+嵌入能力默认关闭。启用时至少配置：
+
+```dotenv
+ARTPM_EMBED_ENABLED=1
+ARTPM_EMBED_SECRET=<server-only-signing-secret>
+ARTPM_EMBED_PUBLISH_TOKEN=<server-only-publish-token>
+ARTPM_EMBED_WORKSPACE_ID=local-default
+ARTPM_EMBED_ALLOWED_ORIGINS=https://your-site.example
+```
+
+端点为 `/embed/{channel}/config`、`exchange`、`session`、`chat`。发布令牌只
+能由嵌入站点服务端提交到 `exchange`；浏览器会话令牌绑定 channel、tenant、
+workspace 和精确 `Origin`，并受短期过期、限流和 `frame-ancestors` 约束。前端
+`postMessage` 仍需校验 `event.origin` 和 `event.source`。
 
 不允许使用 `*`。所有错误均返回 `error.code`、用户可读的 `error.message` 和 `request_id`，验证错误不会回显原始请求体或敏感值。

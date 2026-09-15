@@ -175,6 +175,21 @@ def test_gateway_secret_authenticates_remote_identity():
         resolver(request)
 
 
+def test_identity_resolver_accepts_a_trusted_profile_scope():
+    resolver = TrustedHeaderIdentityResolver()
+    principal = resolver(
+        SimpleNamespace(
+            headers={
+                "x-workspace-id": "workspace-a",
+                "x-actor-id": "alice",
+                "x-profile-id": "studio-profile",
+            },
+            client=SimpleNamespace(host="127.0.0.1"),
+        )
+    )
+    assert principal.profile_id == "studio-profile"
+
+
 def test_readiness_rejects_degraded_services(gateway):
     client, services, _ = gateway
     services.health_handler = lambda: {

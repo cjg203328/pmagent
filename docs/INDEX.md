@@ -18,6 +18,9 @@ README 是入口文档；本页按读者角色和主题提供深入文档导航�
 | 文档 | 用途 |
 | --- | --- |
 | [`architecture/PROJECT_STRUCTURE.md`](architecture/PROJECT_STRUCTURE.md) | 当前仓库目录和入口文件职责 |
+| [`architecture/CURRENT.md`](architecture/CURRENT.md) | 当前运行主链、工作区、检索和存储契约 |
+| [`architecture/OPTIMIZATION_STRATEGY.md`](architecture/OPTIMIZATION_STRATEGY.md) | 风险治理、模块拆分和迁移策略 |
+| [`architecture/STORAGE_CONTRACT.md`](architecture/STORAGE_CONTRACT.md) | 数据库、会话、知识、向量和缓存边界 |
 | [`architecture/ARCHITECTURE.md`](architecture/ARCHITECTURE.md) | 系统总体架构和请求流程 |
 | [`architecture/EXECUTION_MAP.md`](architecture/EXECUTION_MAP.md) | 入口、上下文、记忆、工具和记录的唯一职责映射 |
 | [`architecture/ARCHITECTURE_DIAGRAM.md`](architecture/ARCHITECTURE_DIAGRAM.md) | 详细架构图谱 |
@@ -26,6 +29,7 @@ README 是入口文档；本页按读者角色和主题提供深入文档导航�
 | [`architecture/MEMORY_EVOLUTION_DESIGN.md`](architecture/MEMORY_EVOLUTION_DESIGN.md) | 记忆和自进化设计 |
 | [`architecture/MULTI_TENANT_ARCHITECTURE.md`](architecture/MULTI_TENANT_ARCHITECTURE.md) | 多租户隔离设计 |
 | [`guides/MULTI_TENANT_USAGE_GUIDE.md`](guides/MULTI_TENANT_USAGE_GUIDE.md) | 多租户使用和接入说明 |
+| [`guides/WORKSPACE_RETRIEVAL_API.md`](guides/WORKSPACE_RETRIEVAL_API.md) | 工作区、检索、SSE 和嵌入接口 |
 
 ## 运维与质量
 

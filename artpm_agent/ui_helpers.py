@@ -27,6 +27,7 @@ from artpm_agent.utils.chat_attachments import (
     select_conversation_attachments,
 )
 from artpm_agent.tenancy import TenantContext
+from artpm_agent.ui.workspace_selector import render_workspace_selector
 from artpm_agent.ui_feedback import (
     build_error_info,
     probe_backend_health,
@@ -799,6 +800,11 @@ def render_sidebar():
             """,
             unsafe_allow_html=True,
         )
+
+        tenant_context = st.session_state.get("tenant_context")
+        conversation_store = get_conversation_store()
+        if isinstance(tenant_context, TenantContext) and conversation_store is not None:
+            render_workspace_selector(conversation_store, tenant_context)
 
         render_conversation_sidebar()
 

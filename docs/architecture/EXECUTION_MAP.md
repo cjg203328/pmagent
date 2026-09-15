@@ -22,6 +22,12 @@ harness.turn_service.run_turn()
         |     +-- feedback / strategy
         |     +-- token budget
         |
+        +-- workspace retrieval contract
+              +-- trusted SearchTarget
+              +-- RetrievalPlan
+              +-- bounded WorkspaceRetriever
+              +-- RetrievalHit / citation metadata
+        |
         +-- profile proposal
         +-- knowledge ingestion proposal
         +-- knowledge rule proposal
@@ -47,6 +53,7 @@ TurnResult -> UI/API renderer -> conversation message
 | 回合依赖 | `artpm_agent/runtime/request_services.py` | `TurnServiceBundle` 注入知识、工作流、档案和记录服务 |
 | Provider 适配 | `artpm_agent/harness/runtime.py` | `HarnessRuntime` 和旧 Agent 的唯一适配层 |
 | 意图识别 | `artpm_agent/routing/service.py` | keyword -> embedding -> optional LLM classifier |
+| 工作区检索 | `artpm_agent/retrieval/` | trusted scope -> RetrievalPlan -> WorkspaceKnowledgeStore -> RetrievalHit |
 | Skill 安全执行 | `artpm_agent/harness/skill_handler.py` | 意图缓存、租户绑定、权限审批、执行和结果格式化 |
 | 模型回退 | `artpm_agent/harness/model_handler.py` | prompt、视觉附件、failover 和 OCR 降级 |
 | 附件处理 | `artpm_agent/harness/attachment_pipeline.py` | 一次规范化快照，供知识、产物和模型 handler 复用 |

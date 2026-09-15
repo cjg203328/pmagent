@@ -178,6 +178,10 @@ python -m artpm_agent.api
 - `GET /health`、`GET /ready`
 - `GET /v1/capabilities`
 - `POST /v1/chat`
+- `POST /v1/chat/stream`（SSE 生命周期与快照）
+- `GET /v1/workspaces`
+- `POST /v1/workspaces`（需要 admin）
+- `POST /v1/search`（工作区范围检索）
 - 权限审批：`/v1/permissions/*`
 - 工作流及运行记录：`/v1/workflows/*`、`/v1/workflow-runs/*`
 
@@ -185,6 +189,11 @@ python -m artpm_agent.api
 请求体、身份头、错误码和审批契约见
 [`docs/operations/API_GATEWAY_DOCUMENTATION.md`](docs/operations/API_GATEWAY_DOCUMENTATION.md) 与
 [`docs/operations/API_GATEWAY.md`](docs/operations/API_GATEWAY.md)。
+
+嵌入式网站能力默认关闭。启用时使用 `/embed/{channel}/config`、`exchange`、
+`session` 和 `chat` 四个端点；发布令牌只在服务端交换，浏览器只拿短期来源绑定会话令牌。
+配置、限流和 `frame-ancestors` 约束见
+[`docs/guides/WORKSPACE_RETRIEVAL_API.md`](docs/guides/WORKSPACE_RETRIEVAL_API.md)。
 
 ## 可选能力
 

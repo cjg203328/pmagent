@@ -375,6 +375,53 @@ class ConversationStore:
             ).fetchone()
         return self._workspace_from_row(row) if row is not None else None
 
+    def create_workspace(
+        self,
+        workspace_id: str,
+        name: str,
+        *,
+        tenant_id: str = "local",
+        profile_id: str = DEFAULT_PROFILE_ID,
+        settings: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Create one tenant-owned workspace.
+
+        Workspace creation is kept in ``ConversationStore`` because it owns
+        workspace metadata and transcript foreign keys. Knowledge and vector
+        stores consume the resulting scope; they do not create workspaces.
+        """
+        workspace_id = self._normalize_workspace_id(workspace_id)
+        name = self._normalize_workspace_name(name)
+        tenant_id = self._validate_identifier(tenant_id, "tenant_id")
+        profile_id = self._validate_identifier(profile_id, "profile_id")
+        settings_json = self._serialize_settings(settings or {})
+        now = self._utc_now()
+        with self._connection(write=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO workspaces(
+                    id, profile_id, name, tenant_id, settings_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    workspace_id,
+                    profile_id,
+                    name,
+                    tenant_id,
+                    settings_json,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM workspaces WHERE id = ?",
+                (workspace_id,),
+            ).fetchone()
+        if row is None:  # pragma: no cover - guarded by the insert above
+            raise RuntimeError("workspace was not persisted")
+        return self._workspace_from_row(row)
+
     def ensure_workspace_tenant(self, workspace_id: str, tenant_id: str) -> bool:
         """Atomically bind a workspace to one tenant identity.
 

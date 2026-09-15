@@ -615,10 +615,14 @@ class RequestOrchestrator:
         context = dict(context or {})
         has_attachments = bool(context.get("file_path") or context.get("file_paths"))
         if has_attachments:
-            parsed_files, attachment_context = self._parse_context_attachments(
-                user_input,
-                context,
-            )
+            if "parsed_files" in context or context.get("_attachments_prepared") is True:
+                parsed_files = list(context.get("parsed_files") or [])
+                attachment_context = str(context.get("attachment_context") or "")
+            else:
+                parsed_files, attachment_context = self._parse_context_attachments(
+                    user_input,
+                    context,
+                )
             if parsed_files and not any(item.get("success") for item in parsed_files):
                 errors = "；".join(
                     f"{item['name']}：{item.get('error', '无法识别')}"
@@ -987,10 +991,14 @@ class RequestOrchestrator:
         if not has_attachments and is_capability_query(user_input):
             return self._capability_runtime_response(profile)
 
-        parsed_files, attachment_context = self._parse_context_attachments(
-            user_input,
-            context,
-        )
+        if "parsed_files" in context or context.get("_attachments_prepared") is True:
+            parsed_files = list(context.get("parsed_files") or [])
+            attachment_context = str(context.get("attachment_context") or "")
+        else:
+            parsed_files, attachment_context = self._parse_context_attachments(
+                user_input,
+                context,
+            )
         visual_semantics_requested = self._needs_visual_semantics(user_input)
         attachment_success = any(item.get("success") for item in parsed_files)
         if parsed_files and not attachment_success:

@@ -7,13 +7,16 @@ local default adapter remains available for ``uvicorn`` and development.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterable, Iterable, Mapping
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, is_dataclass
 import inspect
 import json
 import logging
 import os
+from queue import Empty as QueueEmpty
+from queue import Queue
 import sqlite3
 from typing import Any, Callable
 from uuid import uuid4
@@ -22,7 +25,7 @@ try:  # Keep import errors actionable when the optional API extra is omitted.
     from fastapi import FastAPI, Query, Request
     from fastapi.exceptions import RequestValidationError
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, StreamingResponse
     from pydantic import ValidationError
     from starlette.exceptions import HTTPException as StarletteHTTPException
 except ImportError as error:  # pragma: no cover - exercised in minimal installs
@@ -46,11 +49,17 @@ from artpm_agent.voice import (
 
 from .models import (
     ChatRequest,
+    EmbedChatRequest,
+    EmbedExchangeRequest,
+    EmbedSessionRequest,
+    ChatStreamRequest,
+    KnowledgeSearchRequest,
     PermissionDecisionRequest,
     WorkflowApprovalRequest,
     WorkflowDefinitionRequest,
     WorkflowRunRequest,
     VoiceSessionRequest,
+    WorkspaceCreateRequest,
 )
 from .services import (
     ChatCommand,
@@ -63,6 +72,7 @@ from .services import (
     build_default_services,
     validate_identifier,
 )
+from .embed import EmbedError, EmbedGateway
 
 logger = logging.getLogger(__name__)
 API_VERSION = "v1"
@@ -149,6 +159,77 @@ def _model_json(value: Any) -> Any:
     if callable(model_dump):
         return model_dump(mode="json")
     return _json_safe(value)
+
+
+def _coerce_chat_outcome(value: Any) -> ChatOutcome | None:
+    """Normalize an optional stream result without accepting arbitrary fields."""
+
+    if isinstance(value, ChatOutcome):
+        return value
+    if not isinstance(value, Mapping) or "type" in value or "event" in value:
+        return None
+    if not any(key in value for key in ("response", "success", "error")):
+        return None
+    allowed = {
+        "response",
+        "success",
+        "awaiting_approval",
+        "handled_by",
+        "metadata",
+        "artifacts",
+        "error",
+    }
+    try:
+        return ChatOutcome(**{key: value[key] for key in allowed if key in value})
+    except (TypeError, ValueError):
+        return None
+
+
+def _stream_event_payload(value: Any, *, run_id: str, turn_id: str) -> dict[str, Any] | None:
+    """Turn an AgentEvent or a small provider mapping into public JSON."""
+
+    if isinstance(value, str):
+        raw: dict[str, Any] = {"type": "message_update", "delta": value}
+    elif hasattr(value, "to_dict") and callable(value.to_dict):
+        try:
+            raw = value.to_dict()
+        except Exception:  # pragma: no cover - defensive provider boundary
+            return None
+    elif isinstance(value, Mapping):
+        raw = dict(value)
+    else:
+        return None
+    raw_event_type = raw.get("type") or raw.get("event") or ""
+    event_type = str(getattr(raw_event_type, "value", raw_event_type)).strip()
+    if not event_type:
+        if "delta" in raw or "content" in raw:
+            event_type = "message_update"
+        else:
+            return None
+    payload = _json_safe(raw)
+    if not isinstance(payload, dict):
+        return None
+    payload["type"] = event_type
+    payload.setdefault("run_id", run_id)
+    payload.setdefault("turn_id", turn_id)
+    # Provider exception text is never a client contract. Keep the event
+    # useful for rendering while exposing only a stable failure marker.
+    if payload.get("is_error") or event_type in {"runtime_error", "error"}:
+        payload["is_error"] = True
+        payload["error"] = "chat_failed"
+        payload.pop("exception", None)
+        payload["metadata"] = {"error_code": "chat_failed"}
+    return payload
+
+
+def _sse_frame(payload: Mapping[str, Any], *, event_id: str) -> str:
+    """Encode one compact SSE frame with JSON data and a resumable id."""
+
+    event_type = str(payload.get("type") or "message_update")
+    data = json.dumps(_json_safe(payload), ensure_ascii=False, separators=(",", ":"))
+    # SSE data may contain newlines; each line must carry its own data prefix.
+    body = "".join(f"data: {line}\n" for line in data.splitlines() or [""])
+    return f"id: {event_id}\nevent: {event_type}\n{body}\n"
 
 
 def _principal(request: Request) -> RequestPrincipal:
@@ -453,9 +534,24 @@ def create_app(
     from artpm_agent.observability import instrument_fastapi
 
     instrument_fastapi(app)
+    try:
+        embed_gateway = EmbedGateway()
+    except EmbedError as error:
+        # Keep the core gateway available while exposing a deterministic
+        # configuration error through the opt-in embed routes.
+        logger.error("Embed configuration is invalid: %s", error)
+        embed_gateway = EmbedGateway.__new__(EmbedGateway)
+        embed_gateway.settings = None
+    cors_origins = _cors_origins()
+    settings = getattr(embed_gateway, "settings", None)
+    channels = getattr(settings, "channels", {}) if settings is not None else {}
+    for channel in channels.values():
+        for origin in getattr(channel, "allowed_origins", ()):
+            if origin not in cors_origins:
+                cors_origins.append(origin)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=_cors_origins(),
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
@@ -464,6 +560,7 @@ def create_app(
     app.state.gateway_services = services
     app.state.identity_resolver = resolver
     app.state.voice_broker = voice_broker or VoiceSessionBroker()
+    app.state.embed_gateway = embed_gateway
 
     @app.middleware("http")
     async def request_context(request: Request, call_next: Callable[..., Any]):
@@ -558,7 +655,295 @@ def create_app(
             ]
         else:
             entries = [_json_safe(item) for item in (capabilities_value or [])]
-        return {"workspace_id": principal.workspace_id, "items": entries}
+        deployment = []
+        deployment_provider = services.deployment_capability_provider
+        if deployment_provider is not None:
+            try:
+                deployment = _json_safe(deployment_provider())
+            except Exception as error:  # noqa: BLE001 - diagnostics must not hide skills
+                logger.warning("deployment capability report unavailable: %s", error)
+        return {
+            "workspace_id": principal.workspace_id,
+            "items": entries,
+            "deployment": deployment,
+        }
+
+    def _embed_gateway(request: Request) -> EmbedGateway:
+        gateway = getattr(request.app.state, "embed_gateway", None)
+        if not isinstance(gateway, EmbedGateway) or gateway.settings is None:
+            raise GatewayError(503, "embed_unconfigured", "embed configuration is invalid")
+        return gateway
+
+    def _embed_rate_key(request: Request) -> str:
+        client = getattr(request, "client", None)
+        return str(getattr(client, "host", "unknown") or "unknown")[:128]
+
+    def _embed_request_origin(
+        request: Request,
+        supplied: str,
+        *,
+        require_header: bool = False,
+    ) -> str:
+        header_origin = str(request.headers.get("origin") or "").strip()
+        # Browsers always send Origin for these cross-site POSTs. Requiring an
+        # exact match prevents a caller from authenticating one origin while
+        # placing another origin in the JSON body.
+        if require_header and not header_origin:
+            raise EmbedError(403, "embed_origin_required", "request Origin header is required")
+        if header_origin and header_origin.rstrip("/").lower() != str(supplied).strip().rstrip("/").lower():
+            raise EmbedError(403, "embed_origin_mismatch", "request origin does not match payload origin")
+        return supplied
+
+    def _embed_principal(
+        gateway: EmbedGateway,
+        channel_name: str,
+        claims: Mapping[str, Any],
+        request: Request,
+    ) -> RequestPrincipal:
+        channel = gateway.settings.channels.get(channel_name)
+        if channel is None:
+            raise GatewayError(404, "embed_not_found", "embed channel is not available")
+        try:
+            principal = RequestPrincipal(
+                workspace_id=channel.workspace_id,
+                actor_id=validate_identifier(str(claims.get("actor_id") or "embed-user"), "actor_id"),
+                actor_role="user",
+                actor_kind="service",
+                profile_id=channel.profile_id,
+                tenant_id=channel.tenant_id,
+            )
+            request_context = principal.tenant_context(request_id=_request_id(request))
+            request.state.tenant_context = request_context
+            return principal
+        except (IdentityError, ValueError) as error:
+            raise GatewayError(401, "embed_token_invalid", "embed session identity is invalid") from error
+
+    @app.get("/embed/{channel}/config", tags=["embed"])
+    def embed_config(request: Request, channel: str):
+        gateway = _embed_gateway(request)
+        origin = request.headers.get("origin", "")
+        try:
+            result = gateway.public_config(channel, origin)
+            configured_channel = gateway.settings.channels[channel]
+        except EmbedError as error:
+            raise GatewayError(error.status_code, error.code, error.message) from error
+        return JSONResponse(
+            status_code=200,
+            content=_json_safe(result),
+            headers={**gateway.response_headers(configured_channel), "x-request-id": _request_id(request)},
+        )
+
+    @app.post("/embed/{channel}/exchange", tags=["embed"])
+    def embed_exchange(request: Request, channel: str, payload: EmbedExchangeRequest):
+        gateway = _embed_gateway(request)
+        try:
+            result = gateway.exchange(
+                channel,
+                origin=_embed_request_origin(request, payload.origin),
+                publish_token=payload.publish_token,
+                rate_key=_embed_rate_key(request),
+            )
+            configured_channel = gateway.settings.channels[channel]
+        except EmbedError as error:
+            raise GatewayError(error.status_code, error.code, error.message) from error
+        return JSONResponse(
+            status_code=200,
+            content=_json_safe(result),
+            headers={**gateway.response_headers(configured_channel), "x-request-id": _request_id(request)},
+        )
+
+    @app.post("/embed/{channel}/session", tags=["embed"])
+    def embed_session(request: Request, channel: str, payload: EmbedSessionRequest):
+        gateway = _embed_gateway(request)
+        try:
+            exchange_claims = gateway.verify_exchange(
+                channel,
+                exchange_token=payload.exchange_token,
+                origin=_embed_request_origin(request, payload.origin, require_header=True),
+            )
+            principal = _embed_principal(gateway, channel, exchange_claims, request)
+            _require_workspace(services, principal, request)
+            conversation = (
+                _conversation(services, principal, payload.conversation_id)
+                if payload.conversation_id
+                else services.conversations.create_conversation(
+                    "Embed chat",
+                    workspace_id=principal.workspace_id,
+                )
+            )
+            result = gateway.create_session(
+                channel,
+                exchange_token=payload.exchange_token,
+                origin=payload.origin,
+                conversation_id=conversation["id"],
+                rate_key=_embed_rate_key(request),
+            )
+            configured_channel = gateway.settings.channels[channel]
+        except EmbedError as error:
+            raise GatewayError(error.status_code, error.code, error.message) from error
+        except GatewayError:
+            raise
+        except Exception as error:  # noqa: BLE001 - embed must not expose store details
+            logger.exception("Embed session creation failed [%s]", _request_id(request))
+            raise GatewayError(503, "embed_session_failed", "embed session could not be created") from error
+        result["conversation_id"] = conversation["id"]
+        return JSONResponse(
+            status_code=201,
+            content=_json_safe(result),
+            headers={**gateway.response_headers(configured_channel), "x-request-id": _request_id(request)},
+        )
+
+    @app.post("/embed/{channel}/chat", tags=["embed"])
+    async def embed_chat(request: Request, channel: str, payload: EmbedChatRequest):
+        gateway = _embed_gateway(request)
+        try:
+            claims = gateway.verify_session(
+                channel,
+                token=payload.session_token,
+                origin=_embed_request_origin(request, payload.origin, require_header=True),
+                rate_key=_embed_rate_key(request),
+            )
+            principal = _embed_principal(gateway, channel, claims, request)
+            _require_workspace(services, principal, request)
+            conversation_id = validate_identifier(
+                str(claims.get("conversation_id") or ""), "conversation_id", max_length=256
+            )
+            conversation = _conversation(services, principal, conversation_id)
+            turn_id = uuid4().hex
+            user_message = services.conversations.add_message(
+                conversation["id"],
+                "user",
+                payload.message,
+                turn_id=turn_id,
+                workspace_id=principal.workspace_id,
+                metadata={"source": "embed", "channel": channel},
+            )
+            outcome = await services.chat_async(
+                ChatCommand(
+                    principal=principal,
+                    conversation_id=conversation["id"],
+                    turn_id=turn_id,
+                    message=payload.message,
+                    tenant_context=_tenant_context(request),
+                    before_message_id=(
+                        int(user_message["id"])
+                        if isinstance(user_message, Mapping) and user_message.get("id")
+                        else None
+                    ),
+                )
+            )
+            if isinstance(outcome, Mapping):
+                outcome = ChatOutcome(**dict(outcome))
+            if not isinstance(outcome, ChatOutcome):
+                raise GatewayServiceError("chat handler returned an invalid outcome")
+            services.conversations.add_message(
+                conversation["id"],
+                "assistant",
+                outcome.response or "请求未返回有效内容。",
+                status="complete" if outcome.success else "error",
+                turn_id=turn_id,
+                workspace_id=principal.workspace_id,
+                metadata={
+                    "source": "embed",
+                    "handled_by": outcome.handled_by,
+                    "awaiting_approval": outcome.awaiting_approval,
+                    "error": "chat_failed" if outcome.error else None,
+                },
+            )
+            configured_channel = gateway.settings.channels[channel]
+        except EmbedError as error:
+            raise GatewayError(error.status_code, error.code, error.message) from error
+        except GatewayError:
+            raise
+        except Exception as error:  # noqa: BLE001 - never expose provider internals
+            logger.exception("Embed chat failed [%s]", _request_id(request))
+            raise GatewayError(502, "embed_chat_failed", "embed chat could not complete the request") from error
+        metadata = _json_safe(outcome.metadata)
+        return JSONResponse(
+            status_code=202 if outcome.awaiting_approval else (200 if outcome.success else 502),
+            content={
+                "conversation_id": conversation["id"],
+                "turn_id": turn_id,
+                "response": outcome.response or "请求未返回有效内容。",
+                "success": outcome.success,
+                "awaiting_approval": outcome.awaiting_approval,
+                "handled_by": outcome.handled_by,
+                "metadata": metadata,
+                "artifacts": _json_safe(outcome.artifacts),
+            },
+            headers={**gateway.response_headers(configured_channel), "x-request-id": _request_id(request)},
+        )
+
+    @app.get("/v1/workspaces", tags=["workspaces"])
+    def list_workspaces(request: Request):
+        """List workspaces visible to the authenticated tenant."""
+        principal = _principal(request)
+        try:
+            items = services.conversations.list_workspaces(
+                # A tenant may own workspaces backed by different agent
+                # profiles. Profile selection is an execution concern and
+                # must not hide otherwise authorized workspace metadata.
+                profile_id=None,
+                limit=100,
+            )
+            visible = [
+                item
+                for item in items
+                # Unbound legacy rows are intentionally hidden until a
+                # workspace-scoped request claims them through the normal
+                # tenant guard. Never expose them from a list endpoint.
+                if item.get("tenant_id") == principal.tenant_id
+            ]
+        except Exception as error:  # noqa: BLE001 - normalize store errors
+            raise GatewayError(503, "workspace_store_unavailable", "workspace store is unavailable") from error
+        return {"tenant_id": principal.tenant_id, "items": [_json_safe(item) for item in visible]}
+
+    @app.post("/v1/workspaces", tags=["workspaces"])
+    def create_workspace(request: Request, payload: WorkspaceCreateRequest):
+        """Create one workspace owned by the trusted tenant context."""
+        principal = _principal(request)
+        if principal.actor_role != "admin":
+            raise GatewayError(403, "workspace_admin_required", "workspace creation requires admin role")
+        try:
+            workspace_id = validate_identifier(payload.id, "workspace_id")
+            profile_id = validate_identifier(payload.profile_id, "profile_id")
+            item = services.conversations.create_workspace(
+                workspace_id,
+                payload.name,
+                tenant_id=principal.tenant_id,
+                profile_id=profile_id,
+                settings=payload.settings,
+            )
+        except ValueError as error:
+            raise GatewayError(400, "invalid_workspace", str(error)) from error
+        except Exception as error:  # noqa: BLE001 - do not leak sqlite details
+            if "unique" in str(error).lower() or "constraint" in str(error).lower():
+                raise GatewayError(409, "workspace_exists", "workspace already exists") from error
+            raise GatewayError(503, "workspace_store_unavailable", "workspace could not be created") from error
+        return JSONResponse(status_code=201, content=_json_safe(item), headers={"x-request-id": _request_id(request)})
+
+    @app.post("/v1/search", tags=["knowledge"])
+    def search_knowledge(request: Request, payload: KnowledgeSearchRequest):
+        """Search only the current workspace knowledge scope."""
+        principal = _principal(request)
+        _require_workspace(services, principal, request)
+        handler = services.knowledge_search_handler
+        if handler is None:
+            raise GatewayError(503, "knowledge_search_unavailable", "workspace knowledge retrieval is unavailable")
+        try:
+            items = handler(principal, payload.model_dump(mode="json"))
+        except GatewayServiceError as error:
+            raise GatewayError(503, "knowledge_search_unavailable", str(error)) from error
+        except (ValueError, TypeError) as error:
+            raise GatewayError(400, "invalid_search_request", str(error)) from error
+        except Exception as error:  # noqa: BLE001 - normalize provider errors
+            logger.exception("Knowledge search failed [%s]", _request_id(request))
+            raise GatewayError(503, "knowledge_search_failed", "knowledge search could not complete") from error
+        return {
+            "workspace_id": principal.workspace_id,
+            "query": payload.query,
+            "items": _json_safe(items),
+        }
 
     @app.get("/v1/voice/status", tags=["voice"])
     def voice_status(request: Request):
@@ -741,6 +1126,341 @@ def create_app(
             status_code=status_code,
             content=response_body,
             headers={"x-request-id": _request_id(request)},
+        )
+
+    @app.post("/v1/chat/stream", tags=["chat"])
+    async def chat_stream(
+        request: Request,
+        payload: ChatStreamRequest,
+        after_sequence: int | None = Query(default=None, ge=0),
+    ):
+        """Stream one tenant-scoped turn as resumable Server-Sent Events.
+
+        The route accepts a provider-neutral ``chat_stream_handler`` when a
+        host supplies one.  The local adapter bridges the existing async chat
+        handler and its EventBus, so migrating providers does not require a
+        second orchestration path.  Every frame carries ``run_id`` and
+        ``turn_id`` in both the SSE id and JSON payload; clients can persist
+        those values before reconnecting.  ``after_sequence`` is reserved for
+        session-log replay adapters and is accepted for forward compatibility.
+        """
+
+        principal = _principal(request)
+        _require_workspace(services, principal, request)
+        if payload.conversation_id:
+            conversation = _conversation(services, principal, payload.conversation_id)
+        else:
+            title = payload.title or payload.message[:80]
+            try:
+                conversation = services.conversations.create_conversation(
+                    title,
+                    workspace_id=principal.workspace_id,
+                )
+            except Exception as error:  # noqa: BLE001 - normalize persistence errors
+                raise _map_store_error(error) from error
+
+        try:
+            turn_id = validate_identifier(
+                payload.turn_id or uuid4().hex,
+                "turn_id",
+                max_length=256,
+            )
+            run_id = validate_identifier(
+                payload.run_id or turn_id,
+                "run_id",
+                max_length=256,
+            )
+        except IdentityError as error:
+            raise GatewayError(400, "invalid_stream_id", str(error)) from error
+
+        attachments = tuple(item.model_dump(mode="json") for item in payload.attachments)
+        try:
+            user_message = services.conversations.add_message(
+                conversation["id"],
+                "user",
+                payload.message,
+                turn_id=turn_id,
+                workspace_id=principal.workspace_id,
+                metadata={"attachments": list(attachments), "source": "api-stream"},
+            )
+        except Exception as error:  # noqa: BLE001 - normalize persistence errors
+            raise _map_store_error(error) from error
+
+        command = ChatCommand(
+            principal=principal,
+            conversation_id=conversation["id"],
+            turn_id=turn_id,
+            message=payload.message,
+            attachments=attachments,
+            tenant_context=_tenant_context(request),
+            before_message_id=(
+                int(user_message["id"])
+                if isinstance(user_message, Mapping) and user_message.get("id")
+                else None
+            ),
+            run_id=run_id,
+        )
+
+        async def stream_frames():
+            event_index = 0
+            started = False
+            ended = False
+            response_parts: list[str] = []
+            outcome: ChatOutcome | None = None
+            unsubscribe: Callable[[], Any] | None = None
+            task: asyncio.Task[Any] | None = None
+
+            async def emit(value: Any, *, final: bool = False):
+                nonlocal event_index, started, ended
+                event_payload = _stream_event_payload(
+                    value,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                )
+                if event_payload is None:
+                    return
+                event_type = str(event_payload.get("type") or "message_update")
+                if event_type == "turn_start":
+                    if started:
+                        return
+                    started = True
+                elif event_type == "turn_end":
+                    if not final:
+                        return
+                    if ended:
+                        return
+                    ended = True
+                if event_type in {"message_update", "message_delta"}:
+                    delta = event_payload.get("delta")
+                    if isinstance(delta, str) and delta:
+                        response_parts.append(delta)
+                    elif not response_parts:
+                        content = event_payload.get("content")
+                        if isinstance(content, str) and content:
+                            response_parts.append(content)
+                event_id = f"{run_id}:{turn_id}:{event_index}"
+                event_index += 1
+                yield _sse_frame(event_payload, event_id=event_id)
+
+            # A synthetic first frame gives every adapter one stable lifecycle
+            # marker.  A duplicate TURN_START from the adapter is suppressed.
+            async for frame in emit(
+                {
+                    "type": "turn_start",
+                    "run_id": run_id,
+                    "turn_id": turn_id,
+                    "metadata": {
+                        "workspace_id": principal.workspace_id,
+                        "conversation_id": conversation["id"],
+                        "after_sequence": after_sequence,
+                    },
+                }
+            ):
+                yield frame
+
+            try:
+                stream_handler = services.chat_stream_handler
+                if stream_handler is not None:
+                    callable_target = getattr(stream_handler, "__call__", stream_handler)
+                    if inspect.iscoroutinefunction(stream_handler) or inspect.iscoroutinefunction(callable_target):
+                        source = stream_handler(command)
+                    else:
+                        source = await asyncio.to_thread(stream_handler, command)
+                    if inspect.isawaitable(source):
+                        source = await source
+                    direct_outcome = _coerce_chat_outcome(source)
+                    if direct_outcome is not None:
+                        outcome = direct_outcome
+                    elif isinstance(source, Mapping):
+                        async for frame in emit(source):
+                            yield frame
+                    elif isinstance(source, str):
+                        async for frame in emit(source):
+                            yield frame
+                    elif isinstance(source, AsyncIterable) or hasattr(source, "__aiter__"):
+                        async for item in source:
+                            direct_outcome = _coerce_chat_outcome(item)
+                            if direct_outcome is not None:
+                                outcome = direct_outcome
+                                continue
+                            async for frame in emit(item):
+                                yield frame
+                    elif isinstance(source, Iterable) and not isinstance(source, (str, bytes)):
+                        iterator = iter(source)
+
+                        def next_item():
+                            try:
+                                return True, next(iterator)
+                            except StopIteration:
+                                return False, None
+
+                        while True:
+                            has_item, item = await asyncio.to_thread(next_item)
+                            if not has_item:
+                                break
+                            direct_outcome = _coerce_chat_outcome(item)
+                            if direct_outcome is not None:
+                                outcome = direct_outcome
+                                continue
+                            async for frame in emit(item):
+                                yield frame
+                    elif source is not None:
+                        direct_outcome = _coerce_chat_outcome(source)
+                        if direct_outcome is not None:
+                            outcome = direct_outcome
+                else:
+                    # The default local runtime emits SESSION lifecycle events
+                    # synchronously on its EventBus while chat_async runs in a
+                    # worker thread. Forward those observations without
+                    # blocking the gateway event loop.
+                    event_queue: Queue[Any] = Queue()
+                    event_bus = services.event_bus
+
+                    def observe(event: Any) -> None:
+                        event_run = str(getattr(event, "run_id", "") or "")
+                        event_turn = str(getattr(event, "turn_id", "") or "")
+                        if event_run != run_id and event_turn != turn_id:
+                            return
+                        # EventBus callbacks run in the provider thread. A
+                        # standard queue makes the handoff lossless even when
+                        # the provider returns immediately after publishing.
+                        event_queue.put(event)
+
+                    if event_bus is not None and callable(getattr(event_bus, "subscribe", None)):
+                        unsubscribe = event_bus.subscribe(observe)
+                    task = asyncio.create_task(services.chat_async(command))
+                    while True:
+                        if task.done() and event_queue.empty():
+                            break
+                        try:
+                            event = await asyncio.to_thread(event_queue.get, True, 0.1)
+                        except QueueEmpty:
+                            continue
+                        async for frame in emit(event):
+                            yield frame
+                    outcome_value = await task
+                    outcome = _coerce_chat_outcome(outcome_value)
+                    if outcome is None:
+                        raise GatewayServiceError("chat handler returned an invalid outcome")
+            except asyncio.CancelledError:
+                if task is not None and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        # Client disconnects must not leak the provider worker;
+                        # the original cancellation remains the public result.
+                        pass
+                raise
+            except Exception:  # noqa: BLE001 - never leak provider internals
+                logger.exception("Chat stream failed [%s]", _request_id(request))
+                outcome = ChatOutcome(
+                    response="",
+                    success=False,
+                    error="chat_failed",
+                    handled_by="gateway",
+                )
+                async for frame in emit(
+                    {
+                        "type": "error",
+                        "run_id": run_id,
+                        "turn_id": turn_id,
+                        "is_error": True,
+                        "error": "chat_failed",
+                        "metadata": {"request_id": _request_id(request)},
+                    }
+                ):
+                    yield frame
+            finally:
+                if unsubscribe is not None:
+                    try:
+                        unsubscribe()
+                    except Exception:  # pragma: no cover - optional bus cleanup
+                        logger.debug("chat stream event unsubscribe failed", exc_info=True)
+                if task is not None and not task.done():
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+
+            if outcome is None:
+                outcome = ChatOutcome(response="".join(response_parts))
+            response_text = outcome.response or "".join(response_parts)
+            if response_text and not response_parts:
+                # Legacy/default handlers return one final string rather than
+                # token events. Expose it as one delta so every stream has a
+                # consistent message channel while providers migrate.
+                async for frame in emit(
+                    {
+                        "type": "message_update",
+                        "run_id": run_id,
+                        "turn_id": turn_id,
+                        "delta": response_text,
+                        "metadata": {"source": "final_response"},
+                    }
+                ):
+                    yield frame
+            status = "complete" if outcome.success else "error"
+            try:
+                services.conversations.add_message(
+                    conversation["id"],
+                    "assistant",
+                    response_text or ("请求处理失败，请稍后重试。" if not outcome.success else ""),
+                    status=status,
+                    turn_id=turn_id,
+                    workspace_id=principal.workspace_id,
+                    metadata={
+                        "run_id": run_id,
+                        "handled_by": outcome.handled_by,
+                        "awaiting_approval": outcome.awaiting_approval,
+                        "metadata": _json_safe(outcome.metadata),
+                        "artifacts": _json_safe(outcome.artifacts),
+                        "error": "chat_failed" if outcome.error else None,
+                    },
+                )
+            except Exception:  # noqa: BLE001 - stream result remains inspectable
+                logger.exception("Failed to persist streamed assistant message [%s]", _request_id(request))
+
+            async for frame in emit(
+                {
+                    "type": "snapshot",
+                    "run_id": run_id,
+                    "turn_id": turn_id,
+                    "response": response_text,
+                    "success": bool(outcome.success),
+                    "awaiting_approval": bool(outcome.awaiting_approval),
+                    "handled_by": outcome.handled_by,
+                    "metadata": _json_safe(outcome.metadata),
+                    "artifacts": _json_safe(outcome.artifacts),
+                    "error": "chat_failed" if outcome.error else None,
+                },
+            ):
+                yield frame
+            async for frame in emit(
+                {
+                    "type": "turn_end",
+                    "run_id": run_id,
+                    "turn_id": turn_id,
+                    "is_error": not outcome.success,
+                    "error": "chat_failed" if not outcome.success else None,
+                    "metadata": {
+                        "success": bool(outcome.success),
+                        "handled_by": outcome.handled_by,
+                        "awaiting_approval": bool(outcome.awaiting_approval),
+                    },
+                },
+                final=True,
+            ):
+                yield frame
+
+        return StreamingResponse(
+            stream_frames(),
+            media_type="text/event-stream",
+            headers={
+                "cache-control": "no-cache, no-transform",
+                "connection": "keep-alive",
+                "x-accel-buffering": "no",
+                "x-request-id": _request_id(request),
+            },
         )
 
     @app.get("/v1/permissions", tags=["permissions"])

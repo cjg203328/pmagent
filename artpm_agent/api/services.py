@@ -150,6 +150,7 @@ class TrustedHeaderIdentityResolver:
     ROLE_HEADER = "x-actor-role"
     KIND_HEADER = "x-actor-kind"
     TENANT_HEADER = "x-tenant-id"
+    PROFILE_HEADER = "x-profile-id"
     TOKEN_HEADER = "x-gateway-token"
     _LOCAL_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
     _FORWARDED_HEADERS = frozenset({"forwarded", "x-forwarded-for", "x-forwarded-host"})
@@ -185,6 +186,7 @@ class TrustedHeaderIdentityResolver:
         actor_role = (headers.get(self.ROLE_HEADER) or "user").strip().lower()
         actor_kind = (headers.get(self.KIND_HEADER) or "human").strip().lower()
         tenant_id = (headers.get(self.TENANT_HEADER) or "local").strip()
+        profile_id = (headers.get(self.PROFILE_HEADER) or "local-default").strip()
         if workspace_id is None or actor_id is None:
             raise IdentityError("x-workspace-id and x-actor-id are required")
         return RequestPrincipal(
@@ -192,6 +194,7 @@ class TrustedHeaderIdentityResolver:
             actor_id=validate_identifier(actor_id, "actor_id"),
             actor_role=actor_role,
             actor_kind=actor_kind,
+            profile_id=validate_identifier(profile_id, "profile_id"),
             tenant_id=validate_identifier(tenant_id, "tenant_id"),
         )
 
@@ -207,6 +210,9 @@ class ChatCommand:
     attachments: tuple[Mapping[str, Any], ...] = ()
     tenant_context: Any = None
     before_message_id: int | None = None
+    # Stable identifiers for streaming/replay adapters.  Kept optional for
+    # compatibility with hosts that construct ChatCommand positionally.
+    run_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +246,15 @@ class GatewayServices:
     health_handler: Callable[[], Mapping[str, Any]] | None = None
     close_handler: Callable[[], None] | None = None
     event_bus: Any | None = None
+    # Keep newly introduced optional providers after the historical positional
+    # fields. Some embedders construct GatewayServices positionally and rely on
+    # the pre-retrieval ordering remaining stable.
+    knowledge_search_handler: Callable[[RequestPrincipal, Mapping[str, Any]], Any] | None = None
+    deployment_capability_provider: Callable[[], Any] | None = None
+    # Optional provider-neutral stream adapter.  It is intentionally appended
+    # after all historical fields so positional GatewayServices construction
+    # remains compatible with older hosts.
+    chat_stream_handler: Callable[[ChatCommand], Any] | None = None
 
     def get_workflow_engine(self, tenant_context: Any = None) -> Any:
         engine = self.workflow_engine
@@ -372,6 +387,34 @@ class DefaultGatewayRuntime:
             logger.warning("workspace knowledge store unavailable: %s", error)
             self.knowledge_store = None
         return self.knowledge_store
+
+    def search_knowledge(
+        self,
+        principal: RequestPrincipal,
+        payload: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Run one bounded, tenant/workspace-scoped retrieval plan."""
+
+        store = self._ensure_knowledge_store()
+        if store is None:
+            raise GatewayServiceError("workspace knowledge retrieval is unavailable")
+        from artpm_agent.retrieval import RetrievalPlan, SearchTarget, WorkspaceRetriever
+
+        target = SearchTarget(
+            tenant_id=principal.tenant_id,
+            workspace_id=principal.workspace_id,
+            resource_types=tuple(payload.get("resource_types") or ()),
+            source_types=tuple(payload.get("source_types") or ()),
+            include_rules=bool(payload.get("include_rules", True)),
+        )
+        plan = RetrievalPlan(
+            query=str(payload.get("query") or ""),
+            target=target,
+            limit=int(payload.get("limit", 10)),
+            max_text_chars=int(payload.get("max_text_chars", 4000)),
+            confidence_floor=float(payload.get("confidence_floor", 0.0)),
+        )
+        return [hit.to_dict() for hit in WorkspaceRetriever(store).search(plan)]
 
     def _ensure_learning_services(self) -> None:
         """Build the learning services once for the local gateway host."""
@@ -534,6 +577,7 @@ class DefaultGatewayRuntime:
                 "workspace_id": command.principal.workspace_id,
                 "conversation_id": command.conversation_id,
                 "turn_id": command.turn_id,
+                "run_id": command.run_id or command.turn_id,
                 "actor_id": command.principal.actor_id,
                 "actor_role": command.principal.actor_role,
                 "agent_id": "artpm-agent",
@@ -721,6 +765,44 @@ class DefaultGatewayRuntime:
             entries.append(entry)
         return sorted(entries, key=lambda item: item["name"])
 
+    def deployment_capabilities(self) -> list[dict[str, Any]]:
+        """Report capability readiness without changing the skill catalog."""
+
+        db_path = getattr(self, "db_path", "")
+        try:
+            from artpm_agent.api.embed import EmbedSettings
+
+            embed_settings = EmbedSettings.from_env()
+            embed_enabled = embed_settings.enabled
+            embed_configured = bool(embed_settings.secret and embed_settings.channels)
+        except Exception:  # noqa: BLE001 - diagnostics must remain non-fatal
+            embed_enabled = False
+            embed_configured = False
+        return [
+            {
+                "name": "workspace_retrieval",
+                "kind": "capability",
+                "source": "core",
+                "enabled": True,
+                "configured": True,
+                "ready": bool(db_path) and Path(db_path).is_file(),
+                "reason": "SQLite + workspace knowledge store",
+            },
+            {
+                "name": "embed",
+                "kind": "capability",
+                "source": "optional",
+                "enabled": embed_enabled,
+                "configured": embed_configured,
+                "ready": embed_enabled and embed_configured,
+                "reason": (
+                    "HMAC embed channel ready"
+                    if embed_enabled and embed_configured
+                    else "secure embed channel is opt-in and not enabled by default"
+                ),
+            },
+        ]
+
     def health(self) -> Mapping[str, Any]:
         """Cheap readiness probe; it never initializes an LLM or OCR model."""
 
@@ -760,6 +842,8 @@ def build_default_services(db_path: str | Path | None = None) -> GatewayServices
         workflows=runtime.workflows,
         chat_handler=runtime.chat,
         capability_provider=runtime.capabilities,
+        knowledge_search_handler=runtime.search_knowledge,
+        deployment_capability_provider=runtime.deployment_capabilities,
         workflow_capability_provider=runtime.workflow_capabilities,
         permission_executor=runtime.execute_permission,
         permission_executor_sources=frozenset({"skill"}),

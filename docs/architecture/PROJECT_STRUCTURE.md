@@ -52,6 +52,7 @@ artpm_agent/
 ├── skills/                             # 业务技能和技能路由
 ├── providers/                          # Provider、故障转移、结构化输出和缓存
 ├── memory/                             # 会话、记忆、FAISS/Qdrant 和 workspace 知识
+├── retrieval/                          # workspace-scoped RetrievalPlan/Hit 适配层
 ├── database/                           # SQLAlchemy 模型、连接和 Alembic 适配
 ├── tenancy/ / security/                # 租户上下文、权限和审批
 ├── plugins/                            # 插件发现、allowlist 和注册
@@ -94,6 +95,10 @@ docs/
 
 ## 当前规模与拆分状态
 
+工作区 UI 适配层已从兼容门面中提取到
+`artpm_agent/ui/workspace_selector.py`；其余大模块按
+[`OPTIMIZATION_STRATEGY.md`](./OPTIMIZATION_STRATEGY.md) 分阶段拆分，旧导入路径继续保留。
+
 以下数据由 2026-09-14 工作区实测，按源文件物理行数统计：
 
 | 文件 | 行数 | 当前职责 | 下一步 |
@@ -101,6 +106,7 @@ docs/
 | `artpm_agent/ui_helpers.py` | 2394 | UI 状态、会话、审批和渲染兼容门面 | 迁移为 session、approvals、rendering 子模块 |
 | `artpm_agent/ui_style.py` | 2312 | 内联 CSS 字符串 | 按页面/组件拆为样式资源 |
 | `artpm_agent/memory/workspace_knowledge_store.py` | 3013 | schema、资源、规则、向量索引 | 提取 migration、resource、rule、vector 服务 |
+| `artpm_agent/retrieval/` | small | 检索计划、范围校验、引用 DTO | 扩展 sparse/dense/rerank 时保持 API 稳定 |
 | `artpm_agent/views/chat.py` | 1889 | 聊天页面生命周期和渲染 | 继续下沉状态与回合适配 |
 | `artpm_agent/agent.py` | 74 | 兼容 facade 和依赖组装 | 保持轻量，不新增业务逻辑 |
 
