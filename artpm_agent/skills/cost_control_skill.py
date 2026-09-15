@@ -46,6 +46,29 @@ class CostControlSkill(BaseSkill):
         self.tax_rate = float(cfg.get("tax_rate", DEFAULT_TAX_RATE))
         self.db = self.context.get("database") if self.context else None
 
+    @staticmethod
+    def _coerce_project_id(value: Any) -> tuple[int | None, str | None]:
+        """Accept only a lossless positive integer project identifier.
+
+        Model/tool inputs may use strings for identifiers, but silently
+        truncating a float (``1.9 -> 1``) or accepting ``True`` can read the
+        wrong project's budget.  Reject those values instead of coercing them.
+        """
+        if isinstance(value, bool):
+            return None, "project_id 必须是正整数"
+        if isinstance(value, int):
+            return (value, None) if value >= 1 else (None, "project_id 必须是正整数")
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized.isdigit():
+                project_id = int(normalized)
+                return (
+                    (project_id, None)
+                    if project_id >= 1
+                    else (None, "project_id 必须是正整数")
+                )
+        return None, "project_id 必须是正整数"
+
     # ── 成本估算 ──
     def estimate(self, hours: float, staff_level: str = "中级", quantity: int = 1,
                  complexity: Optional[str] = None) -> Dict[str, Any]:
@@ -115,7 +138,13 @@ class CostControlSkill(BaseSkill):
             return b
         util = b.get("utilization_rate")
         if util is None:
-            return {**b, "alert": False, "message": "预算为 0，无法判断超支"}
+            return {
+                **b,
+                "threshold": threshold,
+                "alert": False,
+                "level": "ok",
+                "message": "预算为 0，无法判断超支",
+            }
         alert = util >= threshold
         level = "critical" if util >= 1.0 else ("warning" if alert else "ok")
         return {
@@ -140,10 +169,16 @@ class CostControlSkill(BaseSkill):
                 complexity=inputs.get("complexity"),
             )
         if action in ("budget", "预算", "预算跟踪"):
-            return self.budget(project_id=inputs.get("project_id"))
+            project_id, error = self._coerce_project_id(inputs.get("project_id"))
+            if error:
+                return {"success": False, "error": error}
+            return self.budget(project_id=project_id)
         if action in ("overrun", "超支", "告警", "超支告警"):
+            project_id, error = self._coerce_project_id(inputs.get("project_id"))
+            if error:
+                return {"success": False, "error": error}
             return self.overrun(
-                project_id=inputs.get("project_id"),
+                project_id=project_id,
                 threshold=float(inputs.get("threshold", 0.9)),
             )
         return {"success": False, "error": f"不支持的 action: {action}",

@@ -110,6 +110,7 @@ def execute_turn_with_harness(
     reflection_scheduler: Optional[Any] = None,
     meta_memory_store: Optional[Any] = None,
     consolidation_scheduler: Optional[Any] = None,
+    event_bus: Optional[Any] = None,
 ) -> Tuple[str, bool, Dict[str, Any], Any]:
     """
     Execute a turn using the unified harness (run_turn()).
@@ -243,6 +244,7 @@ def execute_turn_with_harness(
         reflection_scheduler=reflection_scheduler,
         meta_memory_store=meta_memory_store,
         consolidation_scheduler=consolidation_scheduler,
+        event_bus=event_bus,
     )
     turn_ctx = TurnContext(
         turn_id=turn_id,

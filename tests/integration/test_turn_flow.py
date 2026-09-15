@@ -174,7 +174,9 @@ class TestTurnFlow:
         )
 
         # Profile handler should catch this
-        assert result.awaiting_approval or result.success
+        assert result.success is True
+        assert result.awaiting_approval is False
+        assert result.handled_by == "model_chat"
 
     def test_memory_injection(self, mock_agent, mock_knowledge_store):
         """Test memory injection in turn processing."""
@@ -208,7 +210,10 @@ class TestTurnFlow:
         result = run_turn(ctx)
 
         # Should handle gracefully even with mock attachment
-        assert result.success or result.error
+        assert result.success is False
+        assert result.handled_by == "permission_gate"
+        assert result.error == "permission store is unavailable for a protected Skill"
+        assert result.response == "Permission request could not be persisted; no action was executed."
 
 
 class TestPerformanceBenchmark:
@@ -359,7 +364,8 @@ class TestResilience:
         try:
             result = run_turn(ctx)
             # Either succeeds with fallback or returns error
-            assert result.success or result.error
+            assert result.success is True
+            assert result.response
         except RuntimeError:
             pytest.fail("Handler exception not isolated")
 

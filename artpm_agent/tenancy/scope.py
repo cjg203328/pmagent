@@ -104,7 +104,7 @@ class Scope:
     def from_context(cls, context: Any, *, request_id: str | None = None) -> "Scope":
         """Map a server-owned authentication context to the canonical scope."""
 
-        roles = getattr(context, "roles", frozenset())
+        roles: frozenset[str] = frozenset(getattr(context, "roles", frozenset()))
         actor_role = (
             "service"
             if "service" in roles

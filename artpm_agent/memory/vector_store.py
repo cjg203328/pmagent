@@ -28,7 +28,20 @@ class VectorStore:
             "embedding_fingerprint": embedding_fingerprint,
         }
         qdrant_url = os.getenv("QDRANT_URL", "").strip()
-        requested = os.getenv("VECTOR_BACKEND", "qdrant" if qdrant_url else "faiss")
+        requested_env = os.getenv("VECTOR_BACKEND", "").strip()
+        if requested_env:
+            requested = requested_env
+        else:
+            try:
+                from artpm_agent.config_data import load_default_config
+
+                requested = str(
+                    load_default_config().get("memory", {}).get(
+                        "vector_backend", "qdrant"
+                    )
+                )
+            except Exception:  # pragma: no cover - packaged config fallback
+                requested = "qdrant" if qdrant_url else "faiss"
         if requested.casefold() == "qdrant" and qdrant_url:
             try:
                 from .qdrant_vector_store import QdrantVectorStore

@@ -58,6 +58,7 @@ from artpm_agent.ui_state import (  # noqa: F401 — re-exported for wildcard co
     get_artifact_generator,
     get_chat_attachment_store,
     get_conversation_store,
+    get_event_bus,
     get_session_store,
     get_current_profile,
     get_knowledge_store,

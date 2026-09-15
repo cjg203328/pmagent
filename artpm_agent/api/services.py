@@ -239,6 +239,7 @@ class GatewayServices:
     workflow_engine_factory: Callable[[], Any] | None = None
     health_handler: Callable[[], Mapping[str, Any]] | None = None
     close_handler: Callable[[], None] | None = None
+    event_bus: Any | None = None
 
     def get_workflow_engine(self, tenant_context: Any = None) -> Any:
         engine = self.workflow_engine
@@ -342,8 +343,10 @@ class DefaultGatewayRuntime:
         # ArtPMAgent is not assumed to be thread-safe.  The adapter lock keeps
         # a local deployment deterministic while cloud hosts can inject a pool.
         import threading
+        from artpm_agent.runtime.event_bus import EventBus
 
         self._lock = threading.RLock()
+        self.event_bus = EventBus()
 
     def _ensure_knowledge_store(self) -> Any:
         """Build the workspace knowledge backend once for the local gateway."""
@@ -507,6 +510,7 @@ class DefaultGatewayRuntime:
                 reflection_scheduler=self.reflection_scheduler,
                 meta_memory_store=self.meta_memory_store,
                 consolidation_scheduler=self.consolidation_scheduler,
+                event_bus=getattr(self, "event_bus", None),
             )
             # The API gateway is the first production host of the public
             # HarnessRuntime contract.  Bind the legacy facade's router to
@@ -762,6 +766,7 @@ def build_default_services(db_path: str | Path | None = None) -> GatewayServices
         workflow_engine_factory=lambda tenant_context=None: runtime._ensure_workflow_runtime(tenant_context)[0],
         health_handler=runtime.health,
         close_handler=runtime.close,
+        event_bus=runtime.event_bus,
     )
 
 

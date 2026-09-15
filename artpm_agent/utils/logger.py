@@ -101,11 +101,12 @@ def setup_logging(
     """
     # 确定日志目录
     configured_dir = log_dir or os.getenv("ARTPM_LOG_DIR")
-    log_dir = (
-        Path(configured_dir).expanduser()
-        if configured_dir
-        else Path(__file__).parent.parent / "logs"
-    )
+    if configured_dir:
+        log_dir = Path(configured_dir).expanduser().resolve()
+    else:
+        from artpm_agent.config import resolve_log_dir
+
+        log_dir = resolve_log_dir()
 
     log_dir.mkdir(parents=True, exist_ok=True)
 

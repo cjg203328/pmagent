@@ -10,7 +10,7 @@
 |---|---|
 | `Dockerfile` | 多阶段构建：builder 编译 wheel → runtime 以非 root 用户 `appuser`(uid/gid 10001) 运行，运行镜像不含 build-essential；依赖单一来源（pyproject.toml），headless 模式，严格探测 Streamlit 原生 `/_stcore/health` |
 | `docker-compose.yml` | 单栈编排：`artpm-agent` + `artpm-api` + `caddy` + `postgres` + `qdrant` + `redis` 及可观测组件共享 `artpm-net`；挂卷持久化数据/证书/缓存；认证和数据库凭据缺失即 fail-fast |
-| `Caddyfile` | 反向代理 + 自动 HTTPS + 全站 basicauth；站点域名由 `SITE_ADDRESS` 注入，认证凭据由 `BASIC_AUTH_USER` / `BASIC_AUTH_HASH` 提供（仓库不内置任何默认账号/密码） |
+| `Caddyfile` | 反向代理 + 自动 HTTPS + 全站 basicauth；站点域名由 `SITE_ADDRESS` 注入，认证凭据由 `BASIC_AUTH_USER` / `BASIC_AUTH_HASH` 提供，并向 API 注入可信租户/工作区/主体头 |
 | `.dockerignore` | 排除 data/logs/构建产物/测试，保障镜像精简且不泄露密钥 |
 
 ## 快速开始
@@ -30,6 +30,13 @@ docker run --rm caddy:2-alpine caddy hash-password
 #    把用户名与哈希写进 .env：
 #      BASIC_AUTH_USER=admin
 #      BASIC_AUTH_HASH=$2a$...刚生成的哈希...
+#    同时设置 API 网关身份：ARTPM_GATEWAY_SHARED_SECRET、
+#    ARTPM_GATEWAY_TENANT_ID、ARTPM_GATEWAY_WORKSPACE_ID、ARTPM_GATEWAY_ACTOR_ID
+#    以及 Compose 依赖的数据库/监控凭据：
+#      POSTGRES_PASSWORD=<应用角色密码>
+#      POSTGRES_ADMIN_PASSWORD=<PostgreSQL 管理员密码>
+#      GRAFANA_ADMIN_PASSWORD=<Grafana 管理员密码>
+#    这三项也必须非空；否则 docker compose config 会在启动前 fail-fast。
 
 # 4) 一条命令：构建 app + 起 Caddy + Redis + 自动申请/续期证书
 docker compose up -d --build
@@ -87,7 +94,7 @@ Caddy 对全站启用基础认证，避免服务裸奔到公网。**仓库与镜
   （未挂卷），重建容器即丢失。Docker 部署请统一通过 `DATA_ROOT` 环境变量（compose 已设 `/app/data`）
   或宿主 `./data` 挂卷来管理数据位置。
 - `.env` 含密钥，已通过 `:ro` 只读挂载且被 `.dockerignore` 排除，不会烤进镜像。
-- **非 root 运行权限**：运行镜像以固定 `appuser`(uid/gid 10001) 启动。宿主挂卷 `./data`、`../logs` 需对该 UID 可写，否则 Streamlit 启动会报权限错误。首次部署可：
+- **非 root 运行权限**：运行镜像以固定 `appuser`(uid/gid 10001) 启动。宿主挂卷 `./data`、`./logs` 需对该 UID 可写，否则 Streamlit 启动会报权限错误。首次部署可：
   ```bash
   sudo chown -R 10001:10001 ./data ./logs
   ```
@@ -95,3 +102,10 @@ Caddy 对全站启用基础认证，避免服务裸奔到公网。**仓库与镜
 - 健康检查：agent 探 `/_stcore/health`，API 探 `/ready`（均不初始化完整 Agent）；redis 探 `redis-cli ping`。
 - `artpm-agent` 默认**不**对外暴露 8501 端口（仅 Caddy 对内可达），对外唯一入口即 Caddy(443)。
   如确需局域网明文直连调试，可在 compose 中取消 `artpm-agent.ports` 注释。
+
+## 发布前验证
+
+开发环境使用提交的 `uv.lock` 固定依赖：`uv sync --locked --extra dev`。
+具备 Docker 的环境可运行 `docker compose config --quiet`，再执行
+`docker compose up -d --build`，确认 agent `/_stcore/health`、API `/ready`、
+Caddy `/api/ready`（带 Basic Auth）均返回成功；CI 的 `docker-smoke` job 会自动执行同一流程。

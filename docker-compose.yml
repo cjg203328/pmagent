@@ -33,6 +33,7 @@ services:
     environment:
       # 数据根目录：所有库与缓存都派生自此（见 artpm_agent.config.resolve_data_root）
       - DATA_ROOT=/app/data
+      - ARTPM_LOG_DIR=/app/logs
       - STREAMLIT_SERVER_HEADLESS=true
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
       # The UI probes the API over the Compose network. Browser/API traffic is
@@ -85,6 +86,7 @@ services:
       - ./.env:/app/.env:ro
     environment:
       - DATA_ROOT=/app/data
+      - ARTPM_LOG_DIR=/app/logs
       - ARTPM_PROCESS_ROLE=api
       - ARTPM_API_HOST=0.0.0.0
       - ARTPM_API_PORT=8765
@@ -141,6 +143,15 @@ services:
       #   在 .env 中填好后再 `docker compose up`（${VAR:?msg} 会在未设置时报错）。
       - BASIC_AUTH_USER=${BASIC_AUTH_USER:?Set BASIC_AUTH_USER in .env (e.g. admin) before deploying}
       - BASIC_AUTH_HASH=${BASIC_AUTH_HASH:?Set BASIC_AUTH_HASH in .env to the bcrypt hash from 'caddy hash-password' before deploying}
+      # Caddy is the trusted identity boundary for the static/basic-auth
+      # deployment. Replace these with a dynamic identity-aware ingress when
+      # multiple end-user principals are required.
+      - ARTPM_GATEWAY_SHARED_SECRET=${ARTPM_GATEWAY_SHARED_SECRET:?Set ARTPM_GATEWAY_SHARED_SECRET in .env before deploying}
+      - ARTPM_GATEWAY_TENANT_ID=${ARTPM_GATEWAY_TENANT_ID:?Set ARTPM_GATEWAY_TENANT_ID in .env before deploying}
+      - ARTPM_GATEWAY_WORKSPACE_ID=${ARTPM_GATEWAY_WORKSPACE_ID:?Set ARTPM_GATEWAY_WORKSPACE_ID in .env before deploying}
+      - ARTPM_GATEWAY_ACTOR_ID=${ARTPM_GATEWAY_ACTOR_ID:?Set ARTPM_GATEWAY_ACTOR_ID in .env before deploying}
+      - ARTPM_GATEWAY_ACTOR_ROLE=${ARTPM_GATEWAY_ACTOR_ROLE:-user}
+      - ARTPM_GATEWAY_ACTOR_KIND=${ARTPM_GATEWAY_ACTOR_KIND:-human}
     depends_on:
       artpm-agent:
         condition: service_healthy

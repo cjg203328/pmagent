@@ -1,0 +1,3 @@
+# Security audit input. Keep this separate from the runtime and dev profiles so
+# pip-audit resolves the production dependency surface in CI.
+-e .[production]

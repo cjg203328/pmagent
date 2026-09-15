@@ -22,7 +22,7 @@ def calculate_file_hash(file_path: str) -> str:
     Returns:
         MD5 hash string
     """
-    md5_hash = hashlib.md5()
+    md5_hash = hashlib.md5(usedforsecurity=False)
     with open(file_path, "rb") as f:
         for chunk in iter(lambda: f.read(4096), b""):
             md5_hash.update(chunk)

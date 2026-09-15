@@ -796,7 +796,10 @@ class Quote(TenantScopedMixin, Base):
     __tablename__ = "quotes"
 
     id = Column(String, primary_key=True)
-    project_id = Column(String, ForeignKey("projects.id"))
+    # Project.id is an integer in the canonical ORM schema.  Keep this
+    # legacy reference type aligned so PostgreSQL can create its FK during
+    # the legacy-table migration (SQLite remains permissive for old text IDs).
+    project_id = Column(Integer, ForeignKey("projects.id"))
     document_type = Column(String)
     file_path = Column(String)
     file_hash = Column(String)
@@ -811,7 +814,7 @@ class Reminder(TenantScopedMixin, Base):
     __tablename__ = "reminders"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    task_id = Column(String, ForeignKey("tasks.id"))
+    task_id = Column(Integer, ForeignKey("tasks.id"))
     reminder_type = Column(String)
     content = Column(Text)
     recipients = Column(Text)
@@ -840,7 +843,7 @@ class ProgressUpdate(TenantScopedMixin, Base):
     __tablename__ = "progress_updates"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    task_id = Column(String, ForeignKey("tasks.id"), nullable=False)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False)
     progress = Column(Float)
     note = Column(Text)
     updated_by = Column(String)
@@ -852,7 +855,7 @@ class TaskAssignment(TenantScopedMixin, Base):
     __tablename__ = "task_assignments"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    task_id = Column(String, ForeignKey("tasks.id"), nullable=False)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False)
     staff_id = Column(String, ForeignKey("staff.id"), nullable=False)
     workload_ratio = Column(Float, default=1.0)
     assigned_at = Column(DateTime, default=datetime.now)

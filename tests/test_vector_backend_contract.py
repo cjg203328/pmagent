@@ -36,3 +36,10 @@ def test_vector_facade_satisfies_vector_contract(tmp_path, monkeypatch):
     store = VectorStore(tmp_path / "facade", dimension=4)
     assert isinstance(store, VectorBackend)
     _exercise_backend(store)
+
+
+def test_vector_facade_uses_packaged_default_when_env_is_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("VECTOR_BACKEND", raising=False)
+    monkeypatch.delenv("QDRANT_URL", raising=False)
+    store = VectorStore(tmp_path / "packaged-default", dimension=4)
+    assert store.status()["backend"] == "faiss"

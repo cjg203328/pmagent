@@ -38,6 +38,23 @@ if config.config_file_name:
 
 target_metadata = Base.metadata
 
+# ``workbench_snapshot`` is a deliberately unmanaged compatibility table used
+# by the legacy workspace store.  It predates Alembic and is not represented
+# by the relational ORM metadata, so autogenerate must not propose dropping it
+# every time ``alembic check`` runs.
+_UNMANAGED_COMPAT_TABLES = frozenset({"workbench_snapshot"})
+
+
+def include_object(object_, name, type_, reflected, compare_to):
+    if (
+        type_ == "table"
+        and reflected
+        and compare_to is None
+        and name in _UNMANAGED_COMPAT_TABLES
+    ):
+        return False
+    return True
+
 
 def get_url() -> str:
     """解析数据库连接 URL。"""
@@ -52,6 +69,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -67,6 +85,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
+            include_object=include_object,
         )
         with context.begin_transaction():
             context.run_migrations()

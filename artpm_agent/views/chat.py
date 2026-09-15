@@ -989,6 +989,7 @@ def chat_page():
                                 workflow_formatter=format_workflow_result,
                                 response_handler=respond_from_public_agent_api,
                                 session_store=get_session_store(),
+                                event_bus=get_event_bus(),
                             )
                             if (
                                 harness_result is not None

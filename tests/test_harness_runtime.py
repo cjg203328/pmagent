@@ -242,6 +242,37 @@ def test_event_bus_receives_scoped_turn_and_tool_events() -> None:
     assert events[2].tool_result["success"] is True
 
 
+def test_event_bus_and_session_store_both_receive_turn_events(tmp_path) -> None:
+    conversations = ConversationStore(tmp_path / "bus-and-store.db")
+    conversation = conversations.create_conversation("bus-and-store")
+    session_store = SessionStore(conversations)
+    event_bus = EventBus()
+    live_events = []
+    event_bus.subscribe(live_events.append)
+    context = TurnContext(
+        turn_id="bus-and-store-turn",
+        conversation_id=conversation["id"],
+        user_input="lookup this",
+        runtime=ExternalSkillRuntime(),
+        extra={"workspace_id": ConversationStore.DEFAULT_WORKSPACE_ID},
+        services=TurnServiceBundle(
+            event_bus=event_bus,
+            session_store=session_store,
+        ),
+    )
+
+    result = run_turn(context)
+
+    assert result.success is True
+    assert len(live_events) == 4
+    assert [entry.entry_type for entry in session_store.replay(conversation["id"])] == [
+        "turn_start",
+        "tool_execution_start",
+        "tool_execution_end",
+        "turn_end",
+    ]
+
+
 def test_event_sink_failure_does_not_fail_turn() -> None:
     class BrokenEventBus:
         def publish(self, _event: Any) -> None:
@@ -260,6 +291,31 @@ def test_event_sink_failure_does_not_fail_turn() -> None:
 
     assert result.success is True
     assert result.handled_by == "skill:external_lookup"
+
+
+def test_event_bus_failure_does_not_suppress_durable_events(tmp_path) -> None:
+    class BrokenEventBus:
+        def publish(self, _event: Any) -> None:
+            raise RuntimeError("event sink unavailable")
+
+    conversations = ConversationStore(tmp_path / "broken-bus.db")
+    conversation = conversations.create_conversation("broken-bus")
+    session_store = SessionStore(conversations)
+    context = TurnContext(
+        turn_id="broken-bus-turn",
+        conversation_id=conversation["id"],
+        user_input="lookup this",
+        runtime=ExternalSkillRuntime(),
+        services=TurnServiceBundle(
+            event_bus=BrokenEventBus(),
+            session_store=session_store,
+        ),
+    )
+
+    result = run_turn(context)
+
+    assert result.success is True
+    assert len(session_store.replay(conversation["id"])) == 4
 
 
 def test_explicit_turn_scope_is_checked_against_authenticated_context() -> None:

@@ -306,9 +306,9 @@ class SessionEventLog:
                     continue
                 if not isinstance(record, dict):
                     continue
-                if domain is not None and record.get("domain") != domain.value:
+                if domain is not None and record.get("domain") != str(domain.value):
                     continue
-                if event_type is not None and record.get("type") != event_type.value:
+                if event_type is not None and record.get("type") != str(event_type.value):
                     continue
                 if run_id is not None and record.get("run_id") != run_id:
                     continue

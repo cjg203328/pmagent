@@ -25,7 +25,22 @@
     # The API keeps its native /health and /v1 paths; handle_path strips the
     # public /api prefix before proxying (e.g. /api/health -> /health).
     handle_path /api/* {
-        reverse_proxy artpm-api:8765
+        # Remove all client-controlled identity headers, then inject the
+        # identity established by the trusted ingress configuration.
+        reverse_proxy artpm-api:8765 {
+            header_up -X-Gateway-Token
+            header_up -X-Tenant-ID
+            header_up -X-Workspace-ID
+            header_up -X-Actor-ID
+            header_up -X-Actor-Role
+            header_up -X-Actor-Kind
+            header_up X-Gateway-Token {$ARTPM_GATEWAY_SHARED_SECRET}
+            header_up X-Tenant-ID {$ARTPM_GATEWAY_TENANT_ID}
+            header_up X-Workspace-ID {$ARTPM_GATEWAY_WORKSPACE_ID}
+            header_up X-Actor-ID {$ARTPM_GATEWAY_ACTOR_ID}
+            header_up X-Actor-Role {$ARTPM_GATEWAY_ACTOR_ROLE}
+            header_up X-Actor-Kind {$ARTPM_GATEWAY_ACTOR_KIND}
+        }
     }
 
     # Streamlit depends on WebSocket long connections; reverse_proxy supports

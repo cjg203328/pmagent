@@ -23,6 +23,7 @@ def _build_cli_services(agent: ArtPMAgent):
     from artpm_agent.memory.episode_store import EpisodeStore
     from artpm_agent.memory.feedback_store import get_default_feedback_store
     from artpm_agent.runtime.request_services import TurnServiceBundle
+    from artpm_agent.runtime.event_bus import EventBus
     from artpm_agent.security import PermissionStore
 
     conversation_store = ConversationStore(
@@ -48,6 +49,7 @@ def _build_cli_services(agent: ArtPMAgent):
         episode_store=EpisodeStore(default_episode_db_path()),
         reflection_scheduler=get_default_scheduler(),
         consolidation_scheduler=ConsolidationScheduler(),
+        event_bus=EventBus(),
     )
     return conversation["id"], conversation_store, services
 

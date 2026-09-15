@@ -25,6 +25,11 @@ artpm-api
 `X-Gateway-Token`。网关不会提供通配 CORS；需要跨域时应在已认证的反向代理层配置
 明确的允许来源。
 
+仓库自带的 Compose/Caddy 示例使用一组由部署环境注入的固定身份头：
+`ARTPM_GATEWAY_TENANT_ID`、`ARTPM_GATEWAY_WORKSPACE_ID`、
+`ARTPM_GATEWAY_ACTOR_ID`（以及可选的 role/kind）。Caddy 会先删除客户端同名头，
+再注入这些值；多用户部署必须替换为能从认证会话派生身份的可信网关。
+
 核心路由：
 
 - `GET /health`

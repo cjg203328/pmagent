@@ -20,6 +20,11 @@ from artpm_agent.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+try:
+    from artpm_agent.runtime.event_bus import EventBus
+except Exception:  # pragma: no cover - optional UI bootstrap fallback
+    EventBus = None
+
 # ── 导航常量 ──
 _NAV_OPTIONS = ("对话", "设置", "可观测")
 _NAV_WIDGET_KEY = "sidebar_nav_pills"
@@ -182,6 +187,20 @@ def get_session_store():
     if cached is None or getattr(cached, "conversations", None) is not conversation_store:
         cached = SessionStore(conversation_store)
         st.session_state.session_store = cached
+    return cached
+
+
+def get_event_bus():
+    """Return the event bus shared by all turns in the active UI session."""
+
+    import streamlit as st
+
+    if EventBus is None:
+        return None
+    cached = st.session_state.get("event_bus")
+    if cached is None:
+        cached = EventBus()
+        st.session_state.event_bus = cached
     return cached
 
 

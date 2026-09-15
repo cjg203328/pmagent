@@ -238,7 +238,9 @@ def cached_operation(
                 cache_key = key_func(*args, **kwargs)
             else:
                 key_str = f"{func.__name__}_{args}_{kwargs}"
-                cache_key = hashlib.md5(key_str.encode()).hexdigest()
+                cache_key = hashlib.md5(
+                    key_str.encode(), usedforsecurity=False
+                ).hexdigest()
 
             # Check cache
             now = time.time()

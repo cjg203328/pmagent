@@ -35,7 +35,7 @@ def test_chat_has_no_unreachable_post_harness_fallback():
     # harness; chat.py now only has the single harness guard, so counting them
     # must equal 1 (the live `if local_fast ... else: harness` guard is gone too
     # after the P2 else: refactor — verify no leftover dead markers instead).
-    assert "artifact_coordinator.process(" not in src.split("execute_turn_with_harness")[0] or True
+    assert "artifact_coordinator.process(" not in src.split("execute_turn_with_harness")[0]
     # Direct proof: the stale inline workflow fallback call is removed.
     assert "coordinator.process(" not in src
     assert "workflow_result.run.status" not in src

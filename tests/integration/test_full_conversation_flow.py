@@ -70,6 +70,7 @@ def conversation_gateway(tmp_path: Path) -> SimpleNamespace:
         if command.message == "publish the confidential report":
             request = permissions.create_request(
                 workspace_id=command.principal.workspace_id,
+                tenant_id=command.principal.tenant_id,
                 conversation_id=command.conversation_id,
                 turn_id=command.turn_id,
                 agent_id="integration-agent",
@@ -205,6 +206,13 @@ def test_high_risk_approval_cannot_be_forged_bypassed_or_replayed(
     assert requested.status_code == 202
     assert requested.json()["awaiting_approval"] is True
     request_id = requested.json()["permission_request_id"]
+    stored_request = conversation_gateway.services.permissions.get(
+        request_id,
+        workspace_id="local-default",
+        tenant_id="tenant-a",
+    )
+    assert stored_request is not None
+    assert stored_request.tenant_id == "tenant-a"
 
     forged = conversation_gateway.client.post(
         f"/v1/permissions/{request_id}/approve",
@@ -237,6 +245,23 @@ def test_high_risk_approval_cannot_be_forged_bypassed_or_replayed(
         ),
     )
     assert crossed.status_code == 404
+
+    crossed_approval = conversation_gateway.client.post(
+        f"/v1/permissions/{request_id}/approve",
+        headers=_headers(tenant_id="tenant-b", actor_id="bob"),
+        json={"expected_version": 0, "acknowledged_risk": "high"},
+    )
+    assert crossed_approval.status_code == 404
+    assert crossed_approval.json()["error"]["code"] == "permission_not_found"
+    unchanged = conversation_gateway.services.permissions.get(
+        request_id,
+        workspace_id="local-default",
+        tenant_id="tenant-a",
+    )
+    assert unchanged is not None
+    assert unchanged.status == "pending"
+    assert unchanged.state_version == 0
+    assert conversation_gateway.executions == []
 
     approved = conversation_gateway.client.post(
         f"/v1/permissions/{request_id}/approve",

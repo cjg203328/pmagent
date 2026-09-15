@@ -30,12 +30,8 @@ jobs:
     - name: Lint with Ruff
       run: ruff check artpm_agent tests --output-format=github
 
-    - name: Type check with mypy
-      run: mypy artpm_agent --ignore-missing-imports
-      continue-on-error: true
-
     - name: Run offline tests
-      run: pytest -q --no-cov -m "not integration and not benchmark"
+      run: pytest -q --no-cov -m "not integration and not benchmark and not slow"
 
     - name: Run focused coverage gate
       run: python scripts/coverage_core.py
@@ -93,7 +89,24 @@ jobs:
       run: >-
         pytest -q --cov=artpm_agent --cov-report=term-missing
         --cov-fail-under=20
-        -m "not integration and not benchmark"
+        -m "not integration and not benchmark and not slow"
+
+  types:
+    name: Staged mypy ratchet
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        # Keep the diagnostic baseline deterministic while the tree is being
+        # migrated. Runtime behavior remains covered by the 3.10-3.12 matrix.
+        python-version: '3.11'
+        cache: 'pip'
+    - name: Install dependencies
+      run: pip install -e ".[dev]"
+    - name: Type check with staged mypy ratchet
+      run: python scripts/mypy_ratchet.py
 
   security:
     runs-on: ubuntu-latest
@@ -107,29 +120,207 @@ jobs:
         python-version: '3.10'
 
     - name: Install project dependencies
-      run: pip install -e .
+      run: pip install -e ".[production]"
 
     - name: Run Bandit security scan
       run: |
         pip install bandit
-        bandit -r artpm_agent -f json -o bandit-report.json
-      continue-on-error: true
+        bandit -r artpm_agent -lll -iii -f json -o bandit-report.json
 
-    - name: Run Safety check
+    - name: Run dependency audit
       run: |
-        pip install safety
-        safety check --json
-      continue-on-error: true
+        pip install pip-audit
+        pip-audit -r requirements-security.txt --format json --output safety-report.json
 
     - name: Upload security reports
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: security-reports
-        path: bandit-report.json
+        path: |
+          bandit-report.json
+          safety-report.json
+
+  postgres-rls:
+    name: PostgreSQL RLS integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: artpm
+          POSTGRES_USER: artpm_admin
+          POSTGRES_PASSWORD: admin-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U artpm_admin -d artpm"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      # The migration runner consumes DATABASE_ADMIN_URL while the test
+      # itself consumes ARTPM_TEST_POSTGRES_{ADMIN_,}URL. Keep both names
+      # explicit so a refactor cannot silently turn this job into a skip.
+      DATABASE_ADMIN_URL: postgresql+psycopg://artpm_admin:admin-test-password@localhost:5432/artpm
+      DATABASE_APP_ROLE: artpm_app
+      ARTPM_TEST_POSTGRES_ADMIN_URL: postgresql+psycopg://artpm_admin:admin-test-password@localhost:5432/artpm
+      ARTPM_TEST_POSTGRES_URL: postgresql+psycopg://artpm_app:app-test-password@localhost:5432/artpm
+      ARTPM_SQLITE_FALLBACK: "false"
+      ART_ENABLE_INTEGRATION: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Create RLS application role
+        env:
+          PGPASSWORD: admin-test-password
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          psql -h localhost -U artpm_admin -d artpm -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE artpm_app LOGIN PASSWORD 'app-test-password' NOSUPERUSER NOBYPASSRLS;"
+      - name: Migrate and grant application role
+        run: python scripts/migrate_postgres.py
+      - name: Run PostgreSQL RLS tests
+        run: pytest -q tests/integration/test_postgresql_rls.py --no-cov
+
+  docker-smoke:
+    name: Docker Compose smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare ephemeral deployment environment
+        run: |
+          set -euo pipefail
+          # Bind mounts hide the image's ownership metadata. Give the
+          # non-root runtime UID an explicitly writable smoke volume, just as
+          # an operator must do for a host deployment.
+          mkdir -p data logs
+          sudo chown -R 10001:10001 data logs
+          cp .env.example .env
+          HASH=$(docker run --rm caddy:2-alpine caddy hash-password --plaintext smoke-password)
+          cat >> .env <<EOF
+          ARTPM_ENV=production
+          ARTPM_GATEWAY_SHARED_SECRET=smoke-gateway-secret
+          ARTPM_GATEWAY_TENANT_ID=smoke-tenant
+          ARTPM_GATEWAY_WORKSPACE_ID=smoke-workspace
+          ARTPM_GATEWAY_ACTOR_ID=smoke-actor
+          BASIC_AUTH_USER=smoke
+          BASIC_AUTH_HASH=$HASH
+          POSTGRES_PASSWORD=app-test-password
+          POSTGRES_ADMIN_PASSWORD=admin-test-password
+          GRAFANA_ADMIN_PASSWORD=smoke-grafana-password
+          EOF
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+      - name: Build and start stack
+        run: docker compose up -d --build
+      - name: Wait for service health
+        run: |
+          set -euo pipefail
+          api_ready=0
+          for i in $(seq 1 30); do
+            docker compose exec -T artpm-api python -c \
+              "import json,urllib.request; r=urllib.request.urlopen('http://localhost:8765/ready'); p=json.load(r); raise SystemExit(0 if p.get('ready') is True else 1)" \
+              && { api_ready=1; break; }
+            sleep 5
+          done
+          docker compose ps
+          if [ "$api_ready" -ne 1 ]; then
+            docker compose logs --no-color artpm-api migrate postgres
+            echo "API readiness probe did not pass within 150 seconds" >&2
+            exit 1
+          fi
+          docker compose exec -T artpm-agent python -c \
+            "import urllib.request; r=urllib.request.urlopen('http://localhost:8501/_stcore/health'); raise SystemExit(0 if r.read(32).strip()==b'ok' else 1)"
+      - name: Verify runtime identity, mounts, and writable logs
+        run: |
+          set -euo pipefail
+          docker compose exec -T artpm-agent sh -eu -c '
+            test "$(id -u)" = "10001"
+            test "$DATA_ROOT" = "/app/data"
+            test "$ARTPM_LOG_DIR" = "/app/logs"
+            test -r /app/.env
+            test ! -w /app/.env
+            test -w /app/data
+            test -w /app/logs
+            marker="/app/logs/.ci-smoke-${HOSTNAME}"
+            : > "$marker"
+            rm -f "$marker"
+          '
+          docker compose exec -T artpm-api sh -eu -c '
+            test "$(id -u)" = "10001"
+            test "$ARTPM_PROCESS_ROLE" = "api"
+            test "$ARTPM_API_PORT" = "8765"
+            test -n "$ARTPM_GATEWAY_SHARED_SECRET"
+          '
+      - name: Verify Caddy identity boundary
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl --fail --silent --show-error --user smoke:smoke-password \
+              https://localhost/api/ready --insecure; then
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "Caddy API probe did not pass within 60 seconds" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          # A caller must not be able to select a different tenant/workspace
+          # by supplying forged identity headers. The API's built-in
+          # local-default workspace exists; Caddy's injected smoke workspace
+          # does not, so a correct override deterministically returns 404.
+          python - <<'PY'
+          import base64
+          import json
+          import ssl
+          import urllib.error
+          import urllib.request
+
+          request = urllib.request.Request(
+              "https://localhost/api/v1/capabilities",
+              headers={
+                  "Authorization": "Basic " + base64.b64encode(b"smoke:smoke-password").decode(),
+                  "X-Tenant-ID": "local",
+                  "X-Workspace-ID": "local-default",
+                  "X-Actor-ID": "forged-client",
+              },
+          )
+          try:
+              urllib.request.urlopen(request, context=ssl._create_unverified_context())
+          except urllib.error.HTTPError as error:
+              payload = json.load(error)
+              if error.code != 404 or payload.get("error", {}).get("code") != "workspace_not_found":
+                  raise SystemExit(f"unexpected forged-header response: {error.code} {payload!r}")
+          else:
+              raise SystemExit("forged identity headers were not overridden by Caddy")
+          PY
+      - name: Dump deployment diagnostics on failure
+        if: failure()
+        run: docker compose ps && docker compose logs --no-color --tail=200
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  slow-ui:
+    name: Slow UI regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: pytest -q -m slow --timeout=180
 
   build:
-    needs: [test, security]
+    needs: [test, coverage, types, security, postgres-rls, docker-smoke, slow-ui]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
 

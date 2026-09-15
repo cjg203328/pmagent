@@ -107,7 +107,8 @@ dev = [
     "pytest-timeout>=2.3.1",
     "pytest-cov>=4.0.0",
     "ruff>=0.15.0",
-    "mypy>=1.8.0",
+    # Keep the ratchet's diagnostic baseline stable across resolver updates.
+    "mypy==2.3.1",
     "bandit>=1.7.0",
     "safety>=3.0.0",
     "fastapi>=0.135.1,<0.136.0",

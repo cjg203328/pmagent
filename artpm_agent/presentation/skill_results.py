@@ -175,17 +175,23 @@ def _format_requirements_result(_skill_name: str, result: SkillResult) -> str:
 
 
 def _format_cost_result(_skill_name: str, result: SkillResult) -> str:
+    utilization_rate = result.get("utilization_rate")
+    utilization_text = (
+        "不可用"
+        if utilization_rate is None
+        else f"{float(utilization_rate) * 100:.0f}%"
+    )
     if "alert" in result:
         level = {
             "critical": "🔴 严重",
             "warning": "🟡 预警",
             "ok": "🟢 正常",
-        }.get(result.get("level"), "")
+        }.get(str(result.get("level") or ""), "")
         return (
             f"💸 **成本超支告警** {level}\n\n"
             f"• 预算: {result.get('budget'):,.0f}\n"
             f"• 已用: {result.get('spent'):,.0f}\n"
-            f"• 利用率: {result.get('utilization_rate', 0) * 100:.0f}%"
+            f"• 利用率: {utilization_text}"
             f"（阈值 {result.get('threshold', 0.9) * 100:.0f}%）\n"
             f"• {result.get('message', '')}"
         )
@@ -196,7 +202,7 @@ def _format_cost_result(_skill_name: str, result: SkillResult) -> str:
             f"• 预算: {result.get('budget'):,.0f}\n"
             f"• 已用: {result.get('spent'):,.0f}\n"
             f"• 剩余: {result.get('remaining'):,.0f}"
-            f"（利用率 {result.get('utilization_rate', 0) * 100:.0f}%）"
+            f"（利用率 {utilization_text}）"
         )
     if "total_cost" in result:
         return (
@@ -204,8 +210,8 @@ def _format_cost_result(_skill_name: str, result: SkillResult) -> str:
             f"• 级别: {result.get('staff_level')}（{result.get('daily_cost')}/天）\n"
             f"• 工时: {result.get('hours')}h × {result.get('quantity')}个\n"
             f"• 人工: {result.get('labor_cost'):,.0f}\n"
-            f"• 管理费({result.get('overhead_rate') * 100:.0f}%): {result.get('overhead_cost'):,.0f}\n"
-            f"• 税({result.get('tax_rate') * 100:.0f}%): {result.get('tax_cost'):,.0f}\n"
+            f"• 管理费({float(result.get('overhead_rate') or 0) * 100:.0f}%): {result.get('overhead_cost'):,.0f}\n"
+            f"• 税({float(result.get('tax_rate') or 0) * 100:.0f}%): {result.get('tax_cost'):,.0f}\n"
             f"• **合计: {result.get('total_cost'):,.0f}**"
         )
     return f"💡 {result.get('message') or result.get('summary', '')}"

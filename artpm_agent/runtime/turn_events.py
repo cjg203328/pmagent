@@ -13,9 +13,10 @@ logger = logging.getLogger(__name__)
 class TurnEventRecorder:
     """Publish one lifecycle stream without coupling the turn to a sink.
 
-    An event bus is authoritative when supplied. Otherwise a SessionStore is
-    used as the durable fallback. Recording failures are diagnostics, not a
-    reason to fail the user request.
+    The event bus is the live delivery path when supplied, while the
+    ``SessionStore`` remains the durable source of truth.  Hosts commonly
+    provide both services, so they must not be treated as mutually exclusive.
+    Recording failures are diagnostics, not a reason to fail the user request.
     """
 
     def __init__(self, *, event_bus: Any = None, session_store: Any = None) -> None:
@@ -73,10 +74,19 @@ class TurnEventRecorder:
             tool_result=dict(tool_result or {}),
             metadata=event_metadata,
         )
-        try:
-            if self.event_bus is not None:
+        if self.event_bus is not None:
+            try:
                 self.event_bus.publish(event)
-            elif self.session_store is not None:
+            except Exception:  # noqa: BLE001 - observability must not block turns
+                logger.warning("turn lifecycle event bus delivery failed", exc_info=True)
+
+        # Keep durable replay independent from the optional live bus.  A bus
+        # may have no sink (as is the case for the API/UI hosts), and publishing
+        # alone must never silently discard the audit trail.  The two sinks use
+        # separate guards so a transient live-bus failure cannot suppress the
+        # durable append.
+        if self.session_store is not None:
+            try:
                 conversation_id = str(
                     getattr(ctx, "conversation_id", "")
                     or extra.get("conversation_id")
@@ -94,8 +104,8 @@ class TurnEventRecorder:
                         event,
                         workspace_id=workspace_id,
                     )
-        except Exception:  # noqa: BLE001 - observability must not block turns
-            logger.warning("turn lifecycle event recording failed", exc_info=True)
+            except Exception:  # noqa: BLE001 - observability must not block turns
+                logger.warning("turn lifecycle event persistence failed", exc_info=True)
         return event
 
 

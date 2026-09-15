@@ -76,6 +76,21 @@ def test_compose_api_and_health_probe_contract():
     assert "localhost:8501/_stcore/health" in compose
     assert "artpm-api:8765" in caddy
     assert "handle_path /api/*" in caddy
+    for header in (
+        "X-Gateway-Token",
+        "X-Tenant-ID",
+        "X-Workspace-ID",
+        "X-Actor-ID",
+    ):
+        assert f"header_up {header}" in caddy
+        assert f"header_up -{header}" in caddy
+    for variable in (
+        "ARTPM_GATEWAY_SHARED_SECRET",
+        "ARTPM_GATEWAY_TENANT_ID",
+        "ARTPM_GATEWAY_WORKSPACE_ID",
+        "ARTPM_GATEWAY_ACTOR_ID",
+    ):
+        assert variable in compose
     assert "EXPOSE 8501 8765" in dockerfile
 
     # README is the user-facing port contract: Streamlit remains 8501 and the
@@ -90,3 +105,16 @@ def test_grafana_is_not_exposed_on_a_public_interface():
     text = COMPOSE.read_text(encoding="utf-8")
     assert '"127.0.0.1:3000:3000"' in text
     assert '"3000:3000"' not in text
+
+
+def test_compose_env_and_non_root_log_contract():
+    compose = COMPOSE.read_text(encoding="utf-8")
+    config = (REPO_ROOT / "artpm_agent" / "config.py").read_text(encoding="utf-8")
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    assert "./.env:/app/.env:ro" in compose
+    assert "Path.cwd() / \".env\"" in config
+    assert "ARTPM_ENV_FILE" in config
+    assert "ARTPM_LOG_DIR" in config
+    assert "./logs:/app/logs" in compose
+    assert "ARTPM_LOG_DIR=/app/logs" in compose
+    assert "USER appuser" in dockerfile

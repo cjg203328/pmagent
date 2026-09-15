@@ -11,9 +11,17 @@ from dotenv import load_dotenv
 from artpm_agent.config_data import load_default_config
 
 # Load project defaults without overwriting deployment-level environment values.
-# This keeps local development convenient while allowing cloud/container secrets
-# and feature flags to remain authoritative.
-PROJECT_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+# Prefer the working-directory env mounted by Compose, while retaining the
+# source-tree fallback and an explicit path override for service managers.
+_env_override = os.getenv("ARTPM_ENV_FILE")
+_env_candidates = (
+    Path(_env_override).expanduser() if _env_override else Path.cwd() / ".env",
+    Path(__file__).resolve().parent.parent / ".env",
+)
+PROJECT_ENV_PATH = next(
+    (candidate for candidate in _env_candidates if candidate.is_file()),
+    _env_candidates[0],
+)
 load_dotenv(dotenv_path=PROJECT_ENV_PATH, override=False)
 
 # User-chosen data root override (project-local, no secrets). The settings page
@@ -448,9 +456,10 @@ class Config:
         mineru_output.mkdir(parents=True, exist_ok=True)
         mineru_config["output_dir"] = str(mineru_output)
 
-        # Log directory stays with the install (operational logs, not user data).
-        log_dir = self.base_dir / "logs"
-        log_dir.mkdir(exist_ok=True)
+        # Keep logs writable for non-root package/container users. Deployments
+        # can point this at a mounted volume; local runs use the project logs.
+        log_dir = resolve_log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
 
     def get(self, key_path: str, default: Any = None) -> Any:
         """
@@ -560,6 +569,20 @@ def resolve_data_root() -> Path:
             root = project_root / root
         return root.resolve()
     return (project_root / "data").resolve()
+
+
+def resolve_log_dir() -> Path:
+    """Resolve the shared application log directory.
+
+    Keep this path independent from the active data root: deployments commonly
+    mount logs separately, while source and packaged installs should still use
+    the same project-level default.
+    """
+    project_root = Path(__file__).resolve().parent.parent
+    configured = os.getenv("ARTPM_LOG_DIR")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (project_root / "logs").resolve()
 
 
 def resolve_state_path(filename: str, env_var: Optional[str] = None) -> Path:

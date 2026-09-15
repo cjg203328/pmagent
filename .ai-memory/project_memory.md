@@ -33,3 +33,32 @@ TLS 校验正常，鉴权 `/v1/models` 返回 200 且包含 `qwen3.8-27b-uncenso
 #### 状态
 
 未修复，外部阻塞。
+
+## Decision Record: 生命周期事件与遗留外键迁移
+
+**日期**: 2026-09-16
+**问题**: 生产入口同时启用实时 EventBus 和 SessionStore 时，回合生命周期事件不能丢失；遗留表外键类型必须与整数主键一致。
+
+### 决策
+
+**选择**: EventBus 发布与 SessionStore 追加分开执行、分开容错；通过 Alembic `d4e5f6a7b8c9` 在升级时校验并转换四个遗留外键列。
+**理由**: 实时观测故障不能阻断 durable audit；显式迁移才能修复已在旧 head 的数据库，且非整数历史值必须人工清理而不能静默截断。
+**撤销条件**: 若所有宿主统一接入带会话作用域的 durable EventBus sink，或遗留表被正式下线并完成数据归档，可重新评估实现。
+
+## Known Issue: 外部发布服务未在本机验证
+
+**发现日期**: 2026-09-16
+**问题类型**: 环境边界
+**严重度**: 提示
+
+### 现象
+
+本机无 Docker 命令，PostgreSQL RLS 测试因未配置 `ARTPM_TEST_POSTGRES_URL` 跳过。
+
+### 规避方案
+
+CI 中运行 `docker-smoke` 和 `postgres-rls`；本地继续使用临时 SQLite 迁移验证和明确的集成 skip。
+
+### 状态
+
+待外部环境验证。

@@ -1,5 +1,6 @@
 """成本管控技能单元测试：成本估算 / 预算跟踪 / 超支告警（fake DB，无需真实库）"""
 from artpm_agent.skills.cost_control_skill import CostControlSkill
+from artpm_agent.presentation import format_skill_result
 
 
 class FakeProject:
@@ -68,6 +69,33 @@ def test_budget_falls_back_to_assets():
     assert r["spent"] == 24000
 
 
+def test_zero_budget_results_are_renderable():
+    """A zero budget has no meaningful utilization percentage, but is valid."""
+    db = FakeDB([FakeProject(5, "P5", 0, cost=0)])
+
+    budget_rendered = format_skill_result(
+        "cost_control", _skill(db=db).budget(5)
+    )
+    assert "（利用率 不可用）" in budget_rendered
+    assert "None" not in budget_rendered
+
+    overrun_rendered = format_skill_result(
+        "cost_control", _skill(db=db).overrun(5)
+    )
+    assert "• 利用率: 不可用" in overrun_rendered
+    assert "None" not in overrun_rendered
+
+
+def test_zero_budget_overrun_preserves_custom_threshold():
+    db = FakeDB([FakeProject(6, "P6", 0, cost=0)])
+
+    rendered = format_skill_result(
+        "cost_control", _skill(db=db).overrun(6, threshold=0.75)
+    )
+
+    assert "（阈值 75%）" in rendered
+
+
 def test_overrun_alert_triggers():
     db = FakeDB([FakeProject(3, "P3", 10000, cost=9500)])
     r = _skill(db=db).overrun(3, threshold=0.9)
@@ -85,3 +113,32 @@ def test_execute_dispatch():
     r = _skill(None).execute({"action": "estimate", "hours": 8})
     assert r["success"]
     assert not _skill(None).execute({"action": "x"})["success"]
+
+
+def test_execute_rejects_lossy_project_id_coercion():
+    class RecordingDB(FakeDB):
+        def __init__(self):
+            super().__init__([FakeProject(1, "P1", 100)])
+            self.requested_ids = []
+
+        def get_project(self, pid):
+            self.requested_ids.append(pid)
+            return super().get_project(pid)
+
+    db = RecordingDB()
+    skill = _skill(db=db)
+
+    fractional = skill.execute({"action": "budget", "project_id": 1.9})
+    boolean = skill.execute({"action": "overrun", "project_id": True})
+
+    assert fractional == {"success": False, "error": "project_id 必须是正整数"}
+    assert boolean == {"success": False, "error": "project_id 必须是正整数"}
+    assert db.requested_ids == []
+
+
+def test_execute_accepts_numeric_project_id_string_without_truncation():
+    db = FakeDB([FakeProject(7, "P7", 100)])
+    result = _skill(db=db).execute({"action": "budget", "project_id": "7"})
+
+    assert result["success"] is True
+    assert result["project_id"] == 7
