@@ -943,6 +943,8 @@ def chat_page():
                                 workflow_formatter=format_workflow_result,
                                 session_store=get_session_store(),
                                 event_bus=get_event_bus(),
+                                episode_store=get_episode_store(),
+                                consolidation_scheduler=get_consolidation_scheduler(),
                             )
                             if (
                                 harness_result is not None

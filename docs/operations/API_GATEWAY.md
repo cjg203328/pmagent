@@ -32,6 +32,7 @@ artpm-api
 
 核心路由：
 
+- `GET /`（返回健康检查、就绪检查和 API 文档链接）
 - `GET /health`
 - `GET /v1/capabilities`
 - `POST /v1/chat`

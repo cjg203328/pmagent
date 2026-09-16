@@ -59,6 +59,8 @@ from artpm_agent.ui_state import (  # noqa: F401 — re-exported for wildcard co
     get_chat_attachment_store,
     get_conversation_store,
     get_event_bus,
+    get_episode_store,
+    get_consolidation_scheduler,
     get_session_store,
     get_current_profile,
     get_knowledge_store,
@@ -81,6 +83,7 @@ from artpm_agent.ui_state import (  # noqa: F401 — re-exported for wildcard co
     redact_sensitive,
     serialize_cached_models,
     WorkflowCoordinator,
+    ScopedWorkflowAgent,
     WorkflowOverride,
     WorkflowStore,
     WORKFLOW_RUNTIME_AVAILABLE,
@@ -253,26 +256,34 @@ def get_workflow_coordinator():
     if not isinstance(tenant_context, TenantContext):
         return None
     workspace_id = tenant_context.require_workspace()
+    tenant_id = tenant_context.tenant_id
     profile = get_current_profile()
     profile_id = str(getattr(profile, "profile_id", None) or "local-default")
-    try:
-        store.ensure_builtins(workspace_id=workspace_id, profile_id=profile_id)
-    except Exception:
-        logger.exception("工作流内置定义初始化失败")
-        return None
     coordinator = st.session_state.get("workflow_coordinator")
+    coordinator_agent = getattr(coordinator, "agent", None)
+    coordinator_base_agent = getattr(
+        coordinator_agent,
+        "base_agent",
+        coordinator_agent,
+    )
     if (
         coordinator is None
-        or getattr(coordinator, "agent", None) is not agent
+        or coordinator_base_agent is not agent
+        or getattr(coordinator, "tenant_id", None) != tenant_id
         or getattr(coordinator, "workspace_id", None) != workspace_id
         or getattr(coordinator, "profile_id", None) != profile_id
     ):
         try:
+            scoped_router = agent.router
+            bind_tenant = getattr(scoped_router, "for_tenant", None)
+            if callable(bind_tenant):
+                scoped_router = bind_tenant(tenant_context)
             coordinator = WorkflowCoordinator(
                 store,
-                agent,
+                ScopedWorkflowAgent(agent, scoped_router),
                 workspace_id=workspace_id,
                 profile_id=profile_id,
+                tenant_id=tenant_id,
             )
         except (TypeError, ValueError):
             logger.exception("工作流协调器初始化失败")

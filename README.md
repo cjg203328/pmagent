@@ -123,6 +123,7 @@ python start_with_checks.py
 访问：
 
 - UI：`http://127.0.0.1:8501`
+- API 服务入口：`http://127.0.0.1:8765/`
 - API 健康检查：`http://127.0.0.1:8765/health`
 - API 就绪检查：`http://127.0.0.1:8765/ready`
 - API 文档：`http://127.0.0.1:8765/docs`

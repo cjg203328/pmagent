@@ -62,3 +62,33 @@ CI 中运行 `docker-smoke` 和 `postgres-rls`；本地继续使用临时 SQLite
 ### 状态
 
 待外部环境验证。
+
+## Decision Record: 工作流租户适配与 UI 学习服务生命周期
+
+**日期**: 2026-09-16
+**问题**: API 与 Streamlit 分别创建工作流代理、工作流引擎和学习存储，导致租户绑定逻辑重复、UI 重跑触发重复 SQLite 初始化，并让兼容路由在缺少 `for_tenant()` 时崩溃。
+
+### 选项分析
+
+| 选项 | 优势 | 劣势 | 复杂度 |
+| --- | --- | --- | --- |
+| 宿主各自维护代理和引擎 | 局部改动少 | 重复逻辑、容易产生租户边界漂移和重复初始化 | 中 |
+| 共用 `ScopedWorkflowAgent`，由 `WorkflowCoordinator` 持有唯一引擎 | API/UI 作用域一致，减少重复对象与初始化 | UI 需保留旧会话路由兼容分支 | 低 |
+
+### 决策
+
+**选择**: API/UI 共用 `ScopedWorkflowAgent`；`WorkflowCoordinator` 负责内置工作流初始化并暴露唯一 `engine`；API 强制 `for_tenant()`，UI 仅对不支持该方法的会话内兼容路由回退原实例；EpisodeStore 与 ConsolidationScheduler 按 Streamlit 会话缓存。
+**理由**: 收敛租户作用域和引擎事实源，同时消除每回合重复 SQLite schema 初始化，不改变旧测试代理和本地扩展的行为。
+**Trade-offs**: UI 兼容分支无法为旧路由新增其本身不具备的多租户能力，因此只允许在已有会话上下文内使用；外部 API 路径不采用该回退。
+
+### 影响范围
+
+- `artpm_agent/workflows/coordinator.py`
+- `artpm_agent/api/services.py`
+- `artpm_agent/ui_helpers.py`
+- `artpm_agent/ui_state.py`
+- `artpm_agent/views/chat.py`
+
+### 撤销条件
+
+当所有 UI 注入路由都实现强制租户绑定协议，并且学习服务由统一的进程级依赖容器管理时，可删除 UI 兼容回退和 Streamlit session cache。

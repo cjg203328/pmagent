@@ -637,6 +637,27 @@ def create_app(
         gateway_error = GatewayError(500, "internal_error", "the gateway could not complete the request")
         return JSONResponse(status_code=500, content=_error_payload(request, gateway_error))
 
+    @app.get("/", tags=["system"])
+    def root(request: Request):
+        """Expose a discoverable entry point without initializing the Agent."""
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "service": "artpm-agent-api",
+                "version": API_VERSION,
+                "status": "ok",
+                "message": "ArtPM Agent API is running",
+                "links": {
+                    "health": "/health",
+                    "ready": "/ready",
+                    "docs": "/docs",
+                    "openapi": "/openapi.json",
+                },
+            },
+            headers={"x-request-id": _request_id(request)},
+        )
+
     def _health_response(request: Request, *, readiness: bool) -> JSONResponse:
         try:
             result = services.health()

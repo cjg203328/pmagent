@@ -486,38 +486,23 @@ class DefaultGatewayRuntime:
         from artpm_agent.workflows.designer import (
             capability_allowlist_from_skill_metadata,
         )
-        from artpm_agent.workflows.engine import WorkflowEngine
 
         allowlist = capability_allowlist_from_skill_metadata(
             scoped_router.list_skills()
         )
-        # A workflow engine captures its executor. Never reuse one bound to
-        # another request principal/workspace.
-        engine = WorkflowEngine(
-            self.workflows,
-            scoped_router.execute_skill,
-            capability_allowlist=allowlist,
-            tenant_id=tenant_context.tenant_id,
+        from artpm_agent.workflows.coordinator import (
+            ScopedWorkflowAgent,
+            WorkflowCoordinator,
         )
-
-        from artpm_agent.workflows.coordinator import WorkflowCoordinator
-
-        class _TenantAgentProxy:
-            def __init__(self, base: Any, router: Any):
-                self._base = base
-                self.router = router
-
-            def __getattr__(self, name: str) -> Any:
-                return getattr(self._base, name)
 
         coordinator = WorkflowCoordinator(
             self.workflows,
-            _TenantAgentProxy(agent, scoped_router),
+            ScopedWorkflowAgent(agent, scoped_router),
             capability_allowlist=allowlist,
             workspace_id=workspace_id,
             tenant_id=tenant_context.tenant_id,
         )
-        return engine, coordinator
+        return coordinator.engine, coordinator
 
     def workflow_capabilities(self) -> Mapping[str, frozenset[str]]:
         """Return the policy-intersected workflow catalog for this deployment."""
@@ -543,7 +528,7 @@ class DefaultGatewayRuntime:
             tenant_context = command.tenant_context
             if tenant_context is None:
                 raise GatewayServiceError("tenant context is required for chat")
-            engine, coordinator = self._ensure_workflow_runtime(tenant_context)
+            _engine, coordinator = self._ensure_workflow_runtime(tenant_context)
             knowledge_store = self._ensure_knowledge_store()
             from artpm_agent.runtime.request_services import TurnServiceBundle
 

@@ -105,6 +105,22 @@ def gateway(tmp_path: Path):
 
 def test_health_and_identity_contract(gateway):
     client, _, _ = gateway
+    root = client.get("/")
+    assert root.status_code == 200
+    assert root.json() == {
+        "service": "artpm-agent-api",
+        "version": "v1",
+        "status": "ok",
+        "message": "ArtPM Agent API is running",
+        "links": {
+            "health": "/health",
+            "ready": "/ready",
+            "docs": "/docs",
+            "openapi": "/openapi.json",
+        },
+    }
+    assert root.headers["x-request-id"]
+
     health = client.get("/health")
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
@@ -253,6 +269,34 @@ def test_default_runtime_health_exposes_runtime_counters(tmp_path):
 
     assert result["runtime_counters"]["harness.turns.duplicate_replays"] == 1
     reset_counters()
+
+
+def test_default_runtime_reuses_the_coordinator_workflow_engine(tmp_path, monkeypatch):
+    class Router:
+        def for_tenant(self, _tenant_context):
+            return self
+
+        def list_skills(self):
+            return []
+
+        def execute_skill(self, _skill_id, _inputs):
+            return {"success": True}
+
+    runtime = object.__new__(DefaultGatewayRuntime)
+    runtime.workflows = WorkflowStore(tmp_path / "workflow-runtime.sqlite")
+    agent = SimpleNamespace(router=Router())
+    monkeypatch.setattr(runtime, "_ensure_agent", lambda: agent)
+    principal = RequestPrincipal(
+        tenant_id="local",
+        workspace_id="local-default",
+        actor_id="alice",
+    )
+
+    engine, coordinator = runtime._ensure_workflow_runtime(
+        principal.tenant_context()
+    )
+
+    assert engine is coordinator.engine
 
 
 def test_store_health_probe_always_closes_sqlite_connection(tmp_path, monkeypatch):

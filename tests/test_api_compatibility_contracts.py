@@ -80,6 +80,7 @@ def test_static_openapi_contract_matches_workspace_and_search_routes():
     paths = spec["paths"]
     schemas = spec["components"]["schemas"]
 
+    assert "/" in paths
     assert "/v1/workspaces" in paths
     assert "/v1/search" in paths
     assert "/v1/chat/stream" in paths

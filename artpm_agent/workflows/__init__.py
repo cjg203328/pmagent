@@ -10,6 +10,7 @@ from .designer import (
     save_workflow_draft,
 )
 from .coordinator import (
+    ScopedWorkflowAgent,
     WORKFLOW_CAPABILITY_ALLOWLIST,
     WorkflowChatOutcome,
     WorkflowCoordinator,
@@ -76,6 +77,7 @@ __all__ = [
     "CapabilityRiskPolicy",
     "CapabilityRiskRule",
     "RegistryFinding",
+    "ScopedWorkflowAgent",
     "action_is_allowed",
     "WorkflowApproval",
     "WorkflowCapabilityOption",

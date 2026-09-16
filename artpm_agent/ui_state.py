@@ -68,6 +68,7 @@ except Exception as error:
 WORKFLOW_RUNTIME_AVAILABLE = False
 try:
     from artpm_agent.workflows import (
+        ScopedWorkflowAgent,
         WorkflowCoordinator,
         WorkflowOverride,
         WorkflowStore,
@@ -76,6 +77,7 @@ try:
 
     WORKFLOW_RUNTIME_AVAILABLE = True
 except Exception as error:
+    ScopedWorkflowAgent = None
     WorkflowCoordinator = None
     WorkflowOverride = None
     WorkflowStore = None
@@ -201,6 +203,41 @@ def get_event_bus():
     if cached is None:
         cached = EventBus()
         st.session_state.event_bus = cached
+    return cached
+
+
+def get_episode_store():
+    """Return the outcome store shared by all turns in this UI session."""
+
+    import streamlit as st
+
+    cached = st.session_state.get("episode_store")
+    if cached is None:
+        try:
+            from artpm_agent.harness.outcome_recorder import default_episode_db_path
+            from artpm_agent.memory.episode_store import EpisodeStore
+
+            cached = EpisodeStore(default_episode_db_path())
+            st.session_state.episode_store = cached
+        except Exception as error:  # pragma: no cover - optional UI degradation
+            logger.warning("Episode store unavailable: %s", error)
+    return cached
+
+
+def get_consolidation_scheduler():
+    """Return the memory scheduler shared by all turns in this UI session."""
+
+    import streamlit as st
+
+    cached = st.session_state.get("consolidation_scheduler")
+    if cached is None:
+        try:
+            from artpm_agent.memory.consolidation import ConsolidationScheduler
+
+            cached = ConsolidationScheduler()
+            st.session_state.consolidation_scheduler = cached
+        except Exception as error:  # pragma: no cover - optional UI degradation
+            logger.warning("Consolidation scheduler unavailable: %s", error)
     return cached
 
 

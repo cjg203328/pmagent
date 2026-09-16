@@ -1,12 +1,11 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
-
-
-APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
 
 from artpm_agent.memory.conversation_store import ConversationStore
 from artpm_agent.workflows.defaults import get_builtin_workflows
@@ -20,6 +19,164 @@ from artpm_agent.workflows.models import (
 )
 from artpm_agent.workflows.selector import WorkflowSelector
 from artpm_agent.workflows.store import WorkflowStore
+
+
+class _SessionState(dict):
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as error:
+            raise AttributeError(name) from error
+
+    def __setattr__(self, name, value):
+        self[name] = value
+
+
+def test_ui_workflow_coordinator_rebinds_when_tenant_changes(monkeypatch):
+    from artpm_agent import ui_helpers as helpers
+    from artpm_agent.tenancy import TenantContext
+
+    class Store:
+        pass
+
+    class Router:
+        def __init__(self, tenant_id=None):
+            self.tenant_id = tenant_id
+
+        def for_tenant(self, context):
+            return Router(context.tenant_id)
+
+    class Coordinator:
+        def __init__(
+            self,
+            _store,
+            agent,
+            *,
+            workspace_id,
+            profile_id,
+            tenant_id,
+        ):
+            self.agent = agent
+            self.workspace_id = workspace_id
+            self.profile_id = profile_id
+            self.tenant_id = tenant_id
+
+    store = Store()
+    agent = SimpleNamespace(router=Router())
+    state = _SessionState(
+        agent=agent,
+        tenant_context=TenantContext(
+            tenant_id="tenant-a",
+            workspace_id="shared-workspace",
+            principal_id="alice",
+        ),
+    )
+    monkeypatch.setattr(helpers, "st", SimpleNamespace(session_state=state))
+    monkeypatch.setattr(helpers, "WORKFLOW_RUNTIME_AVAILABLE", True)
+    monkeypatch.setattr(helpers, "get_workflow_store", lambda: store)
+    monkeypatch.setattr(
+        helpers,
+        "get_current_profile",
+        lambda: SimpleNamespace(profile_id="profile-a"),
+    )
+    monkeypatch.setattr(helpers, "WorkflowCoordinator", Coordinator)
+
+    first = helpers.get_workflow_coordinator()
+    state.tenant_context = TenantContext(
+        tenant_id="tenant-b",
+        workspace_id="shared-workspace",
+        principal_id="bob",
+    )
+    second = helpers.get_workflow_coordinator()
+
+    assert first is not second
+    assert first.tenant_id == "tenant-a"
+    assert first.agent.router.tenant_id == "tenant-a"
+    assert second.tenant_id == "tenant-b"
+    assert second.agent.router.tenant_id == "tenant-b"
+
+
+def test_ui_workflow_coordinator_accepts_legacy_session_local_router(monkeypatch):
+    from artpm_agent import ui_helpers as helpers
+    from artpm_agent.tenancy import TenantContext
+
+    class Coordinator:
+        def __init__(
+            self,
+            _store,
+            agent,
+            *,
+            workspace_id,
+            profile_id,
+            tenant_id,
+        ):
+            self.agent = agent
+            self.workspace_id = workspace_id
+            self.profile_id = profile_id
+            self.tenant_id = tenant_id
+
+    router = SimpleNamespace(execute_skill=lambda *_args, **_kwargs: None)
+    agent = SimpleNamespace(router=router)
+    state = _SessionState(
+        agent=agent,
+        tenant_context=TenantContext.local(),
+    )
+    monkeypatch.setattr(helpers, "st", SimpleNamespace(session_state=state))
+    monkeypatch.setattr(helpers, "WORKFLOW_RUNTIME_AVAILABLE", True)
+    monkeypatch.setattr(helpers, "get_workflow_store", object)
+    monkeypatch.setattr(
+        helpers,
+        "get_current_profile",
+        lambda: SimpleNamespace(profile_id="profile-a"),
+    )
+    monkeypatch.setattr(helpers, "WorkflowCoordinator", Coordinator)
+
+    coordinator = helpers.get_workflow_coordinator()
+
+    assert coordinator is not None
+    assert coordinator.agent.base_agent is agent
+    assert coordinator.agent.router is router
+
+
+def test_ui_learning_services_are_lazy_and_session_cached(monkeypatch, tmp_path):
+    from artpm_agent import ui_state
+    from artpm_agent.harness import outcome_recorder
+    from artpm_agent.memory import consolidation, episode_store
+
+    state = _SessionState()
+    monkeypatch.setitem(
+        sys.modules,
+        "streamlit",
+        SimpleNamespace(session_state=state),
+    )
+    episode_calls = []
+    consolidation_calls = []
+
+    class EpisodeStore:
+        def __init__(self, path):
+            episode_calls.append(path)
+
+    class ConsolidationScheduler:
+        def __init__(self):
+            consolidation_calls.append(True)
+
+    episode_path = tmp_path / "episodes.sqlite"
+    monkeypatch.setattr(outcome_recorder, "default_episode_db_path", lambda: episode_path)
+    monkeypatch.setattr(episode_store, "EpisodeStore", EpisodeStore)
+    monkeypatch.setattr(consolidation, "ConsolidationScheduler", ConsolidationScheduler)
+
+    first_episode = ui_state.get_episode_store()
+    second_episode = ui_state.get_episode_store()
+    first_scheduler = ui_state.get_consolidation_scheduler()
+    second_scheduler = ui_state.get_consolidation_scheduler()
+
+    assert first_episode is second_episode
+    assert first_scheduler is second_scheduler
+    assert episode_calls == [episode_path]
+    assert consolidation_calls == [True]
+
+
+APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
 
 
 ALLOWLIST = {

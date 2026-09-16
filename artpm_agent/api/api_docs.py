@@ -201,6 +201,34 @@ OPENAPI_SPEC: Dict[str, Any] = {
         }
     },
     "paths": {
+        "/": {
+            "get": {
+                "summary": "API service entry point",
+                "tags": ["system"],
+                "responses": {
+                    "200": {
+                        "description": "Service metadata and discovery links",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "service": {"type": "string"},
+                                        "version": {"type": "string"},
+                                        "status": {"type": "string"},
+                                        "message": {"type": "string"},
+                                        "links": {
+                                            "type": "object",
+                                            "additionalProperties": {"type": "string"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/health": {
             "get": {
                 "summary": "健康检查",

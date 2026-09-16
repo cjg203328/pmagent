@@ -98,6 +98,19 @@ def _workflow_context(prompt: str, agent_context: Mapping[str, Any]) -> dict[str
     return context
 
 
+class ScopedWorkflowAgent:
+    """Expose a request-scoped router while delegating other Agent features."""
+
+    __slots__ = ("base_agent", "router")
+
+    def __init__(self, base_agent: Any, router: Any) -> None:
+        self.base_agent = base_agent
+        self.router = router
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.base_agent, name)
+
+
 class WorkflowCoordinator:
     """Select and run safe workflows without replacing ordinary model chat."""
 
