@@ -2,25 +2,25 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
-from io import BytesIO, StringIO
 import csv
-from datetime import date, datetime, timezone
-from hashlib import sha256
 import math
-from pathlib import Path
 import re
 import shutil
-from typing import Any
 import unicodedata
+from collections.abc import Iterable, Mapping, Sequence
+from datetime import date, datetime, timezone
+from hashlib import sha256
+from io import BytesIO, StringIO
+from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from docx import Document
-from openpyxl import Workbook
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from artpm_agent.utils.multimodal_markdown import LocalMarkdownConverter
 
+from .verification import verify_artifact
 
 _INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
@@ -38,6 +38,7 @@ class WorkspaceArtifactGenerator:
 
     MAX_XLSX_ROWS = 1_048_575
     MAX_XLSX_COLUMNS = 16_384
+    MAX_PPTX_SLIDES = 200
 
     def __init__(
         self,
@@ -46,6 +47,7 @@ class WorkspaceArtifactGenerator:
         max_rows: int = 10_000,
         max_columns: int = 100,
         max_paragraphs: int = 2_000,
+        max_slides: int = 200,
         max_cell_chars: int = 32_000,
         max_total_text_chars: int = 1_000_000,
         max_file_size: int = 50 * 1024 * 1024,
@@ -67,6 +69,11 @@ class WorkspaceArtifactGenerator:
             self.MAX_XLSX_COLUMNS,
         )
         self.max_paragraphs = self._positive(max_paragraphs, "max_paragraphs")
+        self.max_slides = self._bounded_positive(
+            max_slides,
+            "max_slides",
+            self.MAX_PPTX_SLIDES,
+        )
         self.max_cell_chars = self._positive(max_cell_chars, "max_cell_chars")
         self.max_total_text_chars = self._positive(
             max_total_text_chars,
@@ -151,7 +158,11 @@ class WorkspaceArtifactGenerator:
         """Resolve one direct-child artifact path below this workspace root."""
         if not isinstance(stored_path, str) or not stored_path.strip():
             raise ValueError("stored_path must be a non-empty string")
-        if "/" in stored_path or "\\" in stored_path or _WINDOWS_DRIVE.match(stored_path):
+        if (
+            "/" in stored_path
+            or "\\" in stored_path
+            or _WINDOWS_DRIVE.match(stored_path)
+        ):
             raise ValueError("stored_path must be a direct artifact filename")
         path = (self.root / stored_path).resolve()
         try:
@@ -177,7 +188,10 @@ class WorkspaceArtifactGenerator:
             if destination.exists():
                 continue
             try:
-                with temporary_path.open("rb") as source, destination.open("xb") as target:
+                with (
+                    temporary_path.open("rb") as source,
+                    destination.open("xb") as target,
+                ):
                     shutil.copyfileobj(source, target, length=1024 * 1024)
             except FileExistsError:
                 continue
@@ -209,7 +223,23 @@ class WorkspaceArtifactGenerator:
             )
         digest = sha256(temporary_path.read_bytes()).hexdigest()
         destination, version = self._publish_new(temporary_path, filename)
+        published_digest = sha256(destination.read_bytes()).hexdigest()
+        if destination.stat().st_size != size or published_digest != digest:
+            destination.unlink(missing_ok=True)
+            raise RuntimeError("Published artifact failed integrity verification")
         preview = self.preview_path(destination)
+        detail_values = dict(details)
+        verification = detail_values.get("verification")
+        if isinstance(verification, Mapping):
+            verification = dict(verification)
+            verification.update(
+                {
+                    "publication_integrity": True,
+                    "sha256": digest,
+                    "size_bytes": size,
+                }
+            )
+            detail_values["verification"] = verification
         return {
             "id": uuid4().hex,
             "name": destination.name,
@@ -225,11 +255,12 @@ class WorkspaceArtifactGenerator:
             ),
             "preview_markdown": preview.get("preview_markdown", ""),
             "export_formats": self.available_export_formats(artifact_format),
-            **dict(details),
+            **detail_values,
         }
 
-    def _temporary_path(self) -> Path:
-        return self._safe_path(f".artifact-{uuid4().hex}.tmp")
+    def _temporary_path(self, extension: str | None = None) -> Path:
+        suffix = f".{str(extension).lower().lstrip('.')}" if extension else ".tmp"
+        return self._safe_path(f".artifact-{uuid4().hex}{suffix}")
 
     @staticmethod
     def available_export_formats(artifact_format: str) -> list[str]:
@@ -238,6 +269,8 @@ class WorkspaceArtifactGenerator:
         if normalized == "xlsx":
             return ["csv", "md", "txt", "docx"]
         if normalized == "docx":
+            return ["md", "txt"]
+        if normalized in {"pptx", "pdf"}:
             return ["md", "txt"]
         if normalized == "csv":
             return ["md", "txt", "xlsx"]
@@ -254,6 +287,11 @@ class WorkspaceArtifactGenerator:
                 "wordprocessingml.document"
             ),
             "md": "text/markdown",
+            "pdf": "application/pdf",
+            "pptx": (
+                "application/vnd.openxmlformats-officedocument."
+                "presentationml.presentation"
+            ),
             "txt": "text/plain",
             "xlsx": (
                 "application/vnd.openxmlformats-officedocument."
@@ -261,7 +299,12 @@ class WorkspaceArtifactGenerator:
             ),
         }.get(target_format, "application/octet-stream")
 
-    def preview_path(self, path: str | Path, *, max_chars: int = 4_000) -> dict[str, Any]:
+    def preview_path(
+        self,
+        path: str | Path,
+        *,
+        max_chars: int = 4_000,
+    ) -> dict[str, Any]:
         """Create a bounded Markdown preview from a trusted local artifact path."""
         artifact_path = Path(path).expanduser().resolve()
         try:
@@ -401,7 +444,7 @@ class WorkspaceArtifactGenerator:
     ) -> dict[str, Any]:
         """Save a converted copy as a new versioned artifact."""
         exported = self.export_artifact_bytes(stored_path, target_format)
-        temporary_path = self._temporary_path()
+        temporary_path = self._temporary_path(exported["format"])
         try:
             temporary_path.write_bytes(exported["data"])
             return self._finalize(
@@ -499,7 +542,7 @@ class WorkspaceArtifactGenerator:
         normalized_rows = list(
             self._table_rows(tuple(columns), table.get("rows", []))
         )
-        temporary_path = self._temporary_path()
+        temporary_path = self._temporary_path("xlsx")
         try:
             workbook = Workbook(write_only=True)
             worksheet = workbook.create_sheet(title=sheet_name)
@@ -507,6 +550,18 @@ class WorkspaceArtifactGenerator:
             for values in normalized_rows:
                 worksheet.append(values)
             workbook.save(temporary_path)
+            verification = verify_artifact(
+                temporary_path,
+                "xlsx",
+                {
+                    "sheets": [
+                        {
+                            "name": sheet_name,
+                            "values": [header_values, *normalized_rows],
+                        }
+                    ]
+                },
+            )
             return self._finalize(
                 temporary_path,
                 safe_name,
@@ -516,6 +571,7 @@ class WorkspaceArtifactGenerator:
                     "rows": len(normalized_rows),
                     "columns": len(columns),
                     "sheet_name": sheet_name,
+                    "verification": verification,
                 },
             )
         finally:
@@ -581,10 +637,11 @@ class WorkspaceArtifactGenerator:
             raise ValueError("template.sheets must contain at least one sheet")
 
         safe_name = self._safe_filename(filename, "xlsx")
-        temporary_path = self._temporary_path()
+        temporary_path = self._temporary_path("xlsx")
         total_rows = 0
         max_columns = 0
         sheet_details: list[dict[str, Any]] = []
+        verification_sheets: list[dict[str, Any]] = []
         try:
             workbook = Workbook(write_only=True)
             for sheet_index, raw_sheet in enumerate(raw_sheets):
@@ -626,7 +683,18 @@ class WorkspaceArtifactGenerator:
                         "columns": len(columns),
                     }
                 )
+                verification_sheets.append(
+                    {
+                        "name": sheet_name,
+                        "values": [header_values, *normalized_rows],
+                    }
+                )
             workbook.save(temporary_path)
+            verification = verify_artifact(
+                temporary_path,
+                "xlsx",
+                {"sheets": verification_sheets},
+            )
             return self._finalize(
                 temporary_path,
                 safe_name,
@@ -639,6 +707,7 @@ class WorkspaceArtifactGenerator:
                     "sheets": sheet_details,
                     "template_id": template.get("id"),
                     "template_name": template.get("name"),
+                    "verification": verification,
                 },
             )
         finally:
@@ -757,7 +826,7 @@ class WorkspaceArtifactGenerator:
             )
 
         safe_name = self._safe_filename(filename, "docx")
-        temporary_path = self._temporary_path()
+        temporary_path = self._temporary_path("docx")
         try:
             document = Document()
             for item in normalized:
@@ -773,6 +842,11 @@ class WorkspaceArtifactGenerator:
                 run.bold = item["bold"]
                 run.italic = item["italic"]
             document.save(temporary_path)
+            verification = verify_artifact(
+                temporary_path,
+                "docx",
+                {"paragraphs": [item["text"] for item in normalized]},
+            )
             return self._finalize(
                 temporary_path,
                 safe_name,
@@ -781,6 +855,214 @@ class WorkspaceArtifactGenerator:
                 {
                     "paragraphs": len(normalized),
                     "text_chars": total_chars,
+                    "verification": verification,
+                },
+            )
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    def _slide(self, value: Any, index: int) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            raise ValueError(f"slides[{index}] must be a mapping")
+        unknown = set(value) - {"title", "bullets"}
+        if unknown:
+            raise ValueError(
+                f"slides[{index}] contains unsupported fields: "
+                + ", ".join(sorted(str(item) for item in unknown))
+            )
+        title = value.get("title")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError(f"slides[{index}].title must be non-empty text")
+        raw_bullets = self._sequence(
+            value.get("bullets", []),
+            f"slides[{index}].bullets",
+        )
+        bullets: list[str] = []
+        for bullet_index, bullet in enumerate(raw_bullets):
+            if not isinstance(bullet, str) or not bullet.strip():
+                raise ValueError(
+                    f"slides[{index}].bullets[{bullet_index}] must be non-empty text"
+                )
+            bullets.append(bullet.strip())
+        if sum(map(len, [title, *bullets])) > self.max_total_text_chars:
+            raise ValueError(f"slides[{index}] text is too large")
+        return {"title": title.strip(), "bullets": bullets}
+
+    def generate_pptx(
+        self,
+        filename: str,
+        slides: Sequence[Any],
+    ) -> dict[str, Any]:
+        """Generate and verify a native, editable PowerPoint presentation."""
+        try:
+            from pptx import Presentation
+            from pptx.dml.color import RGBColor
+            from pptx.util import Inches, Pt
+        except ImportError as error:
+            raise RuntimeError(
+                "PPTX generation requires the documents profile"
+            ) from error
+
+        raw_slides = self._sequence(slides, "slides")
+        if not raw_slides or len(raw_slides) > self.max_slides:
+            raise ValueError(f"slides must contain 1 to {self.max_slides} items")
+        normalized = [
+            self._slide(value, index)
+            for index, value in enumerate(raw_slides)
+        ]
+        safe_name = self._safe_filename(filename, "pptx")
+        temporary_path = self._temporary_path("pptx")
+        try:
+            presentation = Presentation()
+            presentation.slide_width = Inches(13.333)
+            presentation.slide_height = Inches(7.5)
+            for item in normalized:
+                slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+                title = slide.shapes.title
+                title.text = item["title"]
+                title_run = title.text_frame.paragraphs[0].runs[0]
+                title_run.font.name = "Microsoft YaHei"
+                title_run.font.size = Pt(30)
+                title_run.font.bold = True
+                title_run.font.color.rgb = RGBColor(24, 35, 52)
+                body = slide.placeholders[1].text_frame
+                body.clear()
+                for bullet_index, bullet in enumerate(item["bullets"]):
+                    paragraph = (
+                        body.paragraphs[0]
+                        if bullet_index == 0
+                        else body.add_paragraph()
+                    )
+                    paragraph.text = bullet
+                    paragraph.level = 0
+                    paragraph.font.name = "Microsoft YaHei"
+                    paragraph.font.size = Pt(20)
+                    paragraph.font.color.rgb = RGBColor(51, 65, 85)
+                    paragraph.space_after = Pt(10)
+            presentation.save(temporary_path)
+            verification = verify_artifact(
+                temporary_path,
+                "pptx",
+                {"slides": normalized},
+            )
+            return self._finalize(
+                temporary_path,
+                safe_name,
+                "pptx",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                {
+                    "slides": len(normalized),
+                    "text_chars": sum(
+                        len(item["title"]) + sum(map(len, item["bullets"]))
+                        for item in normalized
+                    ),
+                    "verification": verification,
+                },
+            )
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    def generate_pdf(
+        self,
+        filename: str,
+        paragraphs: Sequence[Any],
+    ) -> dict[str, Any]:
+        """Generate and verify a searchable PDF with CJK text support."""
+        try:
+            from reportlab.lib.enums import TA_LEFT
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+            from reportlab.lib.units import mm
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+            from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+        except ImportError as error:
+            raise RuntimeError(
+                "PDF generation requires the documents profile"
+            ) from error
+        from xml.sax.saxutils import escape
+
+        raw_paragraphs = self._sequence(paragraphs, "paragraphs")
+        if not raw_paragraphs or len(raw_paragraphs) > self.max_paragraphs:
+            raise ValueError(
+                f"paragraphs must contain 1 to {self.max_paragraphs} items"
+            )
+        normalized = [
+            self._paragraph(value, index)
+            for index, value in enumerate(raw_paragraphs)
+        ]
+        total_chars = sum(len(item["text"]) for item in normalized)
+        if total_chars > self.max_total_text_chars:
+            raise ValueError(
+                "paragraph text exceeds the total character limit of "
+                f"{self.max_total_text_chars}"
+            )
+        safe_name = self._safe_filename(filename, "pdf")
+        temporary_path = self._temporary_path("pdf")
+        try:
+            font_name = "STSong-Light"
+            pdfmetrics.registerFont(UnicodeCIDFont(font_name))
+            base = getSampleStyleSheet()
+            body_style = ParagraphStyle(
+                "ArtifactBody",
+                parent=base["BodyText"],
+                fontName=font_name,
+                fontSize=11,
+                leading=18,
+                textColor="#233044",
+                alignment=TA_LEFT,
+                spaceAfter=8,
+            )
+            heading_style = ParagraphStyle(
+                "ArtifactHeading",
+                parent=body_style,
+                fontSize=18,
+                leading=24,
+                textColor="#111827",
+                spaceBefore=8,
+                spaceAfter=12,
+            )
+            document = SimpleDocTemplate(
+                str(temporary_path),
+                pagesize=A4,
+                leftMargin=22 * mm,
+                rightMargin=22 * mm,
+                topMargin=20 * mm,
+                bottomMargin=20 * mm,
+                title=Path(safe_name).stem,
+            )
+            story: list[Any] = []
+            numbered_index = 0
+            for item in normalized:
+                style = heading_style if item["kind"] == "heading" else body_style
+                prefix = ""
+                if item["kind"] == "bullet":
+                    prefix = "- "
+                elif item["kind"] == "numbered":
+                    numbered_index += 1
+                    prefix = f"{numbered_index}. "
+                text = escape(prefix + item["text"])
+                if item["bold"]:
+                    text = f"<b>{text}</b>"
+                if item["italic"]:
+                    text = f"<i>{text}</i>"
+                story.extend([Paragraph(text, style), Spacer(1, 2 * mm)])
+            document.build(story)
+            verification = verify_artifact(
+                temporary_path,
+                "pdf",
+                {"paragraphs": [item["text"] for item in normalized]},
+            )
+            return self._finalize(
+                temporary_path,
+                safe_name,
+                "pdf",
+                "application/pdf",
+                {
+                    "pages": verification["page_count"],
+                    "paragraphs": len(normalized),
+                    "text_chars": total_chars,
+                    "verification": verification,
                 },
             )
         finally:
@@ -802,7 +1084,7 @@ class WorkspaceArtifactGenerator:
         if not isinstance(data, (bytes, bytearray)) or len(data) == 0:
             raise ValueError("artifact bytes must be non-empty")
         safe_name = self._safe_filename(filename, artifact_format)
-        temporary_path = self._temporary_path()
+        temporary_path = self._temporary_path(artifact_format)
         temporary_path.write_bytes(bytes(data))
         try:
             return self._finalize(

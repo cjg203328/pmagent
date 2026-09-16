@@ -81,6 +81,10 @@ def artifact_subtitle(artifact: dict[str, Any]) -> str:
             parts.append(f"{rows} 行")
     elif fmt == "docx" and artifact.get("paragraphs") is not None:
         parts.append(f"{artifact['paragraphs']} 段")
+    elif fmt == "pptx" and artifact.get("slides") is not None:
+        parts.append(f"{artifact['slides']} 页")
+    elif fmt == "pdf" and artifact.get("pages") is not None:
+        parts.append(f"{artifact['pages']} 页")
     size = format_size(artifact.get("size"))
     if size:
         parts.append(size)

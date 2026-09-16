@@ -12,7 +12,7 @@ packages.
 | base / `runtime` | Harness, SQLite, configuration and CLI | SQLAlchemy, Alembic, Pydantic, NumPy |
 | `api` | REST gateway | FastAPI, Uvicorn |
 | `ui` | Streamlit application | Streamlit, pandas, Plotly |
-| `documents` | Office/PDF parsing and generation | openpyxl, python-docx, pdfplumber, PyMuPDF |
+| `documents` | Office/PDF parsing and generation | openpyxl, python-docx, python-pptx, reportlab, pdfplumber, PyMuPDF |
 | `vector-local` | Local derived index | FAISS CPU |
 | `vector-remote` | Remote derived index | Qdrant client |
 | `llm-openai` / `llm-anthropic` | Native provider SDK | OpenAI or Anthropic SDK |

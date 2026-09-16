@@ -140,3 +140,15 @@ Base dependencies are the Runtime/CLI profile. UI, documents, vector-local, prov
 ### 撤销条件
 
 Replace the concatenated fragments when Streamlit exposes a stable scoped stylesheet or component theming API that preserves the current browser contract.
+
+## Decision Record: Verified artifact delivery contract
+
+**日期**: 2026-09-17
+**问题**: Explicit natural-language file requests could fall through to ordinary model chat, and successful generation did not prove that a delivered Office/PDF file reopened with the requested content.
+
+### 决策
+
+**选择**: The canonical Harness artifact handler owns DOCX, XLSX, PPTX and PDF delivery. Simple explicit content is planned locally; complex content uses a strict bounded JSON plan. Each format is reopened and checked against the plan before atomic versioned publication, and the published copy must match size and SHA-256 before UI metadata carries `verification.status=passed`.
+**理由**: A prose answer is not a valid substitute for a requested file. Format-level verification turns model intent into an auditable delivery contract while preserving workspace path, no-overwrite and optional dependency boundaries.
+**Trade-offs**: Runtime verification proves openability, content and structure, not human visual approval of arbitrary complex layouts. PPTX/reportlab remain in the optional `documents` profile and are imported on capability use.
+**撤销条件**: Replace only with a richer artifact runtime that preserves strict plans, safe versioned publication, format reopen checks, content assertions and canonical Harness/UI metadata behavior.

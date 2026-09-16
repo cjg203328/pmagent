@@ -193,6 +193,10 @@ class TestArtifactHandler:
                 "version": 1,
                 "preview_markdown": "| A |\n| --- |",
                 "export_formats": ["csv", "md"],
+                "verification": {
+                    "status": "passed",
+                    "publication_integrity": True,
+                },
             }
 
         class Coordinator:
@@ -211,6 +215,7 @@ class TestArtifactHandler:
         assert result is not None
         assert result.artifacts[0]["preview_markdown"].startswith("| A |")
         assert result.artifacts[0]["export_formats"] == ["csv", "md"]
+        assert result.artifacts[0]["verification"]["status"] == "passed"
 
     def test_artifact_handler_passes_multimodal_attachment_context(self):
         from artpm_agent.harness.artifact_handler import try_artifact_generation

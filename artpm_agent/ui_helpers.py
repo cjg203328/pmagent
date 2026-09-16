@@ -1080,7 +1080,7 @@ def _render_message_artifacts(metadata, message_key):
             fmt = str(artifact.get("format") or "").lower()
             icon = {
                 "xlsx": "📊", "csv": "📋", "docx": "📄",
-                "md": "📝", "txt": "📃",
+                "pptx": "📽️", "pdf": "📕", "md": "📝", "txt": "📃",
             }.get(fmt, "📁")
             head_html = (
                 '<div class="pm-artifact-head">'
@@ -1091,6 +1091,12 @@ def _render_message_artifacts(metadata, message_key):
                 '</div></div>'
             )
             st.markdown(head_html, unsafe_allow_html=True)
+            verification = artifact.get("verification")
+            if (
+                isinstance(verification, dict)
+                and verification.get("status") == "passed"
+            ):
+                st.caption("已核验：文件可打开，内容与生成计划一致")
 
             # 计算预览内容（docx 走 markdown；xlsx 优先渲染真正表格）
             preview_markdown = str(artifact.get("preview_markdown") or "").strip()
@@ -1155,7 +1161,8 @@ def _render_message_artifacts(metadata, message_key):
             export_formats = [
                 str(item).lower()
                 for item in export_formats
-                if str(item).lower() in {"csv", "docx", "md", "txt", "xlsx"}
+                if str(item).lower()
+                in {"csv", "docx", "md", "txt", "xlsx", "pptx", "pdf"}
                 and str(item).lower() != str(artifact.get("format") or "").lower()
             ][:4]
             if export_formats:

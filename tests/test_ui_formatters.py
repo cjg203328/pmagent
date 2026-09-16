@@ -32,7 +32,12 @@ def test_response_helpers_use_runtime_model_when_available():
     assert current_model_id(Agent()) == "primary-model"
     assert response_model_id(Agent()) == "fallback-model"
     assert history_limits(Agent()) == (12, 8000)
-    assert artifact_subtitle({"format": "xlsx", "rows": 4, "columns": 2}) == "4 行 · 2 列"
+    assert (
+        artifact_subtitle({"format": "xlsx", "rows": 4, "columns": 2})
+        == "4 行 · 2 列"
+    )
+    assert artifact_subtitle({"format": "pptx", "slides": 3}) == "3 页"
+    assert artifact_subtitle({"format": "pdf", "pages": 2}) == "2 页"
 
 
 def test_normalize_response_rejects_blank_values():

@@ -8,13 +8,12 @@ executes embedded file content.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
 import csv
 import json
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
 
 SUPPORTED_MARKDOWN_SUFFIXES = frozenset(
     {
@@ -23,6 +22,7 @@ SUPPORTED_MARKDOWN_SUFFIXES = frozenset(
         ".json",
         ".md",
         ".pdf",
+        ".pptx",
         ".txt",
         ".xls",
         ".xlsm",
@@ -118,6 +118,8 @@ class LocalMarkdownConverter:
                 return self._convert_docx(path)
             if suffix == ".pdf":
                 return self._convert_pdf(path, parsed_result=parsed_result)
+            if suffix == ".pptx":
+                return self._convert_pptx(path)
             if suffix in {".txt", ".md"}:
                 return self._convert_text(path, markdown=suffix == ".md")
             if suffix == ".json":
@@ -316,6 +318,25 @@ class LocalMarkdownConverter:
             },
         )
 
+    def _convert_pptx(self, path: Path) -> MarkdownConversionResult:
+        from pptx import Presentation
+
+        presentation = Presentation(path)
+        sections = [self._title(path)]
+        for index, slide in enumerate(presentation.slides, start=1):
+            lines = [
+                str(shape.text).strip()
+                for shape in slide.shapes
+                if hasattr(shape, "text") and str(shape.text).strip()
+            ]
+            if lines:
+                sections.extend([f"## Slide {index}", "\n\n".join(lines)])
+        return self._finish(
+            "\n\n".join(sections),
+            source_format=".pptx",
+            metadata={"slide_count": len(presentation.slides)},
+        )
+
     def _convert_pdf(
         self,
         path: Path,
@@ -405,7 +426,7 @@ class LocalMarkdownConverter:
 
 
 __all__ = [
+    "SUPPORTED_MARKDOWN_SUFFIXES",
     "LocalMarkdownConverter",
     "MarkdownConversionResult",
-    "SUPPORTED_MARKDOWN_SUFFIXES",
 ]

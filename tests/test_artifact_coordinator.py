@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
-
+from docx import Document
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
 
@@ -42,6 +42,31 @@ def docx_plan(**updates):
         "paragraphs": [
             {"text": "项目总结", "kind": "heading", "level": 1},
             {"text": "按计划交付。", "kind": "paragraph", "bold": True},
+        ],
+    }
+    plan.update(updates)
+    return plan
+
+
+def pptx_plan(**updates):
+    plan = {
+        "format": "pptx",
+        "filename": "项目汇报.pptx",
+        "slides": [
+            {"title": "项目汇报", "bullets": ["本周按计划交付。"]},
+        ],
+    }
+    plan.update(updates)
+    return plan
+
+
+def pdf_plan(**updates):
+    plan = {
+        "format": "pdf",
+        "filename": "项目简报.pdf",
+        "paragraphs": [
+            {"text": "项目简报", "kind": "heading", "level": 1},
+            {"text": "本周按计划交付。"},
         ],
     }
     plan.update(updates)
@@ -91,6 +116,35 @@ def test_raw_json_docx_plan_generates_artifact(tmp_path):
     assert result.artifact["format"] == "docx"
     assert result.artifact["paragraphs"] == 2
     assert "已生成 Word 文件" in result.message
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("prompt", "plan", "artifact_format", "count_key"),
+    [
+        ("创建一份 PowerPoint 演示文稿", pptx_plan(), "pptx", "slides"),
+        ("生成一份 PDF 文档", pdf_plan(), "pdf", "pages"),
+    ],
+)
+def test_structured_pptx_and_pdf_plans_generate_verified_artifacts(
+    tmp_path,
+    prompt,
+    plan,
+    artifact_format,
+    count_key,
+):
+    coordinator, llm, _ = make_coordinator(
+        tmp_path,
+        json.dumps(plan, ensure_ascii=False),
+    )
+
+    result = coordinator.process(prompt)
+
+    assert result.error_code is None
+    assert result.artifact["format"] == artifact_format
+    assert result.artifact[count_key] >= 1
+    assert result.artifact["verification"]["status"] == "passed"
+    assert result.artifact["verification"]["publication_integrity"] is True
     assert len(llm.calls) == 1
 
 
@@ -242,6 +296,28 @@ def test_explicit_docx_body_skips_llm_but_empty_request_needs_it(tmp_path):
     assert missing.error_code == "llm_error"
     assert missing.artifact is None
     assert len(list(generator.root.glob("*.docx"))) == 1
+
+
+def test_natural_language_word_request_generates_and_verifies_real_docx(tmp_path):
+    coordinator, llm, _ = make_coordinator(
+        tmp_path,
+        RuntimeError("ordinary model chat must not handle explicit artifacts"),
+    )
+
+    result = coordinator.process(
+        "帮我做一个word文档 里面就写一句话 你好，文档名称随意"
+    )
+
+    assert result.matched is True
+    assert result.rejected is False
+    assert result.error_code is None
+    assert result.requested_format == "docx"
+    assert result.artifact["format"] == "docx"
+    assert result.artifact["verification"]["status"] == "passed"
+    assert result.artifact["verification"]["text_present"] is True
+    assert llm.calls == []
+    document = Document(result.artifact["path"])
+    assert [paragraph.text for paragraph in document.paragraphs] == ["你好"]
 
 
 def test_plan_format_must_match_deterministically_detected_request(tmp_path):
@@ -401,7 +477,9 @@ def test_edit_artifact_generates_version_from_one_sentence_and_context(tmp_path)
     result = coordinator.edit_artifact(
         source["stored_path"],
         "change the title and add the image conclusion",
-        attachment_context="<attachment_markdown>image conclusion</attachment_markdown>",
+        attachment_context=(
+            "<attachment_markdown>image conclusion</attachment_markdown>"
+        ),
     )
 
     assert result.matched is True

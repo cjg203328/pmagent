@@ -2,14 +2,15 @@ from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from pathlib import Path
 
+import pytest
 from docx import Document
 from openpyxl import load_workbook
-import pytest
-
+from pptx import Presentation
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
 
 from artpm_agent.artifacts import WorkspaceArtifactGenerator
+from artpm_agent.artifacts.verification import ArtifactVerificationError
 
 
 def test_generate_xlsx_from_structured_rows_with_safe_metadata(tmp_path):
@@ -39,6 +40,9 @@ def test_generate_xlsx_from_structured_rows_with_safe_metadata(tmp_path):
     assert result["sheet_name"] == "报价_明细"
     assert result["size"] == path.stat().st_size
     assert result["sha256"] == sha256(path.read_bytes()).hexdigest()
+    assert result["verification"]["status"] == "passed"
+    assert result["verification"]["content_match"] is True
+    assert result["verification"]["publication_integrity"] is True
 
     workbook = load_workbook(path, read_only=True, data_only=False)
     worksheet = workbook["报价_明细"]
@@ -86,6 +90,74 @@ def test_generate_docx_from_structured_paragraphs(tmp_path):
     assert document.paragraphs[2].style.name == "List Bullet"
     assert document.paragraphs[2].runs[0].italic is True
     assert document.paragraphs[3].style.name == "List Number"
+    assert result["verification"]["status"] == "passed"
+    assert result["verification"]["text_present"] is True
+
+
+def test_generate_pptx_reopens_and_verifies_slide_text(tmp_path):
+    generator = WorkspaceArtifactGenerator(tmp_path / "artifacts")
+
+    result = generator.generate_pptx(
+        "项目汇报.pptx",
+        [
+            {"title": "项目汇报", "bullets": ["范围已确认", "按计划交付"]},
+            {"title": "下一步", "bullets": ["完成验收"]},
+        ],
+    )
+
+    presentation = Presentation(result["path"])
+    all_text = "\n".join(
+        shape.text
+        for slide in presentation.slides
+        for shape in slide.shapes
+        if hasattr(shape, "text")
+    )
+    assert result["slides"] == 2
+    assert result["verification"]["slide_count"] == 2
+    assert result["verification"]["status"] == "passed"
+    assert "范围已确认" in all_text
+    assert "完成验收" in all_text
+
+
+def test_generate_pdf_reopens_and_verifies_searchable_text(tmp_path):
+    import pymupdf
+
+    generator = WorkspaceArtifactGenerator(tmp_path / "artifacts")
+
+    result = generator.generate_pdf(
+        "项目简报.pdf",
+        [
+            {"text": "项目简报", "kind": "heading"},
+            {"text": "你好，文件已经生成。"},
+        ],
+    )
+
+    document = pymupdf.open(result["path"])
+    try:
+        extracted = "\n".join(page.get_text() for page in document)
+        assert result["pages"] == document.page_count
+    finally:
+        document.close()
+    assert result["verification"]["status"] == "passed"
+    assert result["verification"]["text_present"] is True
+    assert "你好，文件已经生成。" in extracted
+
+
+def test_failed_file_verification_is_not_published(tmp_path, monkeypatch):
+    generator = WorkspaceArtifactGenerator(tmp_path / "artifacts")
+
+    def reject_output(*args, **kwargs):
+        raise ArtifactVerificationError("corrupt output")
+
+    monkeypatch.setattr(
+        "artpm_agent.artifacts.generator.verify_artifact",
+        reject_output,
+    )
+
+    with pytest.raises(ArtifactVerificationError, match="corrupt output"):
+        generator.generate_docx("broken.docx", ["内容"])
+
+    assert not list(generator.root.iterdir())
 
 
 def test_filename_is_sanitized_and_collisions_create_versions(tmp_path):

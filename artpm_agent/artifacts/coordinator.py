@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
 import json
 import logging
-from pathlib import Path
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -34,16 +34,17 @@ from .templates import (
     template_context,
 )
 
-
 MAX_PLAN_COLUMNS = 100
 MAX_PLAN_ROWS = 10_000
 MAX_PLAN_PARAGRAPHS = 2_000
+MAX_PLAN_SLIDES = 200
+MAX_SLIDE_BULLETS = 50
 MAX_PLAN_FILENAME_CHARS = 120
 MAX_PLAN_JSON_CHARS = 4_000_000
 MAX_PROMPT_CHARS = 8_000
 MAX_PLAN_TEXT_CHARS = 32_000
 
-PlanFormat = Literal["xlsx", "docx"]
+PlanFormat = Literal["xlsx", "docx", "pptx", "pdf"]
 PlanScalar = StrictStr | StrictInt | StrictFloat | StrictBool | None
 PlanText = Annotated[
     str,
@@ -59,7 +60,8 @@ Filename = Annotated[
 ]
 
 _SAFE_ACTION = re.compile(
-    r"(?:生成|创建|导出|制作|新建|\b(?:generate|create|export)\b)",
+    r"(?:生成|创建|导出|制作|新建|(?:帮我|请|给我)做|做(?:一个|一份)|"
+    r"\b(?:generate|create|export|make)\b)",
     re.IGNORECASE,
 )
 _XLSX_TARGET = re.compile(
@@ -70,6 +72,15 @@ _DOCX_TARGET = re.compile(
     r"(?:\b(?:word|docx|document)\b|文档)",
     re.IGNORECASE,
 )
+_DOCX_SPECIFIC_TARGET = re.compile(
+    r"(?:\b(?:word|docx|document)\b)",
+    re.IGNORECASE,
+)
+_PPTX_TARGET = re.compile(
+    r"(?:\b(?:powerpoint|pptx|ppt)\b|演示文稿|幻灯片)",
+    re.IGNORECASE,
+)
+_PDF_TARGET = re.compile(r"(?:\bpdf\b|PDF文档)", re.IGNORECASE)
 _SENSITIVE_ACTION = (
     r"(?:删除|移除|清空|覆盖|替换|修改|编辑|更新|追加|改写|重写|"
     r"改(?:一下|动)?(?!进)|"
@@ -77,8 +88,9 @@ _SENSITIVE_ACTION = (
 )
 _ARTIFACT_OBJECT = (
     r"(?:(?:现有|已有|这个|这份|该|原|旧|existing|current)\s*)?"
-    r"(?:excel|xlsx|word|docx|spreadsheet|document|电子表格|表格|文档|文件|"
-    r"[^\s/\\]+\.(?:xlsx|docx))"
+    r"(?:excel|xlsx|word|docx|powerpoint|pptx|ppt|pdf|spreadsheet|document|"
+    r"电子表格|表格|文档|演示文稿|幻灯片|文件|"
+    r"[^\s/\\]+\.(?:xlsx|docx|pptx|pdf))"
 )
 _SENSITIVE_REQUEST = re.compile(
     rf"(?:{_SENSITIVE_ACTION}\s*{_ARTIFACT_OBJECT}|"
@@ -109,9 +121,26 @@ _EXPLICIT_VALUES = re.compile(
     r"[：:\s]*(.+)$",
     re.IGNORECASE,
 )
-_DOCX_CONTENT = re.compile(
-    r"(?:正文|内容)(?:(?:为|是)[：:\s]*|[：:\s]+)(.+)$",
+_DOCUMENT_CONTENT_PATTERNS = (
+    re.compile(
+        r"(?:正文|内容)(?:(?:为|是|写入|写着)[：:\s]*|[：:\s]+)(.+)$",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"(?:里面|其中)(?:就|只)?(?:写|写入|写上|放|包含)(?:一句话)?"
+        r"[：:\s]*(.+)$",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(r"(?:写入|写上)[：:\s]+(.+)$", re.IGNORECASE | re.DOTALL),
+)
+_CONTENT_SUFFIX = re.compile(
+    r"[，,。；;]\s*(?:文档|文件|演示文稿|幻灯片)?"
+    r"(?:名称|名字|文件名|命名)(?:为|是|随意|不限)?.*$",
     re.IGNORECASE | re.DOTALL,
+)
+_TITLE = re.compile(
+    r"标题(?:为|是)?[：:\s]*([^，,。；;\n]{1,120})",
+    re.IGNORECASE,
 )
 
 
@@ -198,6 +227,21 @@ class DocxParagraphPlan(StrictPlanModel):
     italic: StrictBool = False
 
 
+class PresentationSlidePlan(StrictPlanModel):
+    title: PlanText
+    bullets: list[PlanText] = Field(
+        default_factory=list,
+        max_length=MAX_SLIDE_BULLETS,
+    )
+
+    @field_validator("title")
+    @classmethod
+    def title_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("slide title must be non-empty")
+        return value.strip()
+
+
 class ArtifactPlan(StrictPlanModel):
     format: PlanFormat
     filename: Filename
@@ -206,6 +250,11 @@ class ArtifactPlan(StrictPlanModel):
         default=None,
         min_length=1,
         max_length=MAX_PLAN_PARAGRAPHS,
+    )
+    slides: list[PresentationSlidePlan] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_PLAN_SLIDES,
     )
 
     @field_validator("filename")
@@ -218,10 +267,25 @@ class ArtifactPlan(StrictPlanModel):
     @model_validator(mode="after")
     def fields_match_format(self) -> ArtifactPlan:
         if self.format == "xlsx":
-            if self.table is None or self.paragraphs is not None:
-                raise ValueError("xlsx plans require table and forbid paragraphs")
-        elif self.paragraphs is None or self.table is not None:
-            raise ValueError("docx plans require paragraphs and forbid table")
+            if (
+                self.table is None
+                or self.paragraphs is not None
+                or self.slides is not None
+            ):
+                raise ValueError("xlsx plans require table only")
+        elif self.format in {"docx", "pdf"}:
+            if (
+                self.paragraphs is None
+                or self.table is not None
+                or self.slides is not None
+            ):
+                raise ValueError(f"{self.format} plans require paragraphs only")
+        elif (
+            self.slides is None
+            or self.table is not None
+            or self.paragraphs is not None
+        ):
+            raise ValueError("pptx plans require slides only")
         return self
 
 
@@ -273,15 +337,25 @@ class ArtifactCoordinator:
 
     @staticmethod
     def _detect_format(prompt: str) -> tuple[PlanFormat | None, str | None]:
-        has_xlsx = bool(_XLSX_TARGET.search(prompt))
-        has_docx = bool(_DOCX_TARGET.search(prompt))
-        if has_xlsx and has_docx:
+        has_pdf = bool(_PDF_TARGET.search(prompt))
+        detected = [
+            artifact_format
+            for artifact_format, pattern in (
+                ("xlsx", _XLSX_TARGET),
+                ("docx", _DOCX_TARGET),
+                ("pptx", _PPTX_TARGET),
+                ("pdf", _PDF_TARGET),
+            )
+            if pattern.search(prompt)
+            and not (
+                artifact_format == "docx"
+                and has_pdf
+                and not _DOCX_SPECIFIC_TARGET.search(prompt)
+            )
+        ]
+        if len(detected) > 1:
             return None, "ambiguous_format"
-        if has_xlsx:
-            return "xlsx", None
-        if has_docx:
-            return "docx", None
-        return None, None
+        return (detected[0], None) if detected else (None, None)
 
     @staticmethod
     def _is_sensitive_request(prompt: str) -> bool:
@@ -699,8 +773,17 @@ class ArtifactCoordinator:
                 planned_rows = self._coerce_plan_rows_to_template(plan, template)
                 if planned_rows:
                     rows_by_sheet = planned_rows
-        except (RuntimeError, ValidationError, json.JSONDecodeError, ValueError, TypeError) as exc:
-            logging.getLogger(__name__).warning("模板计划生成失败（LLM 不可用？），回退纯提示词/模板生成: %s", exc)
+        except (
+            RuntimeError,
+            ValidationError,
+            json.JSONDecodeError,
+            ValueError,
+            TypeError,
+        ) as exc:
+            logging.getLogger(__name__).warning(
+                "模板计划生成失败（LLM 不可用？），回退纯提示词/模板生成: %s",
+                exc,
+            )
 
         try:
             artifact = self.generator.generate_xlsx_from_template(
@@ -777,8 +860,16 @@ class ArtifactCoordinator:
                 )
                 if planned_paragraphs:
                     paragraphs = planned_paragraphs
-        except (ValidationError, json.JSONDecodeError, ValueError, TypeError) as exc:
-            logging.getLogger(__name__).warning("模板计划解析失败，回退纯提示词生成: %s", exc)
+        except (
+            ValidationError,
+            json.JSONDecodeError,
+            ValueError,
+            TypeError,
+        ) as exc:
+            logging.getLogger(__name__).warning(
+                "模板计划解析失败，回退纯提示词生成: %s",
+                exc,
+            )
 
         try:
             artifact = self.generator.generate_docx_from_template(
@@ -825,12 +916,19 @@ class ArtifactCoordinator:
                 '"rows":[["值"]]}}'
                 f"。最多 {MAX_PLAN_COLUMNS} 列、{MAX_PLAN_ROWS} 行。"
             )
-        else:
+        elif expected_format in {"docx", "pdf"}:
             schema = (
-                '{"format":"docx","filename":"name.docx",'
+                f'{{"format":"{expected_format}",'
+                f'"filename":"name.{expected_format}",'
                 '"paragraphs":[{"text":"内容","kind":"paragraph",'
                 '"level":1,"bold":false,"italic":false}]}'
                 f"。最多 {MAX_PLAN_PARAGRAPHS} 段。"
+            )
+        else:
+            schema = (
+                '{"format":"pptx","filename":"name.pptx",'
+                '"slides":[{"title":"标题","bullets":["要点"]}]}'
+                f"。最多 {MAX_PLAN_SLIDES} 页，每页最多 {MAX_SLIDE_BULLETS} 个要点。"
             )
         result = common + "严格使用以下结构：" + schema
         if template is not None:
@@ -935,16 +1033,47 @@ class ArtifactCoordinator:
                 ),
             )
 
-        content_match = _DOCX_CONTENT.search(prompt)
-        if content_match is None or not content_match.group(1).strip():
+        content = ArtifactCoordinator._explicit_document_content(prompt)
+        if expected_format == "pptx":
+            title_match = _TITLE.search(prompt)
+            title = title_match.group(1).strip() if title_match else "演示文稿"
+            if not content and not title_match:
+                return None
+            return ArtifactPlan(
+                format="pptx",
+                filename="新建演示文稿.pptx",
+                slides=[
+                    PresentationSlidePlan(
+                        title=title,
+                        bullets=[content] if content and content != title else [],
+                    )
+                ],
+            )
+        if not content:
             return None
         return ArtifactPlan(
-            format="docx",
-            filename="新建文档.docx",
+            format=expected_format,
+            filename=(
+                "新建文档.docx"
+                if expected_format == "docx"
+                else "新建文档.pdf"
+            ),
             paragraphs=[
-                DocxParagraphPlan(text=content_match.group(1).strip())
+                DocxParagraphPlan(text=content)
             ],
         )
+
+    @staticmethod
+    def _explicit_document_content(prompt: str) -> str:
+        for pattern in _DOCUMENT_CONTENT_PATTERNS:
+            match = pattern.search(prompt)
+            if match is None:
+                continue
+            content = _CONTENT_SUFFIX.sub("", match.group(1)).strip()
+            content = content.strip('"\'“”‘’ ')
+            if content:
+                return content
+        return ""
 
     def _generate_plan(
         self,
@@ -958,9 +1087,16 @@ class ArtifactCoordinator:
                 f"{artifact['rows']} 行、{artifact['columns']} 列",
                 "Excel",
             )
+        if plan.format == "pptx":
+            slides = [item.model_dump(mode="python") for item in plan.slides]
+            artifact = self.generator.generate_pptx(plan.filename, slides)
+            return artifact, f"{artifact['slides']} 页", "PowerPoint"
         paragraphs = [
             item.model_dump(mode="python") for item in plan.paragraphs
         ]
+        if plan.format == "pdf":
+            artifact = self.generator.generate_pdf(plan.filename, paragraphs)
+            return artifact, f"{artifact['pages']} 页", "PDF"
         artifact = self.generator.generate_docx(plan.filename, paragraphs)
         return artifact, f"{artifact['paragraphs']} 段", "Word"
 
@@ -1003,12 +1139,15 @@ class ArtifactCoordinator:
                 return ArtifactCoordinationResult(
                     matched=True,
                     rejected=True,
-                    message="请为编辑后的交付物选择 Excel 或 Word 一种格式。",
+                    message="请为编辑后的交付物只选择一种文件格式。",
                     error_code=detection_error,
                 )
             if target_format is None:
+                suffix = Path(edit_source).suffix.lower().lstrip(".")
                 target_format = (
-                    "xlsx" if Path(edit_source).suffix.lower() == ".xlsx" else "docx"
+                    suffix
+                    if suffix in {"xlsx", "docx", "pptx", "pdf"}
+                    else "docx"
                 )
             return self.edit_artifact(
                 edit_source,
@@ -1022,14 +1161,14 @@ class ArtifactCoordinator:
             return ArtifactCoordinationResult(
                 matched=True,
                 rejected=True,
-                message="请一次只选择 Excel 或 Word 一种文件格式。",
+                message="请一次只选择 Excel、Word、PowerPoint 或 PDF 一种文件格式。",
                 error_code=detection_error,
             )
         if expected_format is None:
             return ArtifactCoordinationResult(
                 matched=False,
                 rejected=False,
-                message="未检测到明确的 Excel 或 Word 生成请求。",
+                message="未检测到明确的 Excel、Word、PowerPoint 或 PDF 生成请求。",
                 error_code="not_matched",
             )
         if self._is_sensitive_request(prompt):
@@ -1047,7 +1186,7 @@ class ArtifactCoordinator:
                 matched=False,
                 rejected=False,
                 requested_format=expected_format,
-                message="请明确说明需要生成、创建或导出文件。",
+                message="请明确说明需要生成、创建、制作或导出文件。",
                 error_code="not_matched",
             )
 

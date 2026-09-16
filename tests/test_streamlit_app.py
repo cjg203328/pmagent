@@ -1,19 +1,19 @@
+import time
 from pathlib import Path
 from types import SimpleNamespace
-import time
 from uuid import uuid4
 
 import pytest
 from streamlit.testing.v1 import AppTest
 
 from artpm_agent.memory import SessionStore
-from artpm_agent.views.chat import _compact_legacy_assistant_copy
 from artpm_agent.profiles import AgentProfilePatch, QuotePolicyPatch
 from artpm_agent.ui_style import STYLE_CSS
 from artpm_agent.utils.chat_attachments import (
     DEFAULT_ALLOWED_EXTENSIONS,
     DEFAULT_MAX_FILE_SIZE,
 )
+from artpm_agent.views.chat import _compact_legacy_assistant_copy
 
 # Resolve the app entrypoint from this file's location so AppTest.from_file
 # works regardless of the current working directory.
@@ -695,6 +695,25 @@ def test_streamlit_generates_explicit_xlsx_without_llm_client():
     assert artifact["rows"] == 1
     assert artifact["columns"] == 3
     assert "明确字段" in response["content"]
+    path = app.session_state["artifact_generator"].root / artifact["stored_path"]
+    assert Path(path).is_file()
+    Path(path).unlink()
+
+
+def test_streamlit_natural_language_word_request_stays_in_artifact_pipeline():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+    app.button(key="new_conversation").click().run(timeout=30)
+    app.session_state["agent"] = LocalArtifactAgent()
+
+    app.chat_input(key="chat_input").set_value(
+        "帮我做一个word文档 里面就写一句话 你好，文档名称随意"
+    ).run(timeout=30)
+
+    assert not app.exception
+    response = app.session_state["messages"][-1]
+    artifact = response["metadata"]["artifacts"][0]
+    assert artifact["format"] == "docx"
+    assert artifact["verification"]["status"] == "passed"
     path = app.session_state["artifact_generator"].root / artifact["stored_path"]
     assert Path(path).is_file()
     Path(path).unlink()

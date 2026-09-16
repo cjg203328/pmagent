@@ -25,6 +25,10 @@ def _should_preparse_artifact_attachments(prompt: str) -> bool:
             "xlsx",
             "word",
             "docx",
+            "powerpoint",
+            "ppt",
+            "pptx",
+            "pdf",
             "spreadsheet",
             "document",
             "table",
@@ -34,10 +38,13 @@ def _should_preparse_artifact_attachments(prompt: str) -> bool:
             "template",
             "表格",
             "文档",
+            "演示文稿",
+            "幻灯片",
             "文件",
             "生成",
             "创建",
             "导出",
+            "制作",
             "模板",
         )
     )
@@ -146,12 +153,15 @@ def try_artifact_generation(
                         "rows",
                         "columns",
                         "paragraphs",
+                        "slides",
+                        "pages",
                         "sheet_name",
                         "template_id",
                         "template_name",
                         "preview_markdown",
                         "export_formats",
                         "source_artifact",
+                        "verification",
                     )
                     if key in artifact
                 }
