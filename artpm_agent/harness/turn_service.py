@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from threading import RLock
 from typing import Any, Dict, List, Optional
 
 from .profile_handler import try_profile_proposal
@@ -25,7 +26,13 @@ from .artifact_handler import try_artifact_generation
 from .workflow_handler import try_workflow_routing
 from .skill_handler import try_skill_routing
 from .model_handler import fallback_to_model
-from .runtime import HarnessRuntime, adapt_runtime
+from .runtime import (
+    HarnessRuntime,
+    LegacyAgentRuntimeAdapter,
+    LocalHarnessRuntime,
+    adapt_runtime,
+)
+from artpm_agent.runtime.counters import increment_counter
 from artpm_agent.runtime.events import AgentEventType
 from artpm_agent.runtime.request_services import TurnServiceBundle
 from artpm_agent.runtime.turn_events import recorder_for_turn
@@ -34,6 +41,25 @@ from artpm_agent.routing.service import IntentDecision
 from artpm_agent.tenancy.scope import Scope
 
 logger = logging.getLogger(__name__)
+
+# Stable boundary version for hosts that exchange TurnContext/TurnResult data.
+RUN_TURN_CONTRACT_VERSION = "1"
+
+
+def _runtime_kind(runtime: Any) -> str:
+    if isinstance(runtime, LocalHarnessRuntime):
+        return "local"
+    if isinstance(runtime, LegacyAgentRuntimeAdapter):
+        return "legacy_adapter"
+    if runtime is None:
+        return "missing"
+    return "canonical"
+
+
+def _annotate_turn_result(result: "TurnResult", runtime_kind: str) -> "TurnResult":
+    result.metadata.setdefault("harness_contract_version", RUN_TURN_CONTRACT_VERSION)
+    result.metadata.setdefault("runtime_kind", runtime_kind)
+    return result
 
 
 def _classify_turn_error(error: BaseException) -> str:
@@ -194,6 +220,12 @@ class TurnContext:
         elif not isinstance(self.scope, TurnScope):
             raise TypeError("scope must be a TurnScope")
         self.runtime = adapt_runtime(self.runtime, self.agent)
+        # Allocate the one-shot execution lock while the context is still
+        # single-thread owned; lazy creation inside ``run_turn`` would allow
+        # two first callers to race before they share the same lock.
+        self._run_turn_lock = RLock()
+        self._run_turn_state = "pending"
+        self._run_turn_result: Optional[TurnResult] = None
 
 
 @dataclass
@@ -217,6 +249,62 @@ class TurnResult:
     error: Optional[str] = None
     success: bool = True
     response_rendered: bool = False
+
+
+def _begin_turn_execution(ctx: "TurnContext") -> TurnResult | None:
+    """Claim a context once and return a cached result for replayed calls.
+
+    ``run_turn`` is intentionally a one-shot boundary. Hosts may retry a
+    completed request after a transport interruption, so a completed context
+    returns its original result without publishing another lifecycle stream.
+    Concurrent calls receive a stable structured error instead of entering the
+    handler chain twice.
+    """
+
+    lock = getattr(ctx, "_run_turn_lock", None)
+    if lock is None:
+        lock = RLock()
+        ctx._run_turn_lock = lock
+    with lock:
+        state = getattr(ctx, "_run_turn_state", "pending")
+        if state == "completed":
+            cached = getattr(ctx, "_run_turn_result", None)
+            if isinstance(cached, TurnResult):
+                increment_counter("harness.turns.duplicate_replays")
+                return replace(
+                    cached,
+                    metadata={
+                        **cached.metadata,
+                        "idempotent_replay": True,
+                    },
+                )
+        if state == "running":
+            increment_counter("harness.turns.concurrent_duplicates")
+            return TurnResult(
+                response="This turn is already being processed.",
+                success=False,
+                error="turn_in_progress",
+                handled_by="harness_duplicate",
+                metadata={
+                    "turn_id": getattr(ctx, "turn_id", ""),
+                    "idempotent_replay": False,
+                },
+            )
+        ctx._run_turn_state = "running"
+    return None
+
+
+def _finish_turn_execution(ctx: "TurnContext", result: TurnResult) -> TurnResult:
+    """Publish the terminal result to the context's one-shot state."""
+
+    lock = getattr(ctx, "_run_turn_lock", None)
+    if lock is None:
+        lock = RLock()
+        ctx._run_turn_lock = lock
+    with lock:
+        ctx._run_turn_result = result
+        ctx._run_turn_state = "completed"
+    return result
 
 
 def _is_fast_response_turn(ctx: TurnContext) -> bool:
@@ -433,6 +521,13 @@ def run_turn(
 ) -> TurnResult:
     """Run one turn through the single canonical orchestration boundary."""
 
+    increment_counter("harness.turns.total")
+    runtime_kind = _runtime_kind(getattr(ctx, "runtime", None))
+    increment_counter(f"harness.turns.{runtime_kind}")
+    replay = _begin_turn_execution(ctx)
+    if replay is not None:
+        return _annotate_turn_result(replay, runtime_kind)
+
     resolved_services = services or ctx.services
     if resolved_services is not None:
         profile_store = profile_store or resolved_services.profile_store
@@ -448,7 +543,13 @@ def run_turn(
     try:
         ctx.scope = get_turn_scope(ctx)
     except Exception as error:  # noqa: BLE001 - reject forged request scope
-        return _scope_rejection_result(ctx, error)
+        return _finish_turn_execution(
+            ctx,
+            _annotate_turn_result(
+                _scope_rejection_result(ctx, error),
+                runtime_kind,
+            ),
+        )
 
     recorder = recorder_for_turn(ctx)
     recorder.emit(ctx, AgentEventType.TURN_START)
@@ -520,7 +621,10 @@ def run_turn(
             "intent_checked": bool(ctx.intent_checked),
         },
     )
-    return result
+    return _finish_turn_execution(
+        ctx,
+        _annotate_turn_result(result, runtime_kind),
+    )
 
 
 def _feedback_kind(feedback: str) -> str:
@@ -695,8 +799,63 @@ def _run_thin_runtime(
             handled_by="harness_runtime_error",
             metadata={"turn_id": ctx.turn_id},
         )
+    response_context = dict(ctx.extra or {})
+    response_context.update(
+        {
+            "conversation_id": ctx.conversation_id,
+            "turn_id": ctx.turn_id,
+            "conversation_history": list(ctx.conversation_history or []),
+            "agent_profile": ctx.agent_profile,
+            "knowledge_context": ctx.knowledge_context,
+            "intent": ctx.intent,
+            "intent_checked": ctx.intent_checked,
+            "harness_managed": True,
+        }
+    )
+
+    stream_method = getattr(runtime, "stream_with_failover", None)
+    stream_target = getattr(runtime, "target", None)
+    if callable(stream_method) and callable(getattr(stream_target, "stream_chat", None)):
+        streamed: list[str] = []
+        try:
+            source = stream_method(
+                ctx.user_input,
+                "",
+                ctx.conversation_history or [],
+                image_paths=[],
+                context=response_context,
+            )
+            for chunk in source:
+                if isinstance(chunk, str) and chunk:
+                    streamed.append(chunk)
+            response = "".join(streamed)
+            if not response.strip():
+                raise ValueError("model returned an empty response")
+            return TurnResult(
+                response=response.strip(),
+                success=True,
+                handled_by="thin_agent_stream",
+                metadata={"turn_id": ctx.turn_id, "streamed": True},
+                response_rendered=True,
+            )
+        except Exception as error:  # noqa: BLE001 - normalize adapter failures
+            if streamed:
+                return TurnResult(
+                    response="".join(streamed),
+                    success=False,
+                    error=str(error) or error.__class__.__name__,
+                    handled_by="thin_agent_stream_error",
+                    metadata={
+                        "turn_id": ctx.turn_id,
+                        "error_kind": _classify_turn_error(error),
+                        "streamed": True,
+                    },
+                    response_rendered=True,
+                )
+            logger.debug("thin stream unavailable; falling back to chat", exc_info=True)
+
     try:
-        response = runtime.chat(ctx.user_input, context=ctx.extra)
+        response = runtime.chat(ctx.user_input, context=response_context)
     except Exception as error:  # noqa: BLE001 - surface agent failures uniformly
         logger.warning("Thin-agent chat() raised: %s", error)
         return TurnResult(
@@ -704,7 +863,10 @@ def _run_thin_runtime(
             success=False,
             error=str(error),
             handled_by="thin_agent_error",
-            metadata={"turn_id": ctx.turn_id},
+            metadata={
+                "turn_id": ctx.turn_id,
+                "error_kind": _classify_turn_error(error),
+            },
         )
 
     if not response:
@@ -848,9 +1010,15 @@ def _prepare_turn_attachments(ctx: TurnContext) -> None:
 
     extra = ctx.extra if isinstance(ctx.extra, dict) else {}
     if getattr(ctx, "attachments_prepared", False):
+        increment_counter("harness.attachments.parse_duplicate_attempts")
+        increment_counter("harness.attachments.parse_cache_hits")
+        increment_counter("harness.attachments.parse_reused")
         return
     if extra.get("_attachments_prepared") is True:
         ctx.attachments_prepared = True
+        increment_counter("harness.attachments.parse_duplicate_attempts")
+        increment_counter("harness.attachments.parse_cache_hits")
+        increment_counter("harness.attachments.parse_reused")
         return
     # Hosts may provide a pre-parsed snapshot in the compatibility bag. An
     # explicitly empty snapshot is still a valid result and must not be parsed
@@ -858,6 +1026,8 @@ def _prepare_turn_attachments(ctx: TurnContext) -> None:
     if "parsed_files" in extra and "attachment_context" in extra:
         ctx.attachments_prepared = True
         extra["_attachments_prepared"] = True
+        increment_counter("harness.attachments.parse_cache_hits")
+        increment_counter("harness.attachments.parse_reused")
         return
     runtime = ctx.runtime
     if runtime is None or not runtime.capabilities.attachment_parsing:
@@ -880,6 +1050,7 @@ def _prepare_turn_attachments(ctx: TurnContext) -> None:
     ctx.attachments_prepared = True
     extra["_attachments_prepared"] = True
     extra["file_paths"] = file_paths
+    increment_counter("harness.attachments.parse_calls")
     try:
         parsed_files, attachment_context = runtime.parse_attachments(
             ctx.user_input,
@@ -888,4 +1059,5 @@ def _prepare_turn_attachments(ctx: TurnContext) -> None:
         extra["parsed_files"] = parsed_files
         extra["attachment_context"] = attachment_context
     except Exception:  # noqa: BLE001 - model fallback can still explain the failure
+        increment_counter("harness.attachments.parse_failures")
         logger.warning("统一附件预处理失败", exc_info=True)

@@ -31,7 +31,7 @@ pip install mcp
       }
     },
     "sqlite": {
-      "command": "python", 
+      "command": "python",
       "args": ["-m", "mcp.server.sqlite"],
       "env": {
         "DB_PATH": "d:\\桌面\\pmagent\\data\\artpm.db"
@@ -127,18 +127,18 @@ async def test_mcp():
         args=["-m", "mcp.server.filesystem"],
         env={"WORKSPACE_PATH": "d:\\桌面\\pmagent"}
     )
-    
+
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             # 初始化
             await session.initialize()
-            
+
             # 列出可用工具
             tools = await session.list_tools()
             print("Available tools:")
             for tool in tools.tools:
                 print(f"  - {tool.name}: {tool.description}")
-            
+
             # 调用工具
             result = await session.call_tool("read_file", {
                 "path": "README.md"
@@ -184,11 +184,11 @@ except ImportError:
 
 class RealMCPClient:
     """真实的MCP客户端 - 连接本地MCP服务器"""
-    
+
     def __init__(self, config_path: str = ".claude/mcp_config.json"):
         """
         初始化MCP客户端
-        
+
         Args:
             config_path: MCP配置文件路径
         """
@@ -196,12 +196,12 @@ class RealMCPClient:
         self.servers = {}
         self.sessions = {}
         self.enabled = MCP_AVAILABLE
-        
+
         if self.enabled:
             self._load_config()
         else:
             print("[MCP] Disabled - mcp package not available")
-    
+
     def _load_config(self):
         """加载MCP配置"""
         try:
@@ -215,48 +215,48 @@ class RealMCPClient:
                 print(f"[MCP] Config not found: {config_path}")
         except Exception as e:
             print(f"[MCP] Failed to load config: {e}")
-    
+
     async def connect_server(self, server_name: str):
         """连接到MCP服务器"""
         if not self.enabled:
             return False
-        
+
         if server_name in self.sessions:
             return True
-        
+
         server_config = self.servers.get(server_name)
         if not server_config:
             print(f"[MCP] Server '{server_name}' not configured")
             return False
-        
+
         try:
             server_params = StdioServerParameters(
                 command=server_config["command"],
                 args=server_config.get("args", []),
                 env=server_config.get("env", {})
             )
-            
+
             read, write = await stdio_client(server_params).__aenter__()
             session = await ClientSession(read, write).__aenter__()
             await session.initialize()
-            
+
             self.sessions[server_name] = session
             print(f"[MCP] Connected to server: {server_name}")
             return True
-            
+
         except Exception as e:
             print(f"[MCP] Failed to connect to {server_name}: {e}")
             return False
-    
+
     async def list_tools(self, server_name: str) -> List[Dict[str, Any]]:
         """列出服务器的可用工具"""
         if not await self.connect_server(server_name):
             return []
-        
+
         try:
             session = self.sessions[server_name]
             tools_response = await session.list_tools()
-            
+
             tools = []
             for tool in tools_response.tools:
                 tools.append({
@@ -264,22 +264,22 @@ class RealMCPClient:
                     "description": tool.description,
                     "inputSchema": tool.inputSchema
                 })
-            
+
             return tools
-            
+
         except Exception as e:
             print(f"[MCP] Failed to list tools: {e}")
             return []
-    
+
     async def call_tool(self, server_name: str, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """
         调用MCP工具
-        
+
         Args:
             server_name: MCP服务器名称
             tool_name: 工具名称
             arguments: 工具参数
-        
+
         Returns:
             执行结果
         """
@@ -288,11 +288,11 @@ class RealMCPClient:
                 "success": False,
                 "error": f"Failed to connect to server: {server_name}"
             }
-        
+
         try:
             session = self.sessions[server_name]
             result = await session.call_tool(tool_name, arguments)
-            
+
             # 解析结果
             if result.content:
                 content = result.content[0]
@@ -315,13 +315,13 @@ class RealMCPClient:
                     "success": False,
                     "error": "No content in result"
                 }
-                
+
         except Exception as e:
             return {
                 "success": False,
                 "error": str(e)
             }
-    
+
     async def close(self):
         """关闭所有连接"""
         for server_name, session in self.sessions.items():
@@ -330,7 +330,7 @@ class RealMCPClient:
                 print(f"[MCP] Closed connection to {server_name}")
             except:
                 pass
-        
+
         self.sessions.clear()
 
 
@@ -360,45 +360,45 @@ async def main():
     print("=" * 60)
     print("Testing Real MCP Integration")
     print("=" * 60)
-    
+
     client = get_real_mcp_client()
-    
+
     if not client.enabled:
         print("\n[ERROR] MCP not available")
         print("Install: pip install mcp")
         return
-    
+
     # 测试文件系统服务器
     print("\n[Test 1] List filesystem tools:")
     tools = await client.list_tools("filesystem")
     for tool in tools:
         print(f"  - {tool['name']}: {tool['description']}")
-    
+
     # 测试读取文件
     print("\n[Test 2] Read README.md:")
     result = await client.call_tool("filesystem", "read_file", {
         "path": "README.md"
     })
-    
+
     if result["success"]:
         content = result["result"][:200]
         print(f"  Success! Content preview:\n  {content}...")
     else:
         print(f"  Failed: {result['error']}")
-    
+
     # 测试列出文件
     print("\n[Test 3] List files:")
     result = await client.call_tool("filesystem", "list_directory", {
         "path": "artpm_agent"
     })
-    
+
     if result["success"]:
         print(f"  Success! Result:\n  {result['result'][:200]}...")
     else:
         print(f"  Failed: {result['error']}")
-    
+
     await client.close()
-    
+
     print("\n" + "=" * 60)
     print("Test completed!")
     print("=" * 60)

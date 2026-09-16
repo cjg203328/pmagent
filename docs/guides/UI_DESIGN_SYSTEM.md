@@ -18,7 +18,8 @@ not source code or branding.
 
 ## Visual tokens
 
-The canonical tokens live in `artpm_agent/ui_style.py`.
+The canonical token boundary is `artpm_agent/ui/style_tokens.py`; the
+compatibility stylesheet remains available as `artpm_agent/ui_style.py`.
 
 - Canvas: `#fbfbfa`
 - Paper: `#ffffff`

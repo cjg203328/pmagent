@@ -21,6 +21,7 @@ from .workspace_knowledge_store import (
     KnowledgeProposalConflictError,
     WorkspaceKnowledgeStore,
 )
+from .knowledge import schema_contract
 from .wiki_store import WikiPageConflictError, WorkspaceWikiStore
 from .conversation_compressor import ConversationCompressor, CompressionResult
 from .cross_session_memory import CrossSessionMemory, MemoryItem
@@ -44,6 +45,7 @@ __all__ = [
     "SessionStore",
     "KnowledgeProposalConflictError",
     "WorkspaceKnowledgeStore",
+    "schema_contract",
     "WikiPageConflictError",
     "WorkspaceWikiStore",
     # 新增 — 记忆系统核心

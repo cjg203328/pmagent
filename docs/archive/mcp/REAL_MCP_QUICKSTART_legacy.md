@@ -136,21 +136,21 @@ from core.mcp_client_real import get_real_mcp_client
 async def example():
     # 获取MCP客户端
     client = get_real_mcp_client()
-    
+
     # 读取文件
     result = await client.call_tool("filesystem", "read_file", {
         "path": "README.md"
     })
-    
+
     if result["success"]:
         print(f"Content: {result['result']}")
-    
+
     # 查询数据库
     result = await client.call_tool("sqlite", "list_tables", {})
-    
+
     if result["success"]:
         print(f"Tables: {result['result']}")
-    
+
     # 关闭连接
     await client.close()
 
@@ -170,7 +170,7 @@ class FileReaderSkill(BaseSkill):
         super().__init__(context)
         # 使用真实MCP客户端
         self.mcp_client = get_real_mcp_client()
-    
+
     async def execute(self, inputs):
         # 调用真实MCP服务
         result = await self.mcp_client.call_tool(
@@ -178,7 +178,7 @@ class FileReaderSkill(BaseSkill):
             "read_file",
             {"path": inputs["file_path"]}
         )
-        
+
         return result
 ```
 

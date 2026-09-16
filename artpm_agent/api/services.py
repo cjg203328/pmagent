@@ -24,6 +24,7 @@ from artpm_agent.memory.conversation_store import ConversationStore
 from artpm_agent.memory.session_store import SessionStore
 from artpm_agent.security.permission_store import PermissionRequest, PermissionStore
 from artpm_agent.workflows.store import WorkflowStore
+from artpm_agent.runtime.counters import counter_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -276,7 +277,9 @@ class GatewayServices:
 
     def health(self) -> dict[str, Any]:
         if self.health_handler is not None:
-            return dict(self.health_handler())
+            result = dict(self.health_handler())
+            result.setdefault("runtime_counters", dict(counter_snapshot()))
+            return result
 
         checks: dict[str, Any] = {}
         for name, value in (
@@ -289,7 +292,11 @@ class GatewayServices:
                 required_tables=_STORE_REQUIRED_TABLES[name],
             )
         status = "ok" if all(item["status"] == "ok" for item in checks.values()) else "degraded"
-        return {"status": status, "checks": checks}
+        return {
+            "status": status,
+            "checks": checks,
+            "runtime_counters": dict(counter_snapshot()),
+        }
 
     def close(self) -> None:
         if self.close_handler is not None:
@@ -526,7 +533,7 @@ class DefaultGatewayRuntime:
         with self._lock:
             agent = self._ensure_agent()
             self._ensure_learning_services()
-            from artpm_agent.harness import TurnContext, run_turn
+            from artpm_agent.harness import TurnContext
 
             history = self.conversations.build_context(
                 command.conversation_id,
@@ -555,23 +562,15 @@ class DefaultGatewayRuntime:
                 consolidation_scheduler=self.consolidation_scheduler,
                 event_bus=getattr(self, "event_bus", None),
             )
-            # The API gateway is the first production host of the public
-            # HarnessRuntime contract.  Bind the legacy facade's router to
-            # this request's tenant before handing the turn to the harness;
-            # the historical ``agent=`` fallback remains for injected test or
-            # plugin runtimes that already implement the public contract.
-            runtime = None
-            agent_reference = agent
-            router = getattr(agent, "router", None)
-            bind_router = getattr(router, "for_tenant", None)
-            if callable(bind_router):
-                from artpm_agent.harness.runtime import LegacyAgentRuntimeAdapter
+            # API requests use the canonical local Harness host. It owns the
+            # legacy facade translation and binds a request-scoped router
+            # without mutating the process-wide agent.
+            from artpm_agent.harness.runtime import LocalHarnessRuntime
 
-                runtime = LegacyAgentRuntimeAdapter(
-                    agent,
-                    router=bind_router(tenant_context),
-                )
-                agent_reference = None
+            runtime = LocalHarnessRuntime(agent, services=turn_services).for_tenant(
+                tenant_context
+            )
+            agent_reference = None
             context = {
                 "tenant_id": command.principal.tenant_id,
                 "workspace_id": command.principal.workspace_id,
@@ -602,7 +601,7 @@ class DefaultGatewayRuntime:
                 services=turn_services,
                 extra=context,
             )
-            result = run_turn(
+            result = runtime.run_turn(
                 turn_context,
                 services=turn_services,
                 request_conversation_id=command.conversation_id,
@@ -823,7 +822,11 @@ class DefaultGatewayRuntime:
             if all(checks[name]["status"] == "ok" for name in _STORE_REQUIRED_TABLES)
             else "degraded"
         )
-        return {"status": status, "checks": checks}
+        return {
+            "status": status,
+            "checks": checks,
+            "runtime_counters": dict(counter_snapshot()),
+        }
 
     def close(self) -> None:
         agent = self._agent

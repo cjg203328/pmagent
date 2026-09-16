@@ -346,9 +346,9 @@ AI: 🔍 搜索结果...
 
 用户: "分析第一个报价单"
 AI: 📊 正在分析...
-    [调用 file_reader + document_classifier_parser + 
+    [调用 file_reader + document_classifier_parser +
      quote_calculator + project_evaluator]
-    
+
     综合分析报告:
     ...
 ```

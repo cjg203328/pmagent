@@ -5,6 +5,7 @@ from typing import Any, Mapping
 from artpm_agent.harness import BaseHarnessRuntime, RuntimeCapabilities, TurnContext
 from artpm_agent.harness.turn_service import _prepare_turn_attachments
 from artpm_agent.retrieval import RetrievalHit, RetrievalPlan, SearchTarget, WorkspaceRetriever
+from artpm_agent.runtime.counters import counter_snapshot, reset_counters
 
 
 class _EmptyAttachmentRuntime(BaseHarnessRuntime):
@@ -23,6 +24,7 @@ class _EmptyAttachmentRuntime(BaseHarnessRuntime):
 
 
 def test_empty_attachment_snapshot_is_parsed_once_per_turn() -> None:
+    reset_counters()
     runtime = _EmptyAttachmentRuntime()
     context = TurnContext(
         turn_id="attachment-once",
@@ -39,6 +41,35 @@ def test_empty_attachment_snapshot_is_parsed_once_per_turn() -> None:
     assert context.attachments_prepared is True
     assert context.extra["parsed_files"] == []
     assert context.extra["attachment_context"] == ""
+    counters = counter_snapshot()
+    assert counters["harness.attachments.parse_calls"] == 1
+    assert counters["harness.attachments.parse_cache_hits"] == 1
+    assert counters["harness.attachments.parse_duplicate_attempts"] == 1
+    reset_counters()
+
+
+def test_explicit_empty_snapshot_is_counted_as_a_cache_hit() -> None:
+    """An explicit host snapshot is authoritative, even when it is empty."""
+
+    reset_counters()
+    runtime = _EmptyAttachmentRuntime()
+    context = TurnContext(
+        turn_id="attachment-prefilled-empty",
+        conversation_id="conversation-1",
+        user_input="inspect",
+        runtime=runtime,
+        extra={
+            "file_paths": ["notes.txt"],
+            "parsed_files": [],
+            "attachment_context": "",
+        },
+    )
+
+    _prepare_turn_attachments(context)
+
+    assert runtime.calls == 0
+    assert counter_snapshot()["harness.attachments.parse_cache_hits"] == 1
+    reset_counters()
 
 
 def test_retrieval_plan_confidence_floor_enables_store_filtering() -> None:

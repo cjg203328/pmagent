@@ -906,68 +906,22 @@ def chat_page():
                             _current_model_id(agent),
                             local_fast=local_fast,
                         )
+                        streamed_chunks: list[str] = []
+                        stream_slot = None if local_fast else st.empty()
+
+                        def render_stream_chunk(chunk: str) -> None:
+                            streamed_chunks.append(chunk)
+                            if stream_slot is not None:
+                                stream_slot.markdown("".join(streamed_chunks))
+
+                        agent_context["response_stream_callback"] = render_stream_chunk
                         with progress_context:
                             harness_result = None
-
-                            def respond_from_public_agent_api(_turn_ctx):
-                                # Normal turns receive the memory-enriched
-                                # snapshot from run_turn(). Fast meta intents
-                                # deliberately retain empty history and
-                                # knowledge context while sharing the same
-                                # TurnResult and error contract.
-                                response_context = {
-                                    **agent_context,
-                                    **(
-                                        _turn_ctx.extra
-                                        if isinstance(_turn_ctx.extra, dict)
-                                        else {}
-                                    ),
-                                    "conversation_id": _turn_ctx.conversation_id,
-                                    "turn_id": _turn_ctx.turn_id,
-                                    "conversation_history": (
-                                        _turn_ctx.conversation_history
-                                    ),
-                                    "agent_profile": _turn_ctx.agent_profile,
-                                    "knowledge_context": (
-                                        _turn_ctx.knowledge_context
-                                    ),
-                                    "intent": _turn_ctx.intent,
-                                    "intent_checked": _turn_ctx.intent_checked,
-                                    "harness_managed": True,
-                                }
-                                turn_runtime = getattr(_turn_ctx, "runtime", None)
-                                if local_fast:
-                                    return (
-                                        normalize_agent_response(
-                                            turn_runtime.chat(
-                                                prompt,
-                                                context=response_context,
-                                            )
-                                        ),
-                                        False,
-                                    )
-                                if callable(getattr(agent, "stream_chat", None)):
-                                    return (
-                                        stream_agent_response(
-                                            agent,
-                                            prompt,
-                                            response_context,
-                                        ),
-                                        True,
-                                    )
-                                return (
-                                    normalize_agent_response(
-                                        turn_runtime.chat(
-                                            prompt,
-                                            context=response_context,
-                                        )
-                                    ),
-                                    False,
-                                )
-
-                            # All turns use the Harness. Its fast mode is
-                            # independently revalidated before it skips memory,
-                            # workflows, and skills.
+                            # All turns use the canonical local Harness. Its
+                            # fast mode is independently revalidated before it
+                            # skips memory, workflows, and skills. The UI only
+                            # renders the completed TurnResult; it must not
+                            # invoke a second legacy chat/stream path here.
                             (
                                 response,
                                 awaiting_approval,
@@ -987,7 +941,6 @@ def chat_page():
                                 knowledge_rule_extractor=extract_knowledge_rule,
                                 workflow_coordinator=get_workflow_coordinator(),
                                 workflow_formatter=format_workflow_result,
-                                response_handler=respond_from_public_agent_api,
                                 session_store=get_session_store(),
                                 event_bus=get_event_bus(),
                             )
@@ -1995,3 +1948,16 @@ def _queue_suggested_prompt(prompt: str) -> None:
         "attachments": [],
         "permission_grant": _conversation_permission_grant(active_id),
     }
+
+
+# P2 compatibility facade: state, feedback and welcome projections live in
+# side-effect-free modules.  Existing private imports keep working while the
+# Streamlit lifecycle remains in this page module.
+from artpm_agent.views import chat_state as _chat_state  # noqa: E402
+
+_compact_legacy_assistant_copy = _chat_state.compact_legacy_assistant_copy
+_voice_provider_label = _chat_state.voice_provider_label
+_preceding_user_prompt = lambda index: _chat_state.preceding_user_prompt(  # noqa: E731
+    st.session_state.get("messages", []), index
+)
+_feedback_was_saved = _chat_state.feedback_was_saved

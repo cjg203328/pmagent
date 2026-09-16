@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import (
     Any,
     ContextManager,
+    Iterator,
     Mapping,
     Optional,
     Protocol,
@@ -123,6 +124,16 @@ class HarnessRuntime(Protocol):
         *,
         image_paths: list[str],
     ) -> str: ...
+
+    def stream_with_failover(
+        self,
+        prompt: str,
+        system_prompt: str,
+        history: Sequence[Mapping[str, Any]],
+        *,
+        image_paths: list[str],
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> Iterator[str]: ...
 
     def make_llm_callable(self) -> Any: ...
 
@@ -399,6 +410,9 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
         return str(result)
 
     def process_document(self, file_path: str, user_hint: str = "") -> Mapping[str, Any]:
+        from artpm_agent.runtime.counters import increment_counter
+
+        increment_counter("harness.legacy.adapter_document_parse_calls")
         method = getattr(self.target, "process_document", None)
         if not callable(method):
             raise RuntimeCapabilityError("legacy agent has no document parser")
@@ -410,6 +424,9 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
         user_input: str,
         context: Mapping[str, Any],
     ) -> tuple[list[Mapping[str, Any]], str]:
+        from artpm_agent.runtime.counters import increment_counter
+
+        increment_counter("harness.legacy.adapter_parse_calls")
         method = getattr(self.target, "_parse_context_attachments", None)
         if not callable(method):
             raise RuntimeCapabilityError("legacy agent has no attachment parser")
@@ -471,6 +488,62 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
             )
         )
 
+    def stream_with_failover(
+        self,
+        prompt: str,
+        system_prompt: str,
+        history: Sequence[Mapping[str, Any]],
+        *,
+        image_paths: list[str],
+        cache_scope: str = "local:default",
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> Iterator[str]:
+        """Stream one already-routed model turn through the provider gateway.
+
+        This is deliberately lower-level than the legacy ``stream_chat``
+        facade. The Harness has already completed intent, skill, and approval
+        routing, so calling the facade here would classify or execute the same
+        request a second time.
+        """
+
+        gateway = getattr(self.target, "model_gateway", None)
+        method = getattr(gateway, "stream_with_failover", None)
+        if callable(method):
+            chunks = method(
+                prompt,
+                system_prompt,
+                list(history),
+                image_paths=image_paths,
+                task_type=None,
+                cache_scope=cache_scope,
+            )
+            for chunk in chunks:
+                if isinstance(chunk, str) and chunk:
+                    yield chunk
+            return
+
+        # Compatibility agents used by older UI/plugin hosts may expose only
+        # ``stream_chat``. The Harness still owns the turn and invokes this
+        # adapter once; the facade is never re-entered for intent, skills or
+        # approvals. Keep this branch observable while those hosts migrate.
+        legacy_stream = getattr(self.target, "stream_chat", None)
+        if not callable(legacy_stream):
+            raise RuntimeCapabilityError("legacy agent has no streaming model gateway")
+        from artpm_agent.runtime.counters import increment_counter
+
+        increment_counter("harness.legacy.adapter_stream_chat_calls")
+        stream_context = dict(context or {})
+        stream_context.setdefault("system_prompt", system_prompt)
+        stream_context.setdefault("conversation_history", list(history))
+        stream_context.setdefault("image_paths", list(image_paths))
+        try:
+            chunks = legacy_stream(prompt, context=stream_context)
+        except TypeError:
+            chunks = legacy_stream(prompt)
+        for chunk in chunks:
+            if isinstance(chunk, str) and chunk:
+                yield chunk
+
     def make_llm_callable(self) -> Any:
         client = getattr(self.target, "llm_client", None)
         if client is not None and callable(getattr(client, "chat", None)):
@@ -498,6 +571,9 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
         return None
 
     def chat(self, user_input: str, *, context: Optional[Mapping[str, Any]] = None) -> Any:
+        from artpm_agent.runtime.counters import increment_counter
+
+        increment_counter("harness.legacy.adapter_chat_calls")
         method = getattr(self.target, "chat", None)
         if not callable(method):
             raise RuntimeCapabilityError("legacy agent has no direct chat")
@@ -513,6 +589,165 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
                 raise error
 
 
+class LocalHarnessRuntime(LegacyAgentRuntimeAdapter):
+    """Canonical local host for the provider-neutral Harness.
+
+    ``LegacyAgentRuntimeAdapter`` remains the compatibility translation layer
+    for callers that only have an ``ArtPMAgent``.  Local application hosts,
+    however, need one stable object that can both expose that runtime contract
+    and invoke the canonical :func:`run_turn` boundary.  This class supplies
+    that small host boundary while retaining the legacy adapter as its parent,
+    so existing integrations that check for the adapter continue to work.
+
+    The agent is constructed only when the runtime itself is created.  Hosts
+    that already own an agent should pass it through ``agent=``; API, UI, and
+    CLI code can therefore share this class without importing private agent
+    methods or duplicating runtime translation logic.
+    """
+
+    def __init__(
+        self,
+        agent: Any = None,
+        *,
+        config: Any = None,
+        router: Any = None,
+        services: Any = None,
+        tenant_context: Any = None,
+    ) -> None:
+        if agent is None:
+            # Keep the import at construction time. Importing the Harness
+            # contract must remain safe for API workers and plugin hosts that
+            # inject a remote runtime or a test double.
+            from artpm_agent.agent import ArtPMAgent
+
+            agent = ArtPMAgent(config)
+        super().__init__(agent, router=router)
+        self.services = services
+        self.tenant_context = tenant_context
+
+    @property
+    def agent(self) -> Any:
+        """Return the compatibility facade owned by this local runtime."""
+
+        return self.target
+
+    def for_tenant(self, tenant_context: Any) -> "LocalHarnessRuntime":
+        """Return an isolated tenant-bound runtime view.
+
+        ``SkillRouter.for_tenant`` returns a request-scoped router without
+        mutating the process-wide router. Reusing that behavior here keeps the
+        canonical runtime safe for concurrent API requests and Streamlit
+        workspace switches.
+        """
+
+        binder = getattr(self._router, "for_tenant", None)
+        if not callable(binder):
+            # A runtime without a tenant-aware router can still carry the
+            # trusted scope for handlers and lifecycle records. Return a
+            # request view rather than mutating the shared host instance.
+            return LocalHarnessRuntime(
+                self.target,
+                router=self._router,
+                services=self.services,
+                tenant_context=tenant_context,
+            )
+        scoped_router = binder(tenant_context)
+        if scoped_router is None:
+            raise RuntimeCapabilityError("tenant-scoped router was not created")
+        return LocalHarnessRuntime(
+            self.target,
+            router=scoped_router,
+            services=self.services,
+            tenant_context=tenant_context,
+        )
+
+    def build_turn_context(
+        self,
+        user_input: str,
+        *,
+        turn_id: str,
+        conversation_id: str = "",
+        attachments: Optional[Sequence[Any]] = None,
+        agent_profile: Any = None,
+        knowledge_context: str = "",
+        conversation_history: Optional[Sequence[Mapping[str, Any]]] = None,
+        extra: Optional[Mapping[str, Any]] = None,
+        services: Any = None,
+        tenant_context: Any = None,
+    ) -> Any:
+        """Build a :class:`TurnContext` bound to this canonical runtime."""
+
+        from .turn_service import TurnContext
+
+        context_values = dict(extra or {})
+        bound_tenant = tenant_context if tenant_context is not None else self.tenant_context
+        if bound_tenant is not None:
+            context_values.setdefault("tenant_context", bound_tenant)
+        return TurnContext(
+            turn_id=str(turn_id),
+            conversation_id=str(conversation_id or ""),
+            user_input=str(user_input),
+            attachments=list(attachments or ()),
+            agent_profile=agent_profile,
+            knowledge_context=str(knowledge_context or ""),
+            conversation_history=[dict(item) for item in (conversation_history or ())],
+            runtime=self,
+            services=services if services is not None else self.services,
+            extra=context_values,
+        )
+
+    def run_turn(self, context: Any, **kwargs: Any) -> Any:
+        """Run a context (or prompt) through the canonical Harness boundary.
+
+        A prompt-only call is intentionally supported for CLI/plugin hosts;
+        request-aware API/UI callers should pass an explicit ``TurnContext``
+        so their trusted scope, history, attachments, and service bundle are
+        preserved.
+        """
+
+        from uuid import uuid4
+
+        from .turn_service import TurnContext
+
+        if isinstance(context, str):
+            context = self.build_turn_context(
+                context,
+                turn_id=f"turn-{uuid4().hex}",
+                conversation_id="",
+            )
+        if not isinstance(context, TurnContext):
+            raise TypeError("LocalHarnessRuntime.run_turn expects a TurnContext or prompt")
+        # The method is an explicit runtime boundary: callers cannot
+        # accidentally route a context through a second legacy adapter.
+        context.runtime = self
+        services = kwargs.get("services")
+        if services is None and context.services is None:
+            services = self.services
+            if services is not None:
+                kwargs["services"] = services
+        # Resolve the public Harness export at call time.  Besides keeping
+        # this host independent from the package facade during import, this
+        # preserves the long-standing runner injection seam used by plugin
+        # hosts and tests (``artpm_agent.harness.run_turn``).  In a normal
+        # process the export is the exact canonical ``turn_service.run_turn``
+        # implementation, so no second orchestration path is introduced.
+        try:
+            from artpm_agent import harness as harness_module
+
+            canonical_run_turn = getattr(harness_module, "run_turn")
+        except (ImportError, AttributeError):  # pragma: no cover - import fallback
+            from .turn_service import run_turn as canonical_run_turn
+
+        return canonical_run_turn(context, **kwargs)
+
+    def close(self) -> None:
+        """Close an owned agent when the host lifecycle ends."""
+
+        close = getattr(self.target, "close", None)
+        if callable(close):
+            close()
+
+
 def adapt_runtime(runtime: Optional[Any] = None, agent: Optional[Any] = None) -> Optional[HarnessRuntime]:
     """Resolve a public runtime, retaining ``agent=`` compatibility.
 
@@ -524,6 +759,12 @@ def adapt_runtime(runtime: Optional[Any] = None, agent: Optional[Any] = None) ->
         return cast(HarnessRuntime, runtime)
     if agent is None:
         return None
+    # ``BaseHarnessRuntime`` intentionally supplies conservative defaults and
+    # does not need to implement every optional streaming method.  Return it
+    # unchanged so a host-provided runtime is never wrapped as a legacy agent
+    # merely because the runtime-checkable Protocol is stricter.
+    if isinstance(agent, BaseHarnessRuntime):
+        return agent
     if isinstance(agent, HarnessRuntime):
         # Permit a gradual migration where callers still use the historical
         # ``agent=`` keyword but already provide a public runtime object.

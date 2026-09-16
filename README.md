@@ -372,6 +372,8 @@ python scripts/coverage_core.py
 - [`docs/operations/QUALITY_GATES.md`](docs/operations/QUALITY_GATES.md)：测试分层和质量命令。
 - [`docs/operations/DEPENDENCY_PROFILES.md`](docs/operations/DEPENDENCY_PROFILES.md)：本地、API、开发和生产依赖。
 - [`docs/architecture/CURRENT.md`](docs/architecture/CURRENT.md)：当前 Harness、工作区、检索和嵌入契约。
+- [`docs/architecture/P2_MODULE_BOUNDARIES.md`](docs/architecture/P2_MODULE_BOUNDARIES.md)：大模块拆分后的纯职责模块与兼容 facade 边界。
+- `LocalHarnessRuntime -> run_turn()`：API、Streamlit 和 CLI 的统一运行时主链；`/health` 返回进程级 `runtime_counters` 诊断快照。
 - [`docs/architecture/STORAGE_CONTRACT.md`](docs/architecture/STORAGE_CONTRACT.md)：业务库、会话库、知识库、向量和缓存边界。
 - [`docs/architecture/OPTIMIZATION_STRATEGY.md`](docs/architecture/OPTIMIZATION_STRATEGY.md)：大模块拆分、兼容层和风险治理策略。
 - [`docs/architecture/PROJECT_STRUCTURE.md`](docs/architecture/PROJECT_STRUCTURE.md)：仓库目录、入口和数据目录说明。
@@ -381,7 +383,7 @@ python scripts/coverage_core.py
 - [`docs/guides/USER_GUIDE.md`](docs/guides/USER_GUIDE.md)：用户使用教程。
 - [`docs/architecture/MULTI_TENANT_ARCHITECTURE.md`](docs/architecture/MULTI_TENANT_ARCHITECTURE.md)：多租户隔离设计。
 - [`docs/dev/PLUGIN_DEVELOPMENT_GUIDE.md`](docs/dev/PLUGIN_DEVELOPMENT_GUIDE.md)：插件开发。
-- [`docs/integrations/LOCAL_MCP_GUIDE.md`](docs/integrations/LOCAL_MCP_GUIDE.md)：本地 MCP 工具。
+- [`docs/integrations/MCP.md`](docs/integrations/MCP.md)：MCP 可选集成、统一客户端和安全边界。
 - [`docs/operations/PRODUCTION_MODERNIZATION.md`](docs/operations/PRODUCTION_MODERNIZATION.md)：生产现代化边界。
 - [`docs/operations/TROUBLESHOOTING.md`](docs/operations/TROUBLESHOOTING.md)：故障排查。
 

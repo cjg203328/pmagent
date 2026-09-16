@@ -69,7 +69,7 @@
 
 所有MCP Skills都是基于Claude Code提供的工具能力构建:
 - ✅ 文件读取 (Read)
-- ✅ 文件搜索 (Glob)  
+- ✅ 文件搜索 (Glob)
 - ✅ 内容搜索 (Grep)
 - ✅ 命令执行 (Bash)
 - ✅ 数据分析 (Pandas)
@@ -239,7 +239,7 @@ for skill in skills:
 
 ### Phase 2 (1-2周)
 - ResourceOptimizerSkill - 资源优化
-- RiskPredictorSkill - 风险预测  
+- RiskPredictorSkill - 风险预测
 - ReportGeneratorSkill - 报告生成
 
 ### Phase 3 (2-3周)

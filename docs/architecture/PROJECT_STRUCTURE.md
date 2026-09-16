@@ -60,7 +60,15 @@ artpm_agent/
 ├── views/                              # Streamlit 页面
 ├── ui_formatters.py                    # 无副作用的 UI 格式化纯函数
 ├── ui_helpers.py                       # UI 兼容门面和交互编排
-├── ui_style.py                         # UI 样式资源（待拆分）
+├── ui_style.py                         # UI 样式兼容出口（STYLE_CSS）
+├── ui/                                  # P2 UI 纯职责和样式边界
+│   ├── formatters.py                    # 无副作用格式化
+│   ├── knowledge.py                     # 知识意图/上下文投影
+│   ├── approvals.py                     # 审批 payload 摘要
+│   ├── rendering.py                     # 消息/资源投影
+│   ├── style_tokens.py                  # CSS token 懒加载边界
+│   ├── style_layout.py                  # CSS layout 兼容边界
+│   └── style_components.py              # CSS component 兼容边界
 ├── voice/                              # 可选 LiveKit worker
 ├── evolution/ / editing/               # 复盘、自进化和文档编辑能力
 ├── core/                               # MCP、Redis 和 Token 监控
@@ -85,7 +93,7 @@ docs/
 ├── integrations/                        # 外部服务和框架集成
 ├── operations/                          # 部署、API、质量和故障排查
 ├── dev/                                # 开发规范、审查和技术债
-├── mcp/                                # MCP 文档
+├── mcp/                                # MCP 历史文档，当前入口见 integrations/MCP.md
 └── archive/                            # 历史文档
 ```
 
@@ -103,11 +111,12 @@ docs/
 
 | 文件 | 行数 | 当前职责 | 下一步 |
 | --- | ---: | --- | --- |
-| `artpm_agent/ui_helpers.py` | 2394 | UI 状态、会话、审批和渲染兼容门面 | 迁移为 session、approvals、rendering 子模块 |
-| `artpm_agent/ui_style.py` | 2312 | 内联 CSS 字符串 | 按页面/组件拆为样式资源 |
-| `artpm_agent/memory/workspace_knowledge_store.py` | 3013 | schema、资源、规则、向量索引 | 提取 migration、resource、rule、vector 服务 |
+| `artpm_agent/ui_helpers.py` | 2394 | UI 状态、会话、审批和渲染兼容门面 | 继续迁移副作用到职责模块 |
+| `artpm_agent/ui_style.py` | 2312 | 内联 CSS 兼容出口 | 通过 `ui/style_*.py` 分阶段替换片段 |
+| `artpm_agent/ui/*.py` | P2 | UI 纯职责和 CSS 边界 | 新代码优先使用，旧入口保持兼容 |
+| `artpm_agent/memory/workspace_knowledge_store.py` | 3013 | 事务 facade；schema、资源、规则、向量实现 | 新代码优先使用 `memory/knowledge.py` 纯契约 |
 | `artpm_agent/retrieval/` | small | 检索计划、范围校验、引用 DTO | 扩展 sparse/dense/rerank 时保持 API 稳定 |
-| `artpm_agent/views/chat.py` | 1889 | 聊天页面生命周期和渲染 | 继续下沉状态与回合适配 |
+| `artpm_agent/views/chat.py` | 1889 | 聊天页面生命周期和渲染兼容 facade | 新状态/反馈/欢迎/回合投影使用 `views/chat_*.py` |
 | `artpm_agent/agent.py` | 74 | 兼容 facade 和依赖组装 | 保持轻量，不新增业务逻辑 |
 
 拆分采用兼容迁移策略：先提取无副作用模块并保留原导入路径，再按测试覆盖逐步迁移

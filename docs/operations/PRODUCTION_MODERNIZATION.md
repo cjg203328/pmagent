@@ -8,7 +8,8 @@ operation.
 - `artpm_agent.agent.ArtPMAgent` is a stable facade under 300 lines.
 - `ComponentFactory` constructs dependencies and returns an immutable
   `ComponentRegistry`.
-- `RequestOrchestrator` owns request behavior and compatibility methods.
+- `LocalHarnessRuntime` and the canonical `run_turn()` own request behavior;
+  `RequestOrchestrator` retains compatibility methods only.
 - Skills expose `execute_async()`; synchronous implementations are isolated
   with `asyncio.to_thread()`.
 

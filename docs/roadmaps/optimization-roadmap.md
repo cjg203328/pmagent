@@ -1,4 +1,9 @@
 # ArtPM Agent 优化路线图
+> Status: historical roadmap. This document is planning context only and is
+> not a current architecture, dependency, deployment, or configuration
+> contract. Use `docs/architecture/CURRENT.md` and `docs/INDEX.md` for the
+> current system.
+
 
 **基于深度分析报告的缺点改进方案**  
 **生成时间**: 2026-08-13  

@@ -8,8 +8,11 @@ Validated on 2026-09-12 from branch
 - Streamlit remains the primary local UI.
 - FastAPI is the authenticated REST gateway.
 - `ArtPMAgent` is a compatibility facade over `RequestOrchestrator`.
-- `HarnessRuntime` and `run_turn()` are the canonical request-processing
-  boundary for API and UI turn execution.
+- `LocalHarnessRuntime` owns request-scoped services and tenant binding;
+  `run_turn()` is the canonical request-processing boundary for API, UI and
+  CLI turn execution.
+- `HarnessRuntime` is the provider-neutral contract and
+  `LegacyAgentRuntimeAdapter` is compatibility-only.
 - SQLite and FAISS are the offline defaults. PostgreSQL, Qdrant, Redis,
   telemetry, and Sentry are deployment-selected integrations.
 

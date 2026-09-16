@@ -482,7 +482,10 @@ def test_fast_turn_skips_memory_and_skill_processing(monkeypatch) -> None:
     assert result.success is True
     assert result.response == "快速回答"
     assert result.handled_by == "fast_response"
-    assert result.metadata == {"turn_id": "fast-1", "turn_mode": "fast"}
+    assert result.metadata["turn_id"] == "fast-1"
+    assert result.metadata["turn_mode"] == "fast"
+    assert result.metadata["harness_contract_version"] == "1"
+    assert result.metadata["runtime_kind"] == "canonical"
     assert received == [context]
     assert memory.captures == []
 

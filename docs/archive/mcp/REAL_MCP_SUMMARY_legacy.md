@@ -152,15 +152,15 @@ from core.mcp_client_real import get_real_mcp_client
 
 async def my_skill():
     client = get_real_mcp_client()
-    
+
     # 读取文件
     result = await client.call_tool("filesystem", "read_file", {
         "path": "README.md"
     })
-    
+
     # 查询数据库
     result = await client.call_tool("sqlite", "list_tables", {})
-    
+
     await client.close()
 ```
 
@@ -228,5 +228,5 @@ cd ..
 
 ---
 
-生成时间: 2026-07-11  
+生成时间: 2026-07-11
 项目: ArtPM Agent - 本地MCP服务集成

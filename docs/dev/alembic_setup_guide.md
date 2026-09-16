@@ -7,7 +7,7 @@ pip install alembic
 
 ## 初始化
 ```bash
-cd artpm_agent
+# Run from the repository root
 alembic init migrations
 ```
 

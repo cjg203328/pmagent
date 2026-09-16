@@ -5,7 +5,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from hashlib import sha256
-import json
 from math import isfinite
 from pathlib import Path
 import sqlite3
@@ -18,6 +17,17 @@ from .vector_store import VectorStore
 from artpm_agent.tenancy import (
     TenantContextManager,
     WorkspaceAccessDenied,
+)
+from .knowledge import (
+    SCHEMA_VERSION as _SCHEMA_VERSION,
+    content_hash as _content_hash_contract,
+    deserialize_json as _decode_json_contract,
+    normalize_filter as _normalized_filter_contract,
+    normalize_searchable_text as _normalize_searchable_text_contract,
+    optional_text as _optional_text_contract,
+    required_text as _required_text_contract,
+    serialize_json as _json_contract,
+    validate_limit as _validate_limit_contract,
 )
 
 
@@ -38,7 +48,7 @@ class KnowledgeProposalConflictError(RuntimeError):
 class WorkspaceKnowledgeStore:
     """Store versioned knowledge without coupling ingestion to a parser or LLM."""
 
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = _SCHEMA_VERSION
     DEFAULT_TENANT_ID = "local"
     DEFAULT_WORKSPACE_ID = "local-default"
     MAX_SEARCHABLE_TEXT_CHARS = 2_000_000
@@ -689,9 +699,7 @@ class WorkspaceKnowledgeStore:
 
     @staticmethod
     def _required_text(value: Any, field: str) -> str:
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"{field} must be a non-empty string")
-        return value.strip()
+        return _required_text_contract(value, field)
 
     def _resolve_scope(
         self,
@@ -812,35 +820,15 @@ class WorkspaceKnowledgeStore:
 
     @staticmethod
     def _optional_text(value: Any, field: str) -> Optional[str]:
-        if value is None:
-            return None
-        if not isinstance(value, str):
-            raise ValueError(f"{field} must be a string or None")
-        normalized = value.strip()
-        return normalized or None
+        return _optional_text_contract(value, field)
 
     @staticmethod
     def _json(value: Any, field: str, *, mapping: bool = False) -> str:
-        if value is None:
-            value = {} if mapping else None
-        if mapping and not isinstance(value, Mapping):
-            raise ValueError(f"{field} must be a mapping")
-        try:
-            return json.dumps(
-                value,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        except (TypeError, ValueError) as error:
-            raise ValueError(f"{field} must be JSON serializable") from error
+        return _json_contract(value, field, mapping=mapping)
 
     @staticmethod
     def _decode_json(value: str, fallback: Any) -> Any:
-        try:
-            return json.loads(value)
-        except (TypeError, json.JSONDecodeError):
-            return fallback
+        return _decode_json_contract(value, fallback)
 
     @classmethod
     def _normalize_searchable_text(
@@ -848,21 +836,11 @@ class WorkspaceKnowledgeStore:
         searchable_text: Any,
         structured_data_json: str,
     ) -> str:
-        if searchable_text is None:
-            searchable_text = ""
-        if not isinstance(searchable_text, str):
-            raise ValueError("searchable_text must be a string")
-        normalized_text: str = searchable_text.strip()
-        if not normalized_text and structured_data_json != "null":
-            normalized_text = structured_data_json
-        if not normalized_text:
-            raise ValueError("searchable_text or structured_data is required")
-        if len(normalized_text) > cls.MAX_SEARCHABLE_TEXT_CHARS:
-            raise ValueError(
-                "searchable_text exceeds "
-                f"{cls.MAX_SEARCHABLE_TEXT_CHARS} characters"
-            )
-        return normalized_text
+        return _normalize_searchable_text_contract(
+            searchable_text,
+            structured_data_json,
+            max_chars=cls.MAX_SEARCHABLE_TEXT_CHARS,
+        )
 
     @staticmethod
     def _content_hash(
@@ -870,10 +848,7 @@ class WorkspaceKnowledgeStore:
         structured_data_json: str,
         mime_type: Optional[str],
     ) -> str:
-        payload = "\0".join(
-            [searchable_text, structured_data_json, mime_type or ""]
-        )
-        return sha256(payload.encode("utf-8")).hexdigest()
+        return _content_hash_contract(searchable_text, structured_data_json, mime_type)
 
     def ingest_resource(
         self,
@@ -3014,15 +2989,7 @@ class WorkspaceKnowledgeStore:
 
     @classmethod
     def _validate_limit(cls, value: int) -> int:
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or not 1 <= value <= cls.MAX_SEARCH_LIMIT
-        ):
-            raise ValueError(
-                f"limit must be between 1 and {cls.MAX_SEARCH_LIMIT}"
-            )
-        return value
+        return _validate_limit_contract(value, maximum=cls.MAX_SEARCH_LIMIT)
 
     @classmethod
     def _normalized_filter(
@@ -3030,11 +2997,7 @@ class WorkspaceKnowledgeStore:
         values: Optional[Iterable[str]],
         field: str,
     ) -> frozenset[str]:
-        if values is None:
-            return frozenset()
-        if isinstance(values, str):
-            values = [values]
-        return frozenset(cls._required_text(value, field) for value in values)
+        return _normalized_filter_contract(values, field)
 
     @staticmethod
     def _literal_score(query: str, haystack: str) -> float:

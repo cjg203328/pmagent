@@ -33,7 +33,7 @@
 
 ## 🧹  清理项
 
-- **隔离陈旧备份**：`artpm_agent/app.py.wip_bak`（3606 行旧单体版，已被模块化 `app.py` 取代）移出包目录至 `D:/桌面/xiangmu/pmagent/_legacy_backup/app.py.wip_bak`，避免被误导入/混淆。
+- **隔离陈旧备份**：历史版本曾包含 `artpm_agent/app.py.wip_bak`；该文件已从当前仓库移除，模块化 `artpm_agent/app.py` 是现行入口。
 
 ## ✅  验证为干净的项
 

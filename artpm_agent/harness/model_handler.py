@@ -139,6 +139,68 @@ def fallback_to_model(
                 )
 
                 chat_kwargs["cache_scope"] = response_cache_namespace(ctx.extra)
+
+            # A host may provide a renderer for incremental model deltas. The
+            # stream still enters through the canonical model handler and the
+            # provider gateway; it never calls the legacy ``stream_chat`` or
+            # ``chat`` facade a second time. The callback is intentionally an
+            # ephemeral turn extra and is never persisted in result metadata.
+            stream_callback = ctx.extra.get("response_stream_callback")
+            stream_method = getattr(runtime, "stream_with_failover", None)
+            if callable(stream_callback) and callable(stream_method):
+                streamed: list[str] = []
+                try:
+                    source = stream_method(
+                        model_prompt,
+                        system_prompt,
+                        history,
+                        context=ctx.extra,
+                        **chat_kwargs,
+                    )
+                    try:
+                        for chunk in source:
+                            if not isinstance(chunk, str) or not chunk:
+                                continue
+                            streamed.append(chunk)
+                            stream_callback(chunk)
+                    finally:
+                        close = getattr(source, "close", None)
+                        if callable(close):
+                            close()
+                    response_text = "".join(streamed)
+                    if not response_text.strip():
+                        raise RuntimeError("妯″瀷鏈嶅姟鏈繑鍥炴湁鏁堝洖绛?")
+                    return TurnResult(
+                        response=response_text,
+                        success=True,
+                        handled_by="model_chat",
+                        response_rendered=True,
+                        metadata={
+                            "turn_id": ctx.turn_id,
+                            "conversation_id": ctx.conversation_id,
+                            "model": getattr(runtime, "last_response_model", None),
+                            "fallback_from": getattr(
+                                runtime, "last_model_fallback_from", None
+                            ),
+                            "streamed": True,
+                        },
+                    )
+                except Exception as stream_error:
+                    # Once a provider has yielded text, retrying through the
+                    # non-streaming path would execute the model twice. Keep
+                    # the visible partial answer and surface a structured
+                    # failure instead.
+                    if streamed:
+                        logger.warning("Model stream ended after partial output")
+                        return TurnResult(
+                            response="".join(streamed),
+                            success=False,
+                            error=str(stream_error) or "model stream failed",
+                            handled_by="model_stream_error",
+                            response_rendered=True,
+                            metadata={"turn_id": ctx.turn_id, "streamed": True},
+                        )
+                    raise
             response_text = runtime.chat_with_failover(
                 model_prompt,
                 system_prompt,

@@ -2653,3 +2653,33 @@ STYLE_CSS = """
     }
 </style>
 """
+
+# P2 staged facade.  The full stylesheet stays a single value for the
+# Streamlit injection contract; these helpers expose the intended ownership
+# boundaries to new callers without changing rendered output.
+from artpm_agent.ui.style import (  # noqa: E402
+    build_style_css,
+    build_tokens_css,
+    style_components_css,
+    style_layout_css,
+    token_names,
+)
+
+# Named fragment exports make ownership visible to the next migration step.
+# They intentionally resolve to the same single stylesheet until individual
+# sections are physically moved, so the browser still receives one payload.
+STYLE_TOKENS = build_tokens_css()
+STYLE_LAYOUT = style_layout_css()
+STYLE_COMPONENTS = style_components_css()
+
+__all__ = [
+    "STYLE_CSS",
+    "STYLE_COMPONENTS",
+    "STYLE_LAYOUT",
+    "STYLE_TOKENS",
+    "build_style_css",
+    "build_tokens_css",
+    "style_components_css",
+    "style_layout_css",
+    "token_names",
+]

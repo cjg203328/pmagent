@@ -18,6 +18,12 @@ indexes must be rebuildable from the authority store. Cache deletion must not
 change correctness. New code must use `StorageRegistry` or an injected store
 instead of constructing paths independently in UI and API layers.
 
+Logical ownership is independent from physical files. A local deployment may
+place ConversationStore, SessionStore, WorkspaceKnowledgeStore and derived
+indexes below one data root, but each store still owns its schema, lifecycle,
+scope checks and migration history. Sharing a SQLite file is not permission to
+join tables or copy records across those boundaries.
+
 Duplicate knowledge facts in `KnowledgeBase`, `MemoryManager.documents` and
 `WorkspaceKnowledgeStore.knowledge_resources` are migration targets. New
 features must not add a fourth authority.

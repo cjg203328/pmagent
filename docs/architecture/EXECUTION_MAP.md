@@ -1,5 +1,21 @@
 # ArtPM Agent 执行映射
 
+Current runtime host contract (current):
+
+```text
+API / Streamlit / CLI
+        -> LocalHarnessRuntime (request scope + services)
+        -> TurnContext
+        -> run_turn() exactly once
+        -> TurnResult + lifecycle events
+```
+
+`runtime_counters` is a process-local diagnostic snapshot returned by the API
+health surface. It includes canonical/legacy turn counts and attachment parser
+attempt, reuse and failure counts. A parser snapshot is valid only for the
+current `TurnContext`; callers must not pre-seed empty `parsed_files` or
+`attachment_context` values to claim that parsing already happened.
+
 本文是当前代码的运行时地图。它解决两个问题：一次请求从哪里进入，以及每类状态应该由哪个模块负责。新功能先挂到这张地图，再决定是否需要新增文件。
 
 ## 1. 唯一主链

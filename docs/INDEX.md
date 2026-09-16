@@ -23,10 +23,10 @@ README 是入口文档；本页按读者角色和主题提供深入文档导航�
 | [`architecture/STORAGE_CONTRACT.md`](architecture/STORAGE_CONTRACT.md) | 数据库、会话、知识、向量和缓存边界 |
 | [`architecture/ARCHITECTURE.md`](architecture/ARCHITECTURE.md) | 系统总体架构和请求流程 |
 | [`architecture/EXECUTION_MAP.md`](architecture/EXECUTION_MAP.md) | 入口、上下文、记忆、工具和记录的唯一职责映射 |
-| [`architecture/ARCHITECTURE_DIAGRAM.md`](architecture/ARCHITECTURE_DIAGRAM.md) | 详细架构图谱 |
+| [`architecture/ARCHITECTURE_DIAGRAM.md`](architecture/ARCHITECTURE_DIAGRAM.md) | 当前主链简图（详细旧图已归档） |
 | [`operations/CURRENT_STATUS.md`](operations/CURRENT_STATUS.md) | 已验证边界和待完成外部验证 |
-| [`architecture/DSH_ALIGNMENT.md`](architecture/DSH_ALIGNMENT.md) | 运行时、插件和配置分层对齐说明 |
-| [`architecture/MEMORY_EVOLUTION_DESIGN.md`](architecture/MEMORY_EVOLUTION_DESIGN.md) | 记忆和自进化设计 |
+| [`architecture/DSH_ALIGNMENT.md`](architecture/DSH_ALIGNMENT.md) | 历史设计参考入口 |
+| [`architecture/MEMORY_EVOLUTION_DESIGN.md`](architecture/MEMORY_EVOLUTION_DESIGN.md) | 历史记忆设计参考入口 |
 | [`architecture/MULTI_TENANT_ARCHITECTURE.md`](architecture/MULTI_TENANT_ARCHITECTURE.md) | 多租户隔离设计 |
 | [`guides/MULTI_TENANT_USAGE_GUIDE.md`](guides/MULTI_TENANT_USAGE_GUIDE.md) | 多租户使用和接入说明 |
 | [`guides/WORKSPACE_RETRIEVAL_API.md`](guides/WORKSPACE_RETRIEVAL_API.md) | 工作区、检索、SSE 和嵌入接口 |
@@ -50,7 +50,7 @@ README 是入口文档；本页按读者角色和主题提供深入文档导航�
 | --- | --- |
 | [`guides/OFFLINE_FALLBACK.md`](guides/OFFLINE_FALLBACK.md) | 离线模式和回退策略 |
 | [`integrations/MINERU_INTEGRATION.md`](integrations/MINERU_INTEGRATION.md) | MinerU 文档解析集成 |
-| [`integrations/LOCAL_MCP_GUIDE.md`](integrations/LOCAL_MCP_GUIDE.md) | 本地 MCP 工具 |
+| [`integrations/MCP.md`](integrations/MCP.md) | MCP 可选集成和安全边界 |
 | [`integrations/LANGCHAIN_INTEGRATION.md`](integrations/LANGCHAIN_INTEGRATION.md) | LangChain 适配边界 |
 | [`integrations/LANGGRAPH_COORDINATION.md`](integrations/LANGGRAPH_COORDINATION.md) | LangGraph 协作流程 |
 | [`integrations/PLUGIN_SYSTEM.md`](integrations/PLUGIN_SYSTEM.md) | 插件系统概览 |
@@ -69,7 +69,7 @@ README 是入口文档；本页按读者角色和主题提供深入文档导航�
 | [`dev/type_safety_guide.md`](dev/type_safety_guide.md) | 类型安全指南 |
 | [`dev/CODE_REVIEW_REPORT.md`](dev/CODE_REVIEW_REPORT.md) | 代码审查基线 |
 | [`dev/CODE_REVIEW_FOLLOWUP.md`](dev/CODE_REVIEW_FOLLOWUP.md) | 代码审查跟进 |
-| [`dev/TECHNICAL_DEBT_TASKS.md`](dev/TECHNICAL_DEBT_TASKS.md) | 技术债务和工程任务 |
+| [`dev/TECHNICAL_DEBT_TASKS.md`](dev/TECHNICAL_DEBT_TASKS.md) | 历史技术债务清单入口 |
 
 ## 分析、报告与路线图
 
@@ -92,7 +92,7 @@ docs/
 ├── integrations/            # 外部服务和框架集成
 ├── operations/              # 部署、API、质量和故障排查
 ├── dev/                     # 开发规范、审查和技术债
-├── mcp/                     # MCP 专题文档
+├── mcp/                     # MCP 兼容入口（历史资料已归档）
 └── archive/                 # 历史文档，只读参考
 ```
 

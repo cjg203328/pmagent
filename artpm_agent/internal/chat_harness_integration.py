@@ -7,8 +7,18 @@ This wraps run_turn() with chat.py-specific context extraction and result handli
 from collections.abc import Callable
 import logging
 from typing import Any, Dict, List, Optional, Tuple
-from artpm_agent.harness import TurnContext, complete_turn_lifecycle, run_turn
-from artpm_agent.harness.runtime import LegacyAgentRuntimeAdapter
+from artpm_agent.harness import (
+    TurnContext,
+    complete_turn_lifecycle,
+    run_turn as _canonical_run_turn,
+)
+from artpm_agent.harness.runtime import LocalHarnessRuntime
+
+# Compatibility injection seam for older plugin hosts and tests.  Normal UI
+# requests leave this bound to the canonical Harness runner and therefore use
+# ``LocalHarnessRuntime.run_turn`` below; replacing this symbol deliberately
+# opts into a host-provided runner during migration.
+run_turn = _canonical_run_turn
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +256,15 @@ def execute_turn_with_harness(
         consolidation_scheduler=consolidation_scheduler,
         event_bus=event_bus,
     )
+    tenant_context = agent_context.get("tenant_context")
+    local_runtime = LocalHarnessRuntime(
+        agent,
+        services=turn_services,
+        tenant_context=tenant_context,
+    )
+    if tenant_context is not None:
+        local_runtime = local_runtime.for_tenant(tenant_context)
+
     turn_ctx = TurnContext(
         turn_id=turn_id,
         conversation_id=conversation_id or "",
@@ -254,8 +273,14 @@ def execute_turn_with_harness(
         agent_profile=agent_context.get("agent_profile"),
         knowledge_context=agent_context.get("knowledge_context", ""),
         conversation_history=agent_context.get("conversation_history", []),
-        agent=agent,
-        runtime=LegacyAgentRuntimeAdapter(agent),
+        # Keep the concrete facade outside TurnContext. The runtime is the
+        # canonical execution dependency; ``agent=`` remains only a legacy
+        # compatibility field for callers that have not migrated yet.
+        agent=None,
+        # UI requests use the same canonical local host as API and CLI. The
+        # legacy adapter remains the parent compatibility layer, so injected
+        # agents and existing downstream type checks continue to work.
+        runtime=local_runtime,
         services=turn_services,
         extra={
             # Pass through full context for compatibility
@@ -263,9 +288,9 @@ def execute_turn_with_harness(
             # Handler-specific keys
             "attachments": attachments,
             "file_paths": file_paths,
-            # These will be computed by handlers if needed
-            "parsed_files": [],
-            "attachment_context": "",
+            # Attachment parsing is owned by the Harness. Do not seed empty
+            # snapshot keys here: their presence means "already prepared" and
+            # would silently skip parsing real uploaded files.
         },
     )
 
@@ -284,21 +309,28 @@ def execute_turn_with_harness(
         if not auto_activate_memory:
             turn_ctx.extra["disable_memory_injection"] = True
 
-    # Execute unified turn
-    turn_result = run_turn(
-        turn_ctx,
-        services=turn_services,
-        profile_store=profile_store,
-        knowledge_store=knowledge_store,
-        artifact_coordinator=artifact_coordinator,
-        request_conversation_id=conversation_id,
-        knowledge_rule_extractor=knowledge_rule_extractor,
-        workflow_coordinator=workflow_coordinator,
-        workflow_formatter=workflow_formatter,
-        response_handler=response_handler,
-        feedback=user_feedback,
-        auto_reflect=auto_reflect,
-    )
+    # Execute the canonical local runtime.  Keep the module-level runner as a
+    # narrow compatibility override so legacy plugin/test adapters can still
+    # inject a host-specific implementation without becoming the production
+    # UI execution path.
+    runner_kwargs = {
+        "services": turn_services,
+        "profile_store": profile_store,
+        "knowledge_store": knowledge_store,
+        "artifact_coordinator": artifact_coordinator,
+        "request_conversation_id": conversation_id,
+        "knowledge_rule_extractor": knowledge_rule_extractor,
+        "workflow_coordinator": workflow_coordinator,
+        "workflow_formatter": workflow_formatter,
+        "response_handler": response_handler,
+        "feedback": user_feedback,
+        "auto_reflect": auto_reflect,
+    }
+    if run_turn is _canonical_run_turn:
+        turn_result = local_runtime.run_turn(turn_ctx, **runner_kwargs)
+    else:
+        compatibility_runner = run_turn
+        turn_result = compatibility_runner(turn_ctx, **runner_kwargs)
 
     # Normal runs finalize inside run_turn(). Keep this compatibility fallback
     # for hosts that replace the runner with a legacy test adapter.

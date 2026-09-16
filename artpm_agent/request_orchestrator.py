@@ -44,6 +44,7 @@ from artpm_agent.runtime import (
     build_capability_registry,
 )
 from artpm_agent.runtime.request_services import RequestServiceBundle
+from artpm_agent.runtime.counters import increment_counter
 from artpm_agent.routing.service import IntentDecision, IntentRouter
 from artpm_agent.routing.input_extractor import extract_skill_inputs
 from artpm_agent.providers import ModelGateway, StructuredProviderGateway
@@ -797,6 +798,7 @@ class RequestOrchestrator:
         context: Optional[Dict[str, Any]] = None,
     ) -> Iterator[AgentEvent]:
         """Yield a stable lifecycle protocol for UI and service adapters."""
+        increment_counter("harness.legacy.stream_events_calls")
         runtime_context = dict(context or {})
 
         def optional_identifier(key: str) -> Optional[str]:
@@ -859,6 +861,7 @@ class RequestOrchestrator:
         context: Optional[Dict[str, Any]] = None,
     ) -> Iterator[str]:
         """Compatibility adapter that exposes only assistant text deltas."""
+        increment_counter("harness.legacy.stream_chat_calls")
         events = self.stream_events(user_input, context=context)
         try:
             for event in events:
@@ -958,6 +961,7 @@ class RequestOrchestrator:
         Returns:
             Agent response text
         """
+        increment_counter("harness.legacy.chat_calls")
         self.last_response_model = None
         self.last_model_fallback_from = None
         context = context or {}

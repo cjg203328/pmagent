@@ -47,7 +47,7 @@ AI: 🔍 自动调用 file_search skill
 ```
 你: "分析一下这个项目能不能接: 报价30万,成本20万"
 AI: 🤖 自动调用 quote_calculator + project_evaluator
-    
+
     📊 综合分析:
     • 利润率: 18.5%
     • 可行性评分: 82/100
@@ -59,7 +59,7 @@ AI: 🤖 自动调用 quote_calculator + project_evaluator
 ```
 你: "分析一下最近的项目利润趋势"
 AI: 📈 自动调用 data_analyzer + trend_analyzer
-    
+
     趋势分析:
     • 平均利润率: 17.8%
     • 趋势: 稳定上升
@@ -104,20 +104,20 @@ class MyCustomSkill(BaseSkill):
     skill_name = "my_custom_skill"
     description = "我的自定义Skill"
     version = "1.0.0"
-    
+
     def __init__(self, context):
         super().__init__(context)
         self.mcp_client = get_enhanced_mcp_client()
-    
+
     async def execute(self, inputs):
         # 使用MCP工具
         result = await self.mcp_client.call_tool("read_file", {
             "file_path": inputs["file_path"]
         })
-        
+
         # 处理逻辑
         # ...
-        
+
         return {"success": True, "data": result}
 ```
 

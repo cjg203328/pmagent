@@ -47,6 +47,15 @@ def _attachment_context_for_artifact(ctx: "TurnContext") -> str:
     file_paths = ctx.extra.get("file_paths", [])
     if not file_paths or not _should_preparse_artifact_attachments(ctx.user_input):
         return str(ctx.extra.get("attachment_context") or "")
+    # ``run_turn`` owns one attachment snapshot for the entire turn. An empty
+    # snapshot is still authoritative (for example, a parser may have failed
+    # or found no extractable text), so do not invoke the parser a second time
+    # merely because the artifact handler has no evidence to render.
+    if getattr(ctx, "attachments_prepared", False):
+        from artpm_agent.runtime.counters import increment_counter
+
+        increment_counter("harness.attachments.parse_duplicate_attempts")
+        return str(ctx.extra.get("attachment_context") or "")
     # A preceding handler may already have normalized the same attachments.
     # Reusing that snapshot avoids a second MinerU/OCR invocation during one
     # turn and keeps artifact generation deterministic.

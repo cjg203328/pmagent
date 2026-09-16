@@ -15,6 +15,19 @@ engineering strategy; archived reports are not implementation contracts.
 must not receive new business logic. New clients should consume typed runtime
 events and `TurnResult` rather than calling `chat()` or `stream_chat()`.
 
+`LocalHarnessRuntime` is the canonical in-process host for those entrypoints.
+It owns the request-scoped router and service bundle, then delegates exactly
+once to `run_turn()`. `LegacyAgentRuntimeAdapter` remains a compatibility
+adapter for external callers and is observable as `runtime_kind=legacy_adapter`.
+Each result carries the additive `harness_contract_version` and `runtime_kind`
+metadata fields. Hosts must treat unknown metadata keys as forward-compatible.
+
+The process-local runtime counters are exposed by the health response under
+`runtime_counters`. They measure current-worker activity only; durable
+telemetry remains the source for historical analysis. Attachment parsing is
+owned by the Harness. A turn may reuse one parser snapshot, which is counted
+separately from a new parse attempt and a parser failure.
+
 ## Workspace
 
 `ConversationStore` owns workspace metadata and conversation foreign keys.
@@ -72,5 +85,5 @@ JavaScript.
 ## Source Of Truth
 
 This file, `EXECUTION_MAP.md`, `PROJECT_STRUCTURE.md` and
-`STORAGE_CONTRACT.md` define the current architecture. Documents under
+`STORAGE_CONTRACT.md` and `P2_MODULE_BOUNDARIES.md` define the current architecture. Documents under
 `docs/archive/` are historical references only and are not contracts.

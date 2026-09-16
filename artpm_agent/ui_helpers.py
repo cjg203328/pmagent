@@ -14,7 +14,6 @@ import json
 import os
 import time
 from pathlib import Path
-import re
 from uuid import uuid4
 import pandas as pd
 import streamlit as st
@@ -107,17 +106,11 @@ def format_cn_date(value, include_time=False):
     """以中文产品格式显示日期，避免将 ISO 时间暴露到界面。"""
     if not value:
         return "—"
-    if include_time:
-        return (
-            f"{value.year}年{value.month}月{value.day}日 "
-            f"{value.hour:02d}:{value.minute:02d}"
-        )
-    return f"{value.month}月{value.day}日"
+    return _ui_formatters.format_cn_date(value, include_time=include_time)
+
+
 def format_money(value, compact=False):
-    amount = float(value or 0)
-    if compact and abs(amount) >= 10000:
-        return f"¥{amount / 10000:,.1f}万"
-    return f"¥{amount:,.0f}"
+    return _ui_formatters.format_money(value, compact=compact)
 def render_page_header(section, title, meta=""):
     st.markdown(f'<div class="page-kicker">{section}</div>', unsafe_allow_html=True)
     st.title(title)
@@ -179,17 +172,13 @@ def render_project_table(projects, key):
     )
 def _conversation_title_from_prompt(prompt, max_length=28):
     """Create a compact local title without spending another model request."""
-    title = " ".join(str(prompt).split())
-    if len(title) <= max_length:
-        return title or getattr(ConversationStore, "DEFAULT_TITLE", "新对话")
-    return f"{title[:max_length].rstrip()}…"
+    title = _ui_rendering.conversation_title_from_prompt(prompt, max_length)
+    if title == "新对话":
+        return getattr(ConversationStore, "DEFAULT_TITLE", title)
+    return title
 def _message_for_ui(message):
     """Keep storage metadata nested while exposing legacy fields used by the UI."""
-    projected = dict(message)
-    metadata = projected.get("metadata") or {}
-    if metadata.get("retry_prompt"):
-        projected["retry_prompt"] = metadata["retry_prompt"]
-    return projected
+    return _ui_rendering.message_for_ui(message)
 # Shared UI state getters, constants, and availability flags now live in
 # artpm_agent.ui_state and are re-exported through the import above.
 def build_knowledge_context(prompt, *, max_chars=6000):
@@ -226,59 +215,20 @@ def build_knowledge_context(prompt, *, max_chars=6000):
         logger.exception("检索 Workspace 知识失败")
         return ""
 
-    lines = []
-    if rules:
-        lines.append("已采纳规则：")
-        lines.extend(f"- {rule['statement']}" for rule in rules)
-    if resources:
-        lines.append("相关资料：")
-        for resource in resources:
-            title = resource.get("title", "未命名资料")
-            version = resource.get("current_version") or resource.get("version")
-            excerpt = str(
-                resource.get("text") or resource.get("searchable_text") or ""
-            ).strip()
-            lines.append(f"- {title}（v{version}）：{excerpt}")
-    return "\n".join(lines)[:max_chars]
+    return _ui_knowledge.compose_knowledge_context(
+        rules,
+        resources,
+        max_chars=max_chars,
+    )
+
+
 def extract_knowledge_rule(prompt):
     """Return an explicit long-term rule request, never an inferred preference."""
-    text = " ".join(str(prompt or "").strip().split())
-    if not text or any(
-        phrase in text
-        for phrase in ("记住这份附件", "附件加入知识库", "附件加入资料库")
-    ):
-        return None
-    explicit = re.search(
-        r"^(?:请)?记住(?:这条)?(?:规则|偏好)?[：:，,\s]+(.{2,1000})$",
-        text,
-        re.IGNORECASE,
-    )
-    if explicit:
-        return explicit.group(1).strip()
-    add_rule = re.search(
-        r"^(?:把|将)(.{2,1000}?)(?:作为|设为)?(?:规则|偏好)?"
-        r"(?:加入|写入)(?:知识库|资料库)$",
-        text,
-        re.IGNORECASE,
-    )
-    if add_rule:
-        return add_rule.group(1).strip(" ，,：:")
-    if text.startswith(("以后", "今后")) and any(
-        marker in text
-        for marker in ("统一", "一律", "默认", "必须", "不要", "请", "按", "使用", "采用")
-    ):
-        return text
-    return None
+    return _ui_knowledge.extract_knowledge_rule(prompt)
+
+
 def is_knowledge_ingestion_request(prompt):
-    text = str(prompt or "").casefold()
-    return (
-        any(target in text for target in ("知识库", "资料库"))
-        and any(
-            action in text
-            for action in ("加入", "写入", "保存", "收录", "沉淀", "学习")
-        )
-        and any(subject in text for subject in ("附件", "文件", "这份", "这些"))
-    )
+    return _ui_knowledge.is_knowledge_ingestion_request(prompt)
 def build_knowledge_ingestion_resources(agent, attachments, file_paths, prompt):
     """Use the harness ingestion contract for every UI and agent path."""
     from artpm_agent.harness.knowledge_handler import (
@@ -843,9 +793,7 @@ def render_sidebar():
 
 def normalize_agent_response(response):
     """Return displayable assistant text or fail loudly instead of rendering blank."""
-    if not isinstance(response, str) or not response.strip():
-        raise ValueError("模型服务未返回有效回答")
-    return response.strip()
+    return _ui_formatters.normalize_agent_response(response)
 def stream_agent_response(agent, prompt, context):
     """Render incremental model output and return the complete persisted text."""
     stream_chat = getattr(agent, "stream_chat", None)
@@ -1417,55 +1365,15 @@ _PERMISSION_PARAM_LABELS = {
 
 def _permission_parameter_summary(payload_preview):
     """Build a bounded summary from the already-redacted public payload."""
-    if not isinstance(payload_preview, Mapping):
-        return "无附加参数"
-    values = payload_preview.get("inputs")
-    if not isinstance(values, Mapping):
-        values = payload_preview.get("arguments")
-    if not isinstance(values, Mapping):
-        return "无附加参数"
-
-    parts = []
-    for key, value in values.items():
-        if value is None or value == "" or value == [] or value == {}:
-            continue
-        label = _PERMISSION_PARAM_LABELS.get(str(key), str(key))
-        if isinstance(value, bool):
-            rendered = "是" if value else "否"
-        elif isinstance(value, (dict, list, tuple)):
-            rendered = json.dumps(
-                _thaw_permission_json(value),
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        else:
-            rendered = str(value)
-        rendered = rendered.replace("\n", " ").strip()
-        if len(rendered) > 56:
-            rendered = f"{rendered[:53]}..."
-        parts.append(f"{label}={rendered}")
-        if len(parts) >= 4:
-            break
-    return " · ".join(parts) if parts else "无附加参数"
+    return _ui_approvals.permission_parameter_summary(payload_preview)
 
 
 def _permission_impact(request, skill_name):
-    impact = _PERMISSION_IMPACT_LABELS.get(skill_name)
-    if impact:
-        return impact
-    if request.risk in {"critical", "untrusted"}:
-        return "可能访问外部系统或敏感资源"
-    if request.risk == "high":
-        return "可能产生外部影响或不可逆修改"
-    return "可能修改当前工作区中的数据"
+    return _ui_approvals.permission_impact(request, skill_name)
 
 
 def _thaw_permission_json(value):
-    if isinstance(value, Mapping):
-        return {str(key): _thaw_permission_json(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_thaw_permission_json(item) for item in value]
-    return value
+    return _ui_approvals.thaw_permission_json(value)
 
 
 def _permission_actor():
@@ -2526,3 +2434,10 @@ _current_model_id = _ui_formatters.current_model_id
 _response_model_id = _ui_formatters.response_model_id
 _fmt_size = _ui_formatters.format_size
 _artifact_subtitle = _ui_formatters.artifact_subtitle
+
+# P2 compatibility facade: pure responsibilities now have canonical modules
+# under ``artpm_agent.ui``.  The page keeps its historical names while the
+# delegated implementations move incrementally.
+from artpm_agent.ui import approvals as _ui_approvals  # noqa: E402
+from artpm_agent.ui import knowledge as _ui_knowledge  # noqa: E402
+from artpm_agent.ui import rendering as _ui_rendering  # noqa: E402

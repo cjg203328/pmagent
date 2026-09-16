@@ -28,6 +28,7 @@ from artpm_agent.memory.conversation_store import ConversationStore
 from artpm_agent.security.permission_store import PermissionStore
 from artpm_agent.workflows.engine import WorkflowEngine
 from artpm_agent.workflows.store import WorkflowStore
+from artpm_agent.runtime.counters import increment_counter, reset_counters
 
 
 def _headers(workspace: str = "local-default", *, actor: str = "alice", role: str = "user"):
@@ -236,6 +237,22 @@ def test_default_runtime_health_probes_database_and_required_schema(tmp_path):
         result["checks"][name]["status"] == "error"
         for name in ("conversation_store", "permission_store", "workflow_store")
     )
+
+
+def test_default_runtime_health_exposes_runtime_counters(tmp_path):
+    runtime = object.__new__(DefaultGatewayRuntime)
+    missing_path = tmp_path / "missing-counters.sqlite"
+    store = type("Store", (), {"db_path": str(missing_path)})()
+    runtime.conversations = store
+    runtime.permissions = store
+    runtime.workflows = store
+    reset_counters()
+    increment_counter("harness.turns.duplicate_replays")
+
+    result = runtime.health()
+
+    assert result["runtime_counters"]["harness.turns.duplicate_replays"] == 1
+    reset_counters()
 
 
 def test_store_health_probe_always_closes_sqlite_connection(tmp_path, monkeypatch):

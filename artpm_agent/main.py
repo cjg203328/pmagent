@@ -5,7 +5,7 @@ import sys
 from uuid import uuid4
 
 from artpm_agent.agent import ArtPMAgent
-from artpm_agent.harness import TurnContext, run_turn
+from artpm_agent.harness import LocalHarnessRuntime
 from artpm_agent.memory.conversation_store import ConversationStore
 from artpm_agent.memory.session_store import SessionStore
 from artpm_agent.utils.chat_intent import is_local_fast_intent
@@ -101,6 +101,7 @@ def main():
         print("[System] Initializing ArtPM Agent...")
         agent = ArtPMAgent()
         conversation_id, conversation_store, turn_services = _build_cli_services(agent)
+        runtime = LocalHarnessRuntime(agent, services=turn_services)
         print("[System] Agent ready!\n")
     except Exception as e:
         print(f"[Error] Failed to initialize agent: {e}")
@@ -143,20 +144,19 @@ def main():
             # Handle chat
             else:
                 print("\nAgent: ", end="", flush=True)
-                turn_context = TurnContext(
+                turn_context = runtime.build_turn_context(
+                    user_input,
                     turn_id=f"turn-{uuid4().hex}",
                     conversation_id=conversation_id,
-                    user_input=user_input,
                     conversation_history=history[-16:],
-                    agent=agent,
-                    services=turn_services,
                     extra={
                         "turn_mode": (
                             "fast" if is_local_fast_intent(user_input) else "standard"
                         ),
                     },
+                    services=turn_services,
                 )
-                result = run_turn(turn_context)
+                result = runtime.run_turn(turn_context)
                 print(result.response)
                 if not result.success:
                     print(
