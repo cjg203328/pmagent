@@ -100,7 +100,8 @@ class WorkspaceKnowledgeStore:
         self._vector_lock = _vector_sync_lock(self.vector_store_path)
         self.last_search_mode = "not-searched"
         self.sync_pending = bool(
-            self.vector_store is not None and self.vector_store.needs_rebuild
+            self._pending_index_count()
+            or (self.vector_store is not None and self.vector_store.needs_rebuild)
         )
 
     def _connect(self) -> sqlite3.Connection:
@@ -318,9 +319,74 @@ class WorkspaceKnowledgeStore:
                     (5, self._utc_now()),
                 )
 
+            if current_version < 6:
+                connection.executescript(
+                    """
+                    CREATE TABLE knowledge_index_outbox (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        tenant_id TEXT NOT NULL,
+                        workspace_id TEXT NOT NULL,
+                        resource_id TEXT,
+                        operation TEXT NOT NULL
+                            CHECK(operation IN ('upsert', 'delete', 'rebuild')),
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+
+                    CREATE INDEX idx_knowledge_index_outbox_pending
+                    ON knowledge_index_outbox(id, tenant_id, workspace_id);
+                    """
+                )
+                now = self._utc_now()
+                connection.execute(
+                    """
+                    INSERT INTO knowledge_index_outbox(
+                        tenant_id, workspace_id, resource_id, operation,
+                        created_at, updated_at
+                    )
+                    SELECT ?, ?, NULL, 'rebuild', ?, ?
+                    WHERE EXISTS (SELECT 1 FROM knowledge_resources)
+                    """,
+                    (self.DEFAULT_TENANT_ID, self.DEFAULT_WORKSPACE_ID, now, now),
+                )
+                connection.execute(
+                    "INSERT INTO knowledge_schema_migrations(version, applied_at) "
+                    "VALUES (?, ?)",
+                    (6, now),
+                )
+
     @staticmethod
     def _utc_now() -> str:
         return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+    def _enqueue_index_work(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        tenant_id: str,
+        workspace_id: str,
+        resource_id: Optional[str],
+        operation: str,
+    ) -> None:
+        now = self._utc_now()
+        connection.execute(
+            """
+            INSERT INTO knowledge_index_outbox(
+                tenant_id, workspace_id, resource_id, operation,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (tenant_id, workspace_id, resource_id, operation, now, now),
+        )
+
+    def _pending_index_count(self) -> int:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM knowledge_index_outbox"
+            ).fetchone()
+        return int(row["count"] if row is not None else 0)
 
     @staticmethod
     def _ensure_knowledge_consolidation_columns(
@@ -807,15 +873,17 @@ class WorkspaceKnowledgeStore:
                 claimed = claimed or cursor.rowcount > 0
             claimed = claimed or version_cursor.rowcount > 0
 
-        if claimed and self.vector_store is not None:
-            self.sync_pending = True
-            try:
-                self._sync_vector_index()
-            except Exception as error:
-                self.vector_store.needs_rebuild = True
-                self.vector_store.last_error = (
-                    f"knowledge vector sync pending: {error}"
+            if claimed:
+                self._enqueue_index_work(
+                    connection,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    resource_id=None,
+                    operation="rebuild",
                 )
+
+        if claimed:
+            self._project_index_best_effort()
         return claimed
 
     @staticmethod
@@ -914,11 +982,7 @@ class WorkspaceKnowledgeStore:
                 content_hash=content_hash,
                 now=self._utc_now(),
             )
-        self._sync_vector_index_best_effort(
-            resource_ids=(result["id"],),
-            tenant_id=tenant_id,
-            workspace_id=workspace_id,
-        )
+        self._project_index_best_effort()
         return result
 
     def _ingest_prepared_resource(
@@ -1072,6 +1136,13 @@ class WorkspaceKnowledgeStore:
 
         result = self._resource_record(resource_row, version_row)
         result["version_created"] = version_created
+        self._enqueue_index_work(
+            connection,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            resource_id=resource_id,
+            operation="upsert",
+        )
         return result
 
     def get_resource(
@@ -1207,13 +1278,17 @@ class WorkspaceKnowledgeStore:
                 "AND status != 'archived'",
                 parameters,
             )
+            if cursor.rowcount > 0:
+                self._enqueue_index_work(
+                    connection,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    resource_id=resource_id,
+                    operation="delete",
+                )
         archived = cursor.rowcount > 0
         if archived:
-            self._sync_vector_index_best_effort(
-                resource_ids=(resource_id,),
-                tenant_id=tenant_id,
-                workspace_id=workspace_id,
-            )
+            self._project_index_best_effort()
         return archived
 
     def propose_ingestion(
@@ -1569,11 +1644,7 @@ class WorkspaceKnowledgeStore:
 
         if conflict_reason is not None:
             raise KnowledgeProposalConflictError(conflict_reason)
-        self._sync_vector_index_best_effort(
-            resource_ids=(item["id"] for item in ingested),
-            tenant_id=tenant_id,
-            workspace_id=workspace_id,
-        )
+        self._project_index_best_effort()
         confirmed_result = self.get_ingestion_proposal(
             proposal_id, workspace_id=workspace_id, tenant_id=tenant_id
         )
@@ -2399,22 +2470,109 @@ class WorkspaceKnowledgeStore:
 
     def vector_status(self) -> dict[str, Any]:
         """Return a user-safe summary of the knowledge vector backend."""
+        pending = self._pending_index_count()
         if self.vector_store is None:
             return {
                 "available": False,
                 "count": 0,
                 "last_search_mode": self.last_search_mode,
-                "sync_pending": False,
+                "sync_pending": bool(pending),
+                "outbox_pending": pending,
                 "last_error": "vector search disabled",
             }
         status = self.vector_store.status()
         status["last_search_mode"] = self.last_search_mode
-        status["sync_pending"] = self.sync_pending
+        status["sync_pending"] = bool(self.sync_pending or pending)
+        status["outbox_pending"] = pending
         return status
+
+    def project_index_outbox(self, *, limit: int = 100) -> dict[str, Any]:
+        """Project committed outbox rows into the rebuildable vector index."""
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, tenant_id, workspace_id, resource_id, operation
+                FROM knowledge_index_outbox
+                ORDER BY id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        if not rows:
+            self.sync_pending = bool(
+                self.vector_store is not None and self.vector_store.needs_rebuild
+            )
+            return {"processed": 0, "pending": 0, "status": "idle"}
+
+        self.sync_pending = True
+        if self.vector_store is None or not self.vector_store.available:
+            return {
+                "processed": 0,
+                "pending": self._pending_index_count(),
+                "status": "unavailable",
+            }
+
+        row_ids = [int(row["id"]) for row in rows]
+        try:
+            if self.vector_store.needs_rebuild or any(
+                row["operation"] == "rebuild" for row in rows
+            ):
+                self._sync_vector_index(force=True)
+            else:
+                resource_ids = {
+                    str(row["resource_id"])
+                    for row in rows
+                    if row["resource_id"] is not None
+                }
+                self._sync_vector_resources(resource_ids)
+        except Exception as error:
+            placeholders = ", ".join("?" for _ in row_ids)
+            now = self._utc_now()
+            with self._connection(write=True) as connection:
+                connection.execute(
+                    f"""
+                    UPDATE knowledge_index_outbox
+                    SET attempts = attempts + 1, last_error = ?, updated_at = ?
+                    WHERE id IN ({placeholders})
+                    """,
+                    (str(error)[:1000], now, *row_ids),
+                )
+            self.vector_store.needs_rebuild = True
+            self.vector_store.last_error = f"knowledge vector sync pending: {error}"
+            return {
+                "processed": 0,
+                "pending": self._pending_index_count(),
+                "status": "error",
+                "error": str(error),
+            }
+
+        placeholders = ", ".join("?" for _ in row_ids)
+        with self._connection(write=True) as connection:
+            connection.execute(
+                f"DELETE FROM knowledge_index_outbox WHERE id IN ({placeholders})",
+                tuple(row_ids),
+            )
+        pending = self._pending_index_count()
+        self.sync_pending = bool(pending or self.vector_store.needs_rebuild)
+        return {
+            "processed": len(row_ids),
+            "pending": pending,
+            "status": "ok",
+        }
+
+    def _project_index_best_effort(self) -> None:
+        self.sync_pending = True
+        self.project_index_outbox()
 
     def sync_vector_index(self, *, force: bool = False) -> dict[str, Any]:
         """Synchronize the derived index from committed knowledge state."""
         self._sync_vector_index(force=force)
+        with self._connection(write=True) as connection:
+            connection.execute("DELETE FROM knowledge_index_outbox")
+        self.sync_pending = False
         return self.vector_status()
 
     def rebuild_vector_index(self) -> dict[str, Any]:
@@ -2801,7 +2959,10 @@ class WorkspaceKnowledgeStore:
         }
         vector_hits: list[dict[str, Any]] = []
         vector_available = bool(
-            self.vector_store is not None and self.vector_store.available
+            self.vector_store is not None
+            and self.vector_store.available
+            and not self.sync_pending
+            and self._pending_index_count() == 0
         )
         if vector_available and eligible_rows:
             try:

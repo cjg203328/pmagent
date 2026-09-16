@@ -26,6 +26,7 @@ from .artifact_handler import try_artifact_generation
 from .workflow_handler import try_workflow_routing
 from .skill_handler import try_skill_routing
 from .model_handler import fallback_to_model
+from .invocation_counts import increment_turn_invocation, turn_invocation_snapshot
 from .runtime import (
     HarnessRuntime,
     LegacyAgentRuntimeAdapter,
@@ -606,6 +607,7 @@ def run_turn(
             logger.warning("failed to finalize failed turn", exc_info=True)
 
     result.metadata.setdefault("turn_id", ctx.turn_id)
+    result.metadata.setdefault("invocation_counts", turn_invocation_snapshot(ctx))
     if ctx.intent_checked:
         result.metadata.setdefault("intent", ctx.intent)
         result.metadata.setdefault("intent_checked", True)
@@ -1051,6 +1053,7 @@ def _prepare_turn_attachments(ctx: TurnContext) -> None:
     extra["_attachments_prepared"] = True
     extra["file_paths"] = file_paths
     increment_counter("harness.attachments.parse_calls")
+    increment_turn_invocation(ctx, "parse")
     try:
         parsed_files, attachment_context = runtime.parse_attachments(
             ctx.user_input,

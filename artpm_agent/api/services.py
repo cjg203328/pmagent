@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import asyncio
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass, field
 from hmac import compare_digest
 import logging
@@ -20,10 +20,7 @@ import inspect
 import sqlite3
 from typing import Any
 
-from artpm_agent.memory.conversation_store import ConversationStore
-from artpm_agent.memory.session_store import SessionStore
-from artpm_agent.security.permission_store import PermissionRequest, PermissionStore
-from artpm_agent.workflows.store import WorkflowStore
+from artpm_agent.security.permission_store import PermissionRequest
 from artpm_agent.runtime.counters import counter_snapshot
 
 logger = logging.getLogger(__name__)
@@ -336,21 +333,24 @@ def _plain_json(value: Any, *, depth: int = 0) -> Any:
 class DefaultGatewayRuntime:
     """Lazy local adapter; cloud deployments should inject their own services."""
 
-    def __init__(self, db_path: str | Path | None = None) -> None:
-        if db_path is None:
-            try:
-                from artpm_agent.config import get_config
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        *,
+        runtime_factory: Any = None,
+    ) -> None:
+        from artpm_agent.runtime.factory import RuntimeFactory
+        from artpm_agent.runtime.storage_registry import StorageRegistry
 
-                db_path = get_config().get(
-                    "database.conversation_db_path", "./data/conversations.db"
-                )
-            except Exception:
-                db_path = "./data/conversations.db"
-        self.db_path = str(Path(db_path).expanduser())
-        self.conversations = ConversationStore(self.db_path)
-        self.session_store = SessionStore(self.conversations)
-        self.permissions = PermissionStore(self.db_path)
-        self.workflows = WorkflowStore(self.db_path)
+        self.runtime_factory = runtime_factory or RuntimeFactory(
+            storage=StorageRegistry(db_path=db_path)
+        )
+        storage = self.runtime_factory.storage
+        self.db_path = str(storage.db_path)
+        self.conversations = storage.conversation
+        self.session_store = storage.session
+        self.permissions = storage.permission
+        self.workflows = storage.workflow
         self.knowledge_store: Any = None
         self.episode_store: Any = None
         self.feedback_store: Any = None
@@ -362,13 +362,10 @@ class DefaultGatewayRuntime:
         self._agent: Any = None
         self._coordinator: Any = None
         self._engine: Any = None
-        # ArtPMAgent is not assumed to be thread-safe.  The adapter lock keeps
-        # a local deployment deterministic while cloud hosts can inject a pool.
-        import threading
-        from artpm_agent.runtime.event_bus import EventBus
-
-        self._lock = threading.RLock()
-        self.event_bus = EventBus()
+        # The factory owns one Agent and one workspace lock per tenant scope.
+        # Different workspaces can progress concurrently without sharing an
+        # unsafe mutable request context.
+        self.event_bus = self.runtime_factory.event_bus()
 
     def _ensure_knowledge_store(self) -> Any:
         """Build the workspace knowledge backend once for the local gateway."""
@@ -378,18 +375,7 @@ class DefaultGatewayRuntime:
         if self.knowledge_store is not None:
             return self.knowledge_store
         try:
-            from artpm_agent.config import get_config
-            from artpm_agent.memory import WorkspaceKnowledgeStore, create_embedding_provider
-
-            config = get_config()
-            vector_root = Path(
-                config.get("database.vector_db_path", str(Path(self.db_path).parent / "vector_store"))
-            )
-            self.knowledge_store = WorkspaceKnowledgeStore(
-                self.db_path,
-                vector_store_path=vector_root / "workspace_knowledge",
-                embedding_provider=create_embedding_provider(config.get("memory", {})),
-            )
+            self.knowledge_store = self.runtime_factory.storage.knowledge
         except Exception as error:  # noqa: BLE001 - knowledge is an optional enhancer
             logger.warning("workspace knowledge store unavailable: %s", error)
             self.knowledge_store = None
@@ -429,53 +415,39 @@ class DefaultGatewayRuntime:
         if getattr(self, "_learning_initialized", False):
             return
         self._learning_initialized = True
-        try:
-            from artpm_agent.harness.outcome_recorder import default_episode_db_path
-            from artpm_agent.memory.episode_store import EpisodeStore
+        factory = getattr(self, "runtime_factory", None)
+        if factory is not None:
+            for name, service in factory.learning_services().items():
+                setattr(self, name, service)
+            return
 
-            self.episode_store = EpisodeStore(default_episode_db_path())
-        except Exception as error:  # noqa: BLE001 - learning is optional
-            logger.warning("episode store unavailable: %s", error)
-        try:
-            from artpm_agent.memory.feedback_store import get_default_feedback_store
+        # Compatibility for injected adapters that predate RuntimeFactory and
+        # intentionally bypass ``__init__``. Production hosts always use the
+        # factory path above.
+        from artpm_agent.runtime.factory import RuntimeFactory
 
-            self.feedback_store = get_default_feedback_store()
-        except Exception as error:  # noqa: BLE001 - learning is optional
-            logger.warning("feedback store unavailable: %s", error)
-        try:
-            from artpm_agent.evolution.strategy_store import get_default_strategy_store
-
-            self.strategy_store = get_default_strategy_store()
-        except Exception as error:  # noqa: BLE001 - learning is optional
-            logger.warning("strategy store unavailable: %s", error)
-        try:
-            from artpm_agent.evolution.scheduler import get_default_scheduler
-
-            self.reflection_scheduler = get_default_scheduler()
-        except Exception as error:  # noqa: BLE001 - learning is optional
-            logger.warning("reflection scheduler unavailable: %s", error)
-        try:
-            from artpm_agent.evolution.meta_memory import get_default_meta_memory_store
-
-            self.meta_memory_store = get_default_meta_memory_store()
-        except Exception as error:  # noqa: BLE001 - learning is optional
-            logger.warning("meta-memory store unavailable: %s", error)
-        try:
-            from artpm_agent.memory.consolidation import ConsolidationScheduler
-
-            self.consolidation_scheduler = ConsolidationScheduler()
-        except Exception as error:  # noqa: BLE001 - learning is optional
-            logger.warning("consolidation scheduler unavailable: %s", error)
+        compatibility_factory = RuntimeFactory(agent_factory=self._ensure_agent)
+        for name, service in compatibility_factory.learning_services().items():
+            setattr(self, name, service)
+        if not hasattr(self, "event_bus"):
+            self.event_bus = compatibility_factory.event_bus()
 
     def _ensure_agent(self) -> Any:
-        with self._lock:
-            if self._agent is None:
-                from artpm_agent.agent import ArtPMAgent
+        factory = getattr(self, "runtime_factory", None)
+        if factory is not None:
+            self._agent = factory.agent()
+            return self._agent
+        if self._agent is None:
+            from artpm_agent.agent import ArtPMAgent
 
-                self._agent = ArtPMAgent()
+            self._agent = ArtPMAgent()
         return self._agent
 
     def _ensure_workflow_runtime(self, tenant_context: Any) -> tuple[Any, Any]:
+        factory = getattr(self, "runtime_factory", None)
+        if factory is not None:
+            coordinator = factory.workflow_coordinator(tenant_context)
+            return coordinator.engine, coordinator
         agent = self._ensure_agent()
         workspace_id = tenant_context.require_workspace()
         self.workflows.ensure_builtins(
@@ -515,95 +487,105 @@ class DefaultGatewayRuntime:
         return capability_allowlist_from_skill_metadata(agent.router.list_skills())
 
     def chat(self, command: ChatCommand) -> ChatOutcome:
-        with self._lock:
-            agent = self._ensure_agent()
-            self._ensure_learning_services()
-            from artpm_agent.harness import TurnContext
+        factory = getattr(self, "runtime_factory", None)
+        lock = (
+            factory.workspace_lock(
+                command.principal.tenant_id,
+                command.principal.workspace_id,
+            )
+            if factory is not None
+            else getattr(self, "_lock", nullcontext())
+        )
+        with lock:
+            return self._chat_scoped(command)
 
-            history = self.conversations.build_context(
-                command.conversation_id,
-                before_message_id=command.before_message_id,
-                workspace_id=command.principal.workspace_id,
-            )
-            tenant_context = command.tenant_context
-            if tenant_context is None:
-                raise GatewayServiceError("tenant context is required for chat")
-            _engine, coordinator = self._ensure_workflow_runtime(tenant_context)
-            knowledge_store = self._ensure_knowledge_store()
-            from artpm_agent.runtime.request_services import TurnServiceBundle
+    def _chat_scoped(self, command: ChatCommand) -> ChatOutcome:
+        agent = self._ensure_agent()
+        self._ensure_learning_services()
+        from artpm_agent.harness import TurnContext
 
-            turn_services = TurnServiceBundle(
-                knowledge_store=knowledge_store,
-                permission_store=self.permissions,
-                workflow_coordinator=coordinator,
-                session_store=getattr(self, "session_store", None),
-                memory_manager=getattr(agent, "memory", None),
-                tencentdb_memory=getattr(agent, "tencentdb_memory", None),
-                feedback_store=self.feedback_store,
-                strategy_store=self.strategy_store,
-                episode_store=self.episode_store,
-                reflection_scheduler=self.reflection_scheduler,
-                meta_memory_store=self.meta_memory_store,
-                consolidation_scheduler=self.consolidation_scheduler,
-                event_bus=getattr(self, "event_bus", None),
-            )
-            # API requests use the canonical local Harness host. It owns the
-            # legacy facade translation and binds a request-scoped router
-            # without mutating the process-wide agent.
-            from artpm_agent.harness.runtime import LocalHarnessRuntime
+        history = self.conversations.build_context(
+            command.conversation_id,
+            before_message_id=command.before_message_id,
+            workspace_id=command.principal.workspace_id,
+        )
+        tenant_context = command.tenant_context
+        if tenant_context is None:
+            raise GatewayServiceError("tenant context is required for chat")
+        _engine, coordinator = self._ensure_workflow_runtime(tenant_context)
+        knowledge_store = self._ensure_knowledge_store()
+        from artpm_agent.runtime.request_services import TurnServiceBundle
 
-            runtime = LocalHarnessRuntime(agent, services=turn_services).for_tenant(
-                tenant_context
-            )
-            agent_reference = None
-            context = {
-                "tenant_id": command.principal.tenant_id,
-                "workspace_id": command.principal.workspace_id,
-                "conversation_id": command.conversation_id,
-                "turn_id": command.turn_id,
-                "run_id": command.run_id or command.turn_id,
-                "actor_id": command.principal.actor_id,
-                "actor_role": command.principal.actor_role,
-                "agent_id": "artpm-agent",
-                "permission_store": self.permissions,
-                "attachments": list(command.attachments),
-                "file_paths": [
-                    str(item.get("file_path") or item.get("stored_path"))
-                    for item in command.attachments
-                    if isinstance(item, Mapping)
-                    and (item.get("file_path") or item.get("stored_path"))
-                ],
-                "tenant_context": command.tenant_context,
-            }
-            turn_context = TurnContext(
-                turn_id=command.turn_id,
-                conversation_id=command.conversation_id,
-                user_input=command.message,
-                attachments=list(command.attachments),
-                conversation_history=history,
-                agent=agent_reference,
-                runtime=runtime,
-                services=turn_services,
-                extra=context,
-            )
-            result = runtime.run_turn(
-                turn_context,
-                services=turn_services,
-                request_conversation_id=command.conversation_id,
-            )
-            # A canonical run_turn() owns the learning tail. Keep the adapter
-            # fallback for injected legacy runners used by downstream hosts.
-            if not result.metadata.get("lifecycle_managed"):
-                self._record_turn_learning(turn_context, result, turn_services)
-            return ChatOutcome(
-                response=result.response,
-                success=result.success,
-                awaiting_approval=result.awaiting_approval,
-                handled_by=result.handled_by,
-                metadata=result.metadata,
-                artifacts=tuple(result.artifacts),
-                error=result.error,
-            )
+        turn_services = TurnServiceBundle(
+            knowledge_store=knowledge_store,
+            permission_store=self.permissions,
+            workflow_coordinator=coordinator,
+            session_store=getattr(self, "session_store", None),
+            memory_manager=getattr(agent, "memory", None),
+            tencentdb_memory=getattr(agent, "tencentdb_memory", None),
+            feedback_store=self.feedback_store,
+            strategy_store=self.strategy_store,
+            episode_store=self.episode_store,
+            reflection_scheduler=self.reflection_scheduler,
+            meta_memory_store=self.meta_memory_store,
+            consolidation_scheduler=self.consolidation_scheduler,
+            event_bus=getattr(self, "event_bus", None),
+        )
+        # API requests use the canonical local Harness host. It owns the
+        # legacy facade translation and binds a request-scoped router
+        # without mutating the process-wide agent.
+        from artpm_agent.harness.runtime import LocalHarnessRuntime
+
+        runtime = LocalHarnessRuntime(agent, services=turn_services).for_tenant(
+            tenant_context
+        )
+        context = {
+            "tenant_id": command.principal.tenant_id,
+            "workspace_id": command.principal.workspace_id,
+            "conversation_id": command.conversation_id,
+            "turn_id": command.turn_id,
+            "run_id": command.run_id or command.turn_id,
+            "actor_id": command.principal.actor_id,
+            "actor_role": command.principal.actor_role,
+            "agent_id": "artpm-agent",
+            "permission_store": self.permissions,
+            "attachments": list(command.attachments),
+            "file_paths": [
+                str(item.get("file_path") or item.get("stored_path"))
+                for item in command.attachments
+                if isinstance(item, Mapping)
+                and (item.get("file_path") or item.get("stored_path"))
+            ],
+            "tenant_context": command.tenant_context,
+        }
+        turn_context = TurnContext(
+            turn_id=command.turn_id,
+            conversation_id=command.conversation_id,
+            user_input=command.message,
+            attachments=list(command.attachments),
+            conversation_history=history,
+            runtime=runtime,
+            services=turn_services,
+            extra=context,
+        )
+        result = runtime.run_turn(
+            turn_context,
+            services=turn_services,
+            request_conversation_id=command.conversation_id,
+        )
+        # A canonical run_turn() owns the learning tail. Keep the adapter
+        # fallback for injected legacy runners used by downstream hosts.
+        if not result.metadata.get("lifecycle_managed"):
+            self._record_turn_learning(turn_context, result, turn_services)
+        return ChatOutcome(
+            response=result.response,
+            success=result.success,
+            awaiting_approval=result.awaiting_approval,
+            handled_by=result.handled_by,
+            metadata=result.metadata,
+            artifacts=tuple(result.artifacts),
+            error=result.error,
+        )
 
     def _record_turn_learning(
         self,
@@ -807,13 +789,20 @@ class DefaultGatewayRuntime:
             if all(checks[name]["status"] == "ok" for name in _STORE_REQUIRED_TABLES)
             else "degraded"
         )
+        from artpm_agent.runtime.performance import performance_snapshot
+
         return {
             "status": status,
             "checks": checks,
             "runtime_counters": dict(counter_snapshot()),
+            "performance": performance_snapshot(),
         }
 
     def close(self) -> None:
+        factory = getattr(self, "runtime_factory", None)
+        if factory is not None:
+            factory.close()
+            return
         agent = self._agent
         close = getattr(agent, "close", None)
         if callable(close):

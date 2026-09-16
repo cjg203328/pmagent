@@ -360,7 +360,24 @@ def test_committed_knowledge_survives_vector_sync_failure(tmp_path):
     assert resource["id"] == "resource-a"
     assert store.get_resource("resource-a")["title"] == "Committed resource"
     assert store.vector_status()["needs_rebuild"] is True
+    assert store.vector_status()["outbox_pending"] == 1
     assert "sync pending" in store.vector_status()["last_error"]
+
+    reopened = WorkspaceKnowledgeStore(
+        tmp_path / "knowledge.db",
+        vector_store_path=tmp_path / "vectors",
+        embedding_provider=ConstantEmbedding(),
+    )
+    results = reopened.search("authoritative database content")
+    assert results[0]["id"] == "resource-a"
+    assert results[0]["retrieval_mode"] == "literal-fallback"
+
+    from artpm_agent.memory.knowledge_projector import KnowledgeVectorProjector
+
+    report = KnowledgeVectorProjector(reopened).run_until_idle()
+    assert report["processed"] == 1
+    assert report["pending"] == 0
+    assert reopened.vector_status()["outbox_pending"] == 0
 
 
 def test_vector_candidates_expand_until_distinct_resources_fill_limit(tmp_path):

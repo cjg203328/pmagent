@@ -16,17 +16,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from artpm_agent.ui_helpers import *  # noqa: F401,F403
-from artpm_agent.memory import SessionStore
-from artpm_agent.utils.mineru_adapter import MINERU_SUPPORTED_SUFFIXES
-from artpm_agent.editing import (
-    EditableDocument,
-    run_edit_instruction,
-    make_llm_callable,
-    EditFeedbackStore,
-    reflect,
-    RuleDistiller,
-    distill_from_correction,
-)
+from artpm_agent.utils.document_capabilities import MINERU_SUPPORTED_SUFFIXES
 
 # 通配导入会跳过下划线开头的名称，这里显式补齐被 chat_page 直接调用的内部辅助函数。
 from artpm_agent.ui_helpers import (
@@ -680,7 +670,9 @@ def chat_page():
                     if confirm_clear:
                         if store is not None and active_id:
                             store.clear_messages(active_id)
-                            SessionStore(store).clear_conversation_entries(active_id)
+                            session_store = get_session_store()
+                            if session_store is not None:
+                                session_store.clear_conversation_entries(active_id)
                         workflow_store = get_workflow_store()
                         if workflow_store is not None and active_id:
                             workflow_store.clear_conversation_runs(active_id)
@@ -1539,6 +1531,16 @@ def _render_turn_feedback(msg: dict, index: int, active_id) -> None:
 
 
 def _render_edit_mode():
+    from artpm_agent.editing import (
+        EditableDocument,
+        EditFeedbackStore,
+        RuleDistiller,
+        distill_from_correction,
+        make_llm_callable,
+        reflect,
+        run_edit_instruction,
+    )
+
     """智能编辑模式：上传表格/文档 -> 一句话指令修改 -> 预览 -> 生成新版本。"""
     import copy
     import tempfile

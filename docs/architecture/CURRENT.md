@@ -28,6 +28,13 @@ telemetry remains the source for historical analysis. Attachment parsing is
 owned by the Harness. A turn may reuse one parser snapshot, which is counted
 separately from a new parse attempt and a parser failure.
 
+`RuntimeFactory` owns one process Agent and one `StorageRegistry`. API, UI and
+CLI obtain stores, learning services and workspace coordinators from this
+factory. Coordinator cache keys include tenant, workspace and profile. API
+chat locking is workspace-scoped, so unrelated workspaces are not serialized.
+Health diagnostics expose RSS, uptime, timed imports and first model-call
+latency; each turn reports intent/parse/retrieval invocation counts.
+
 ## Workspace
 
 `ConversationStore` owns workspace metadata and conversation foreign keys.
@@ -45,6 +52,10 @@ The first workspace API contracts are:
 The API returns only workspaces visible to the authenticated tenant. Search
 results are normalized to `RetrievalHit` and include citation metadata. A
 vector index is a derived accelerator and never a source of truth.
+Knowledge writes enqueue `knowledge_index_outbox` in the same SQLite
+transaction. `KnowledgeVectorProjector` consumes that durable work after
+commit. While work is pending or failed, retrieval uses the authoritative
+literal path; a full index can always be rebuilt from current resource rows.
 
 ## Retrieval
 

@@ -62,21 +62,23 @@ pmagent/
 ```
 
 数据边界保持明确：`ConversationStore` 只负责用户可见会话消息和工作区元数据；
-`SessionStore/EventBus` 负责回合及工具事件；`MemoryManager` 负责长期记忆；
-`WorkspaceKnowledgeStore` 负责工作区资源、版本和已接受规则；FAISS/Qdrant 只是派生索引；
+`SessionStore/EventBus` 负责回合及工具事件；`MemoryManager` 只保留兼容记忆入口；
+`WorkspaceKnowledgeStore` 负责工作区资源、版本和已接受规则。写入会在同一事务登记
+`knowledge_index_outbox`，FAISS/Qdrant projector 只维护可重建的派生索引；
 Redis 只是缓存加速层。所有 API、缓存和向量查询都必须带可信 `tenant_id/workspace_id`。
 
 ## 运行方式
 
 | 场景 | 安装方式 | 入口 | 默认依赖 |
 | --- | --- | --- | --- |
-| 离线 UI / CLI | `python -m pip install -e .` | Streamlit 或 CLI | SQLite、FAISS |
-| 本地 UI + API | `python -m pip install -e ".[api]"` | `python start_with_checks.py` | 上述依赖 + FastAPI、Uvicorn |
-| 开发与测试 | `python -m pip install -e ".[dev]"` | `scripts/` 下的质量门禁 | 本地依赖 + 测试和质量工具 |
+| 核心 CLI | `python -m pip install -e .` | `artpm-agent` | SQLite、确定性检索、Harness Runtime |
+| 离线 UI | `python -m pip install -e ".[ui,documents,vector-local]"` | Streamlit | UI + 按需文档与本地向量能力 |
+| 本地 UI + API | `python -m pip install -e ".[ui,api,documents,vector-local,llm-openai]"` | `python start_with_checks.py` | 显式组合所需能力 |
+| 开发与测试 | `python -m pip install -e ".[production,dev]"` | `scripts/` 下的质量门禁 | 运行 profiles + 质量工具 |
 | 生产 Compose | `python -m pip install -e ".[production]"` | `docker compose up -d --build` | PostgreSQL/RLS、Qdrant、Redis、可观测组件 |
 
-基础安装不包含 FastAPI。需要启动完整本地栈时，请安装 `.[api]` 或 `.[dev]`；只运行离线
-UI 时直接使用基础安装即可。
+基础安装不包含 UI、文档解析、FAISS、模型 SDK 或 MCP。按场景组合 extras；`dev` 只包含
+测试、lint、类型与安全工具，不再复制生产依赖。
 
 ## 核心能力
 
@@ -109,8 +111,8 @@ UI 时直接使用基础安装即可。
 py -3.10 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-# 本地完整栈需要 [api]；只使用离线 UI 时改为 python -m pip install -e .
-python -m pip install -e ".[api]"
+# 本地 UI + API；模型、MCP、OCR 等能力继续按需追加 profile
+python -m pip install -e ".[ui,api,documents,vector-local,llm-openai]"
 Copy-Item .env.example .env
 
 # 检查配置。无 LLM Key 也可以通过离线检查
@@ -295,7 +297,7 @@ MinerU 是增强后端；未部署、转换失败或超时都会回退到内置�
 | --- | --- | --- |
 | OCR | `python -m pip install -e ".[ocr]"` | 适用于报价单和扫描件，重依赖，按需安装 |
 | 实时语音 | `python -m pip install -e ".[voice]"` | 配置 LiveKit 与 STT/TTS 后运行 `artpm-voice-worker start`，文本通道不依赖它 |
-| Skills Forge MCP | `MCP_ENABLED=true` + 有效 `SKILLS_FORGE_KEY` | 默认只读发现工具，命令执行仍需显式 `MCP_ALLOW_COMMANDS=true` |
+| Skills Forge MCP | 安装 `.[mcp]`，设置 `MCP_ENABLED=true` + 有效 Key | 默认只读发现工具，命令执行仍需显式 `MCP_ALLOW_COMMANDS=true` |
 | Redis | 设置 `REDIS_URL` | 可选缓存加速层，不是 SQLite 权威源的替代品 |
 
 MCP 默认关闭。普通业务和本地文件工具不依赖远程 MCP；真实 MCP 验证必须显式设置集成开关。
@@ -320,6 +322,8 @@ artpm_agent/
 当前请求边界：
 
 - `HarnessRuntime` 与 `run_turn()` 是 API/UI 请求处理的规范入口。
+- `RuntimeFactory` 与 `StorageRegistry` 是 API/UI/CLI 的进程级服务构造入口；Store、Agent、
+  WorkflowCoordinator 和学习服务不得在每回合重新构造。
 - `ArtPMAgent` 是兼容 facade，新功能不应继续扩大对旧 facade 私有实现的依赖。
 - API chat 优先使用 async handler；同步旧 Agent 在迁移完成前通过线程隔离。
 - 业务库和记忆库分离，workspace/tenant 隔离必须贯穿查询、写入、缓存和向量检索。
@@ -330,7 +334,7 @@ artpm_agent/
 安装开发依赖：
 
 ```bash
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[production,dev]"
 ```
 
 按变更范围执行门禁：

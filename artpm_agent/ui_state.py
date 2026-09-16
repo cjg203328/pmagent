@@ -9,6 +9,7 @@ UI 共享状态层 — 导入、常量、lazy getter、可用性标志。
 对应符号降级为 None 并留下日志，UI 侧据此进入离线降级路径。
 """
 import sys
+from importlib.util import find_spec
 from pathlib import Path
 
 # 确保项目根目录在 Python 路径中
@@ -16,14 +17,10 @@ _project_root = Path(__file__).parent.parent.resolve()
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+from artpm_agent.runtime.factory import get_runtime_factory as _get_runtime_factory
 from artpm_agent.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-try:
-    from artpm_agent.runtime.event_bus import EventBus
-except Exception:  # pragma: no cover - optional UI bootstrap fallback
-    EventBus = None
 
 # ── 导航常量 ──
 _NAV_OPTIONS = ("对话", "设置", "可观测")
@@ -34,27 +31,23 @@ _NAV_EVENT_KEY = "_sidebar_nav_event"
 # 每个可选运行时单独 try/except：任一子系统缺失只降级它自己，其余功能照常。
 AVAILABLE = False
 try:
-    from artpm_agent.agent import ArtPMAgent
     from artpm_agent.config import Config
     from artpm_agent.database.models import DatabaseManager
 
     AVAILABLE = True
     logger.info("核心模块导入成功")
 except Exception as error:
-    ArtPMAgent = None
     Config = None
     DatabaseManager = None
     logger.error("核心模块导入失败: %s", error)
 
 CONVERSATION_STORE_AVAILABLE = False
 try:
-    from artpm_agent.memory import (
-        SessionStore,
-        WorkspaceKnowledgeStore,
-        WorkspaceWikiStore,
-        create_embedding_provider,
-    )
     from artpm_agent.memory.conversation_store import ConversationStore
+    from artpm_agent.memory.embeddings import create_embedding_provider
+    from artpm_agent.memory.session_store import SessionStore
+    from artpm_agent.memory.wiki_store import WorkspaceWikiStore
+    from artpm_agent.memory.workspace_knowledge_store import WorkspaceKnowledgeStore
 
     CONVERSATION_STORE_AVAILABLE = True
 except Exception as error:
@@ -110,14 +103,9 @@ except Exception as error:
     logger.error("Agent Profile 模块导入失败: %s", error)
 
 ARTIFACT_RUNTIME_AVAILABLE = False
-try:
-    from artpm_agent.artifacts import ArtifactCoordinator, WorkspaceArtifactGenerator
-
-    ARTIFACT_RUNTIME_AVAILABLE = True
-except Exception as error:
-    ArtifactCoordinator = None
-    WorkspaceArtifactGenerator = None
-    logger.error("文件生成模块导入失败: %s", error)
+ArtifactCoordinator = None
+WorkspaceArtifactGenerator = None
+ARTIFACT_RUNTIME_AVAILABLE = find_spec("artpm_agent.artifacts") is not None
 
 PERMISSION_RUNTIME_AVAILABLE = False
 try:
@@ -177,17 +165,29 @@ def get_conversation_store():
     return st.session_state.get("conversation_store")
 
 
+def get_ui_runtime_factory():
+    """Return the process runtime while keeping a Streamlit compatibility alias."""
+
+    import streamlit as st
+
+    factory = _get_runtime_factory()
+    if st.session_state.get("runtime_factory") is not factory:
+        st.session_state.runtime_factory = factory
+    return factory
+
+
 def get_session_store():
     """Return the append-only runtime log bound to the active conversation DB."""
 
     import streamlit as st
 
-    conversation_store = get_conversation_store()
-    if conversation_store is None or SessionStore is None:
-        return None
     cached = st.session_state.get("session_store")
-    if cached is None or getattr(cached, "conversations", None) is not conversation_store:
-        cached = SessionStore(conversation_store)
+    if cached is None:
+        try:
+            cached = get_ui_runtime_factory().storage.session
+        except Exception as error:  # pragma: no cover - optional UI degradation
+            logger.warning("Session store unavailable: %s", error)
+            return None
         st.session_state.session_store = cached
     return cached
 
@@ -197,11 +197,13 @@ def get_event_bus():
 
     import streamlit as st
 
-    if EventBus is None:
-        return None
     cached = st.session_state.get("event_bus")
     if cached is None:
-        cached = EventBus()
+        try:
+            cached = get_ui_runtime_factory().event_bus()
+        except Exception as error:  # pragma: no cover - optional UI degradation
+            logger.warning("Event bus unavailable: %s", error)
+            return None
         st.session_state.event_bus = cached
     return cached
 
@@ -214,10 +216,7 @@ def get_episode_store():
     cached = st.session_state.get("episode_store")
     if cached is None:
         try:
-            from artpm_agent.harness.outcome_recorder import default_episode_db_path
-            from artpm_agent.memory.episode_store import EpisodeStore
-
-            cached = EpisodeStore(default_episode_db_path())
+            cached = get_ui_runtime_factory().learning_service("episode_store")
             st.session_state.episode_store = cached
         except Exception as error:  # pragma: no cover - optional UI degradation
             logger.warning("Episode store unavailable: %s", error)
@@ -232,9 +231,9 @@ def get_consolidation_scheduler():
     cached = st.session_state.get("consolidation_scheduler")
     if cached is None:
         try:
-            from artpm_agent.memory.consolidation import ConsolidationScheduler
-
-            cached = ConsolidationScheduler()
+            cached = get_ui_runtime_factory().learning_service(
+                "consolidation_scheduler"
+            )
             st.session_state.consolidation_scheduler = cached
         except Exception as error:  # pragma: no cover - optional UI degradation
             logger.warning("Consolidation scheduler unavailable: %s", error)
@@ -248,7 +247,14 @@ def get_chat_attachment_store():
 
 def get_artifact_generator():
     import streamlit as st
-    return st.session_state.get("artifact_generator")
+    cached = st.session_state.get("artifact_generator")
+    if cached is None and ARTIFACT_RUNTIME_AVAILABLE:
+        try:
+            cached = get_ui_runtime_factory().storage.artifact_generator
+            st.session_state.artifact_generator = cached
+        except Exception as error:  # pragma: no cover - optional UI degradation
+            logger.warning("Artifact generator unavailable: %s", error)
+    return cached
 
 
 def get_artifact_coordinator():
@@ -256,8 +262,9 @@ def get_artifact_coordinator():
     generator = get_artifact_generator()
     agent = st.session_state.get("agent")
     llm_client = getattr(agent, "llm_client", None)
-    if generator is None or ArtifactCoordinator is None:
+    if generator is None:
         return None
+    from artpm_agent.artifacts.coordinator import ArtifactCoordinator
     if not callable(getattr(llm_client, "chat", None)):
         llm_client = st.session_state.setdefault(
             "artifact_local_planner",

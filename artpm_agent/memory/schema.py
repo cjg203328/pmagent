@@ -7,7 +7,7 @@ that other layers may use without importing SQLite row internals.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 MIGRATION_TABLE = "knowledge_schema_migrations"
 
 RESOURCE_TABLE = "knowledge_resources"
@@ -15,6 +15,7 @@ VERSION_TABLE = "knowledge_versions"
 RULE_TABLE = "knowledge_rules"
 INGESTION_PROPOSAL_TABLE = "knowledge_ingestion_proposals"
 INGESTION_EVENT_TABLE = "knowledge_ingestion_events"
+INDEX_OUTBOX_TABLE = "knowledge_index_outbox"
 
 KNOWLEDGE_TABLES = (
     RESOURCE_TABLE,
@@ -22,6 +23,7 @@ KNOWLEDGE_TABLES = (
     RULE_TABLE,
     INGESTION_PROPOSAL_TABLE,
     INGESTION_EVENT_TABLE,
+    INDEX_OUTBOX_TABLE,
 )
 
 
@@ -39,6 +41,7 @@ def schema_contract() -> dict[str, object]:
 __all__ = [
     "INGESTION_EVENT_TABLE",
     "INGESTION_PROPOSAL_TABLE",
+    "INDEX_OUTBOX_TABLE",
     "KNOWLEDGE_TABLES",
     "MIGRATION_TABLE",
     "RESOURCE_TABLE",

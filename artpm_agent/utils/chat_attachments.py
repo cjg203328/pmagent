@@ -11,7 +11,7 @@ import shutil
 from typing import Any
 from uuid import uuid4
 
-from .mineru_adapter import MINERU_SUPPORTED_SUFFIXES
+from .document_capabilities import MINERU_SUPPORTED_SUFFIXES
 
 
 DEFAULT_ALLOWED_EXTENSIONS = frozenset(

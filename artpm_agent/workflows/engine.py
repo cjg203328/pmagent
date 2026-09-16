@@ -29,6 +29,7 @@ from .risk_policy import (
 from .selector import CapabilityAllowlist, definition_is_allowed
 from .store import WorkflowConflictError, WorkflowStore
 from artpm_agent.tenancy.scope import Scope
+from artpm_agent.runtime.counters import increment_counter
 
 
 DEFAULT_CAPABILITY_ALLOWLIST = DEFAULT_SKILL_CAPABILITIES
@@ -118,6 +119,7 @@ class WorkflowEngine:
     ) -> None:
         if not callable(execute_skill):
             raise TypeError("execute_skill must be callable")
+        increment_counter("runtime.workflow_engine.constructed")
         if approval_floor not in {"none", "user", "admin"}:
             raise ValueError("unsupported approval floor")
         if (

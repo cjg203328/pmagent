@@ -32,6 +32,7 @@ from artpm_agent.evolution.strategy_store import (
     Strategy,
     get_default_strategy_store,
 )
+from .invocation_counts import increment_turn_invocation
 
 
 @dataclass(frozen=True)
@@ -858,6 +859,8 @@ def inject_memory_context(
     # namespace callers and older hosts.
     if getattr(ctx, "memory_injected", False) or ctx.extra.get("memory_injected"):
         return
+
+    increment_turn_invocation(ctx, "retrieval")
 
     budget = MemoryContextBudget()
 

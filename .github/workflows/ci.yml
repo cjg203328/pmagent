@@ -25,7 +25,7 @@ jobs:
         cache: 'pip'
 
     - name: Install dependencies
-      run: pip install -e ".[dev]"
+      run: pip install -e ".[production,dev]"
 
     - name: Lint with Ruff
       run: ruff check artpm_agent tests --output-format=github
@@ -84,7 +84,7 @@ jobs:
         python-version: '3.11'
         cache: 'pip'
     - name: Install dependencies
-      run: pip install -e ".[dev]"
+      run: pip install -e ".[production,dev]"
     - name: Run tests with baseline coverage gate
       run: >-
         pytest -q --cov=artpm_agent --cov-report=term-missing
@@ -173,7 +173,7 @@ jobs:
           python-version: '3.11'
           cache: pip
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[postgres,dev]"
       - name: Create RLS application role
         env:
           PGPASSWORD: admin-test-password
@@ -316,7 +316,7 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[production,dev]"
       - run: pytest -q -m slow --timeout=180
 
   build:

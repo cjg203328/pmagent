@@ -120,6 +120,44 @@ def test_intent_detection_is_cached_for_one_turn() -> None:
     assert detections == 1
     assert context.intent_checked is True
     assert context.intent == "external_lookup"
+    assert result.metadata["invocation_counts"] == {
+        "intent": 1,
+        "parse": 0,
+        "retrieval": 1,
+    }
+
+
+def test_attachment_parse_and_retrieval_are_bounded_per_turn(tmp_path) -> None:
+    class AttachmentRuntime(ExternalSkillRuntime):
+        capabilities = RuntimeCapabilities(
+            turn_processing=True,
+            skill_routing=True,
+            model_chat=True,
+            attachment_parsing=True,
+        )
+
+        def parse_attachments(self, _user_input, context):
+            return ([{"file_path": context["file_paths"][0], "success": True}], "file")
+
+    runtime = AttachmentRuntime(intent=None)
+    attachment = tmp_path / "brief.txt"
+    attachment.write_text("brief", encoding="utf-8")
+    context = TurnContext(
+        turn_id="bounded-calls",
+        conversation_id="conversation-1",
+        user_input="summarize this file",
+        runtime=runtime,
+        attachments=[{"file_path": str(attachment)}],
+        extra={"file_paths": [str(attachment)]},
+    )
+
+    result = run_turn(context)
+
+    assert result.metadata["invocation_counts"] == {
+        "intent": 0,
+        "parse": 1,
+        "retrieval": 1,
+    }
 
 
 def test_low_confidence_intent_is_clarified_before_skill_execution() -> None:

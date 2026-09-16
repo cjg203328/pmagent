@@ -17,20 +17,17 @@ if str(_project_root) not in sys.path:
 
 from artpm_agent.ui_helpers import *  # noqa: F401,F403
 from artpm_agent.ui_feedback import build_error_info, render_error_callback
-from artpm_agent.config import PROJECT_ENV_PATH, resolve_data_root, save_data_root, reset_config
+from artpm_agent.config import (
+    Config,
+    PROJECT_ENV_PATH,
+    reset_config,
+    resolve_data_root,
+    save_data_root,
+)
 from artpm_agent.tenancy import TenantContext
 from artpm_agent.views.workflow_designer import render_workflow_designer
 from artpm_agent.views.wiki import render_wiki_workspace
 from artpm_agent.workflows.designer import capability_allowlist_from_skill_metadata
-
-# 显式导入 Agent / Config，避免降级态（核心模块导入失败时）下
-# 依赖通配导入拿不到名字而触发 NameError。
-try:
-    from artpm_agent.agent import ArtPMAgent
-    from artpm_agent.config import Config
-except Exception:
-    ArtPMAgent = None
-    Config = None
 
 MANUAL_MODEL_OPTION = "手动输入模型 ID"
 _ENV_ASSIGNMENT_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
@@ -326,6 +323,8 @@ def _apply_data_root(new_root, *, migrate, reset):
 
     old_root = resolve_data_root()
     previous_agent = st.session_state.get("agent")
+    previous_factory = st.session_state.get("runtime_factory")
+    factory_agent = getattr(previous_factory, "_agent", None)
     target = None
     if new_root:
         target = Path(new_root).expanduser()
@@ -375,18 +374,22 @@ def _apply_data_root(new_root, *, migrate, reset):
     # replacement Agent; otherwise init_session would reuse the old client and
     # closing the previous Agent would also close the replacement's session.
     from artpm_agent.core.mcp_client import reset_mcp_client
+    from artpm_agent.runtime.factory import reset_runtime_factory
 
     reset_mcp_client()
-    close_previous = getattr(previous_agent, "close", None)
-    if callable(close_previous):
-        try:
-            close_previous()
-        except Exception:
-            logger.warning("关闭旧 Agent 失败", exc_info=True)
+    reset_runtime_factory()
+    if previous_agent is not None and previous_agent is not factory_agent:
+        close_previous = getattr(previous_agent, "close", None)
+        if callable(close_previous):
+            try:
+                close_previous()
+            except Exception:
+                logger.warning("关闭旧 Agent 失败", exc_info=True)
 
     # 清空会话内已缓存的存储实例，迫使按新目录重建。
     for key in (
         "conversation_store",
+        "session_store",
         "chat_attachment_store",
         "artifact_generator",
         "workflow_store",
@@ -394,6 +397,11 @@ def _apply_data_root(new_root, *, migrate, reset):
         "knowledge_store",
         "wiki_store",
         "agent",
+        "runtime_factory",
+        "event_bus",
+        "episode_store",
+        "consolidation_scheduler",
+        "workflow_coordinator",
         "db",
         "messages_loaded_for",
         "_conv_cache",
@@ -1403,11 +1411,16 @@ def settings_page():
                 )
                 return
 
-        if ArtPMAgent is None or Config is None:
-            st.warning("配置已保存；当前运行实例未刷新，重启服务后生效。")
-            return
         try:
-            refreshed_agent = ArtPMAgent(Config())
+            reset_config()
+            runtime_factory = get_ui_runtime_factory()
+            runtime_factory.reset_agent()
+            for key in (
+                "agent",
+                "workflow_coordinator",
+            ):
+                st.session_state.pop(key, None)
+            refreshed_agent = runtime_factory.agent()
             _replace_session_agent(refreshed_agent)
         except Exception as error:
             logger.exception("配置已保存，但当前运行实例刷新失败")

@@ -24,13 +24,8 @@ from .progress_management_skill import ProgressManagementSkill
 from .delivery_skill import DeliverySkill
 from .retrospective_skill import RetrospectiveSkill
 from .input_schemas import BUILTIN_SKILL_INPUT_SCHEMAS
-from artpm_agent.parsers.excel_parser import ExcelQuoteParser
 from artpm_agent.utils.image_validation import MAX_IMAGE_FILE_SIZE, load_validated_image
-from artpm_agent.utils.mineru_adapter import (
-    MINERU_SUPPORTED_SUFFIXES,
-    MinerUDocumentConverter,
-)
-from artpm_agent.utils.unlimited_ocr import UnlimitedOCRClient
+from artpm_agent.utils.document_capabilities import MINERU_SUPPORTED_SUFFIXES
 from artpm_agent.plugins import PluginManager
 from artpm_agent.tenancy import (
     TenantContext,
@@ -119,6 +114,8 @@ class DocumentClassifierParser(BaseSkill):
         if mineru_converter is None:
             mineru_config = self.config.get("mineru") if isinstance(self.config, dict) else None
             if isinstance(mineru_config, dict):
+                from artpm_agent.utils.mineru_adapter import MinerUDocumentConverter
+
                 mineru_converter = MinerUDocumentConverter(mineru_config)
                 self.context["mineru_converter"] = mineru_converter
         mineru_error = None
@@ -151,6 +148,8 @@ class DocumentClassifierParser(BaseSkill):
             }
 
         if suffix in {".xlsx", ".xls"}:
+            from artpm_agent.parsers.excel_parser import ExcelQuoteParser
+
             parsed = ExcelQuoteParser().parse(path, inputs.get("user_hint"))
             if not parsed.get("success"):
                 return parsed
@@ -196,6 +195,8 @@ class DocumentClassifierParser(BaseSkill):
                 if ocr_client is None:
                     configured_ocr = self.context.get("unlimited_ocr")
                     if configured_ocr:
+                        from artpm_agent.utils.unlimited_ocr import UnlimitedOCRClient
+
                         ocr_client = (
                             configured_ocr
                             if hasattr(configured_ocr, "parse")
@@ -340,9 +341,11 @@ class DocumentClassifierParser(BaseSkill):
             ocr_status = "unavailable"
             ocr_client = self.context.get("unlimited_ocr_client")
             if ocr_client is None:
-                configured_ocr = self.context.get("unlimited_ocr")
-                if configured_ocr:
-                    ocr_client = (
+                    configured_ocr = self.context.get("unlimited_ocr")
+                    if configured_ocr:
+                        from artpm_agent.utils.unlimited_ocr import UnlimitedOCRClient
+
+                        ocr_client = (
                         configured_ocr
                         if hasattr(configured_ocr, "parse")
                         else UnlimitedOCRClient(configured_ocr)

@@ -67,4 +67,4 @@ def test_requirements_compatibility_entries_are_ascii_and_use_pyproject():
     development = (root / "requirements-dev.txt").read_bytes().decode("ascii")
 
     assert "-e ." in runtime
-    assert '-e ".[dev]"' in development
+    assert '-e ".[production,dev]"' in development

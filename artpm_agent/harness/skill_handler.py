@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from artpm_agent.security.access_mode import access_decision
 from artpm_agent.routing.service import IntentDecision, execution_gate_for_decision
+from .invocation_counts import increment_turn_invocation
 
 if TYPE_CHECKING:
     from .turn_service import TurnContext, TurnResult
@@ -254,6 +255,7 @@ def try_skill_routing(
         decision = ctx.intent_decision or IntentDecision(intent=intent, confidence=1.0)
     else:
         try:
+            increment_turn_invocation(ctx, "intent")
             detector = getattr(runtime, "detect_intent_decision", None)
             decision = detector(ctx.user_input) if callable(detector) else None
             if not isinstance(decision, IntentDecision):

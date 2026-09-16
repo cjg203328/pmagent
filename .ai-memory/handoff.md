@@ -36,3 +36,23 @@
 ### 阻塞项
 
 - 无代码阻塞；外部 PostgreSQL 测试需提供一次性 `ARTPM_TEST_POSTGRES_URL`。
+
+## Handoff Checkpoint - 2026-09-17 01:08
+
+**当前目标**: P0-P3 runtime/storage/UI/dependency convergence, full verification and remote push
+**当前阶段**: Implementation and verification complete; pending Git commit/push only
+
+### 已完成
+
+- Runtime performance/RSS/import/first-model metrics and per-turn invocation counters.
+- Process-owned RuntimeFactory/StorageRegistry across API/UI/CLI; workspace-scoped API locking and tenant-aware coordinator caching.
+- Workspace knowledge schema v6 durable vector outbox, projector, rebuild and literal fallback.
+- Lazy UI document/editing/MinerU imports and lazy RequestOrchestrator OCR/MinerU/document capabilities.
+- AgentFactory, ProviderPort and observable legacy facade boundaries.
+- Composable dependency profiles with quality-only `dev`; README/current architecture docs and `uv.lock` updated.
+- Fast `1495 passed`; full `1561 passed`; integration `20 passed, 1 skipped`; coverage 91%; optimization 15/15.
+- API/UI restarted and healthy at `127.0.0.1:8765` / `127.0.0.1:8501`.
+
+### 已知限制
+
+- PostgreSQL RLS live test remains skipped because `ARTPM_TEST_POSTGRES_URL` is not configured locally.

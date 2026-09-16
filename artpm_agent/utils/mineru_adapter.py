@@ -32,25 +32,10 @@ import zipfile
 
 import requests
 
+from .document_capabilities import MINERU_SUPPORTED_SUFFIXES
+
 
 MINERU_INTEGRATION_SCHEMA = "artpm-mineru-v1"
-MINERU_SUPPORTED_SUFFIXES = frozenset(
-    {
-        ".bmp",
-        ".docx",
-        ".gif",
-        ".jp2",
-        ".jpeg",
-        ".jpg",
-        ".pdf",
-        ".png",
-        ".pptx",
-        ".tif",
-        ".tiff",
-        ".webp",
-        ".xlsx",
-    }
-)
 MINERU_IMAGE_SUFFIXES = frozenset(
     {".bmp", ".gif", ".jp2", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 )

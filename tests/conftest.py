@@ -61,6 +61,13 @@ def isolate_state_and_disable_llm(monkeypatch, tmp_path):
 def _reset_singletons() -> None:
     """Drop cached singletons without importing heavy optional dependencies."""
     try:
+        from artpm_agent.runtime.factory import reset_runtime_factory
+
+        reset_runtime_factory()
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
         from artpm_agent import config as _config
 
         _config.reset_config()

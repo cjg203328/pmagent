@@ -104,16 +104,29 @@ def _declared_requirements(
 
     if project_file.is_file():
         project_data = tomllib.loads(project_file.read_text(encoding="utf-8"))
-        raw_requirements = project_data.get("project", {}).get("dependencies", ())
-        if not isinstance(raw_requirements, list):
+        project = project_data.get("project", {})
+        base_requirements = project.get("dependencies", ())
+        if not isinstance(base_requirements, list):
             raise ValueError("pyproject project.dependencies must be a list")
+        raw_requirements = list(base_requirements)
+        optional = project.get("optional-dependencies", {})
+        if not isinstance(optional, dict):
+            raise ValueError("pyproject project.optional-dependencies must be a table")
+        for requirements in optional.values():
+            if not isinstance(requirements, list):
+                raise ValueError("optional dependency profiles must be lists")
+            raw_requirements.extend(requirements)
         return _normalized_requirements(raw_requirements)
 
     try:
         raw_requirements = metadata.requires(project) or ()
     except metadata.PackageNotFoundError:
         return set()
-    return _normalized_requirements(raw_requirements)
+    declared = set()
+    for raw in raw_requirements:
+        requirement = Requirement(raw)
+        declared.add(canonicalize_name(requirement.name))
+    return declared
 
 
 def _import_runtime_symbol(dependency: RuntimeDependency) -> None:

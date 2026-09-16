@@ -14,13 +14,19 @@ P2 采用渐进式拆分：旧路径继续作为兼容 facade，新代码优先�
 | 工作区/会话侧栏 | `artpm_agent/ui/workspace_selector.py`、`conversation_sidebar.py` | 页面状态由 Streamlit host 持有 |
 | 旧入口 | `artpm_agent/ui_helpers.py` | 兼容导入和生命周期编排；逐步减少业务实现 |
 
+## Agent 与 Provider
+
+`runtime/agent_factory.py` 是 Agent 构造边界，`providers/port.py` 是模型端口，
+`runtime/legacy_facade.py` 只记录旧 `chat/stream` 调用。`RequestOrchestrator`
+保留兼容实现，不再拥有宿主 Store 生命周期或可选文档后端的顶层导入。
+
 ## 样式
 
 `artpm_agent/ui_style.py` 仍提供唯一的 `STYLE_CSS` 注入值。`ui/style_tokens.py`、`ui/style_layout.py` 和 `ui/style_components.py` 提供懒加载边界，避免出现多个 `<style>` 标签和 Streamlit 缓存抖动。后续迁移单个选择器时，只需替换对应 section 的实现，旧出口不变。
 
 ## 知识库
 
-`memory/schema.py` 定义表和版本，`memory/resources.py` 定义文本/JSON/limit 校验，`memory/rules.py` 定义规则状态，`memory/serializers.py` 定义 DTO 投影，`memory/vector_index.py` 只包含可重建的分块逻辑。`memory/workspace_knowledge_store.py` 仍是事务 facade，外部代码不应读取 SQLite 行结构。
+`memory/schema.py` 定义表和版本，`memory/resources.py` 定义文本/JSON/limit 校验，`memory/rules.py` 定义规则状态，`memory/serializers.py` 定义 DTO 投影，`memory/vector_index.py` 只包含可重建的分块逻辑，`memory/knowledge_projector.py` 消费 durable outbox。`memory/workspace_knowledge_store.py` 仍是事务 facade，外部代码不应读取 SQLite 行结构或直接写向量索引。
 
 ## Chat 页面
 

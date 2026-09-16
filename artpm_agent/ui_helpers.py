@@ -61,6 +61,7 @@ from artpm_agent.ui_state import (  # noqa: F401 — re-exported for wildcard co
     get_event_bus,
     get_episode_store,
     get_consolidation_scheduler,
+    get_ui_runtime_factory,
     get_session_store,
     get_current_profile,
     get_knowledge_store,
@@ -98,13 +99,6 @@ logger = get_logger(__name__)
 # preserve the historical import surface while allowing focused unit tests.
 from artpm_agent import ui_formatters as _ui_formatters  # noqa: E402
 
-try:
-    from artpm_agent.agent import ArtPMAgent
-    from artpm_agent.config import Config
-    from artpm_agent.database.models import DatabaseManager
-    logger.info("核心模块导入成功")
-except Exception as e:
-    logger.error(f"核心模块导入失败: {e}")
 def format_cn_date(value, include_time=False):
     """以中文产品格式显示日期，避免将 ISO 时间暴露到界面。"""
     if not value:
@@ -259,6 +253,18 @@ def get_workflow_coordinator():
     tenant_id = tenant_context.tenant_id
     profile = get_current_profile()
     profile_id = str(getattr(profile, "profile_id", None) or "local-default")
+    runtime_factory = st.session_state.get("runtime_factory")
+    if runtime_factory is not None:
+        try:
+            coordinator = runtime_factory.workflow_coordinator(
+                tenant_context,
+                profile_id=profile_id,
+            )
+        except (TypeError, ValueError):
+            logger.exception("工作流协调器初始化失败")
+            return None
+        st.session_state.workflow_coordinator = coordinator
+        return coordinator
     coordinator = st.session_state.get("workflow_coordinator")
     coordinator_agent = getattr(coordinator, "agent", None)
     coordinator_base_agent = getattr(
@@ -446,6 +452,8 @@ def init_session():
         st.session_state.tenant_context = TenantContext.local()
     elif not isinstance(st.session_state.tenant_context, TenantContext):
         raise RuntimeError("tenant_context must be created by the application host")
+    runtime_factory = get_ui_runtime_factory()
+    storage = runtime_factory.storage
     if "view" not in st.session_state:
         st.session_state.view = "对话"
     elif st.session_state.view not in _NAV_OPTIONS:
@@ -454,128 +462,64 @@ def init_session():
     legacy_messages = list(st.session_state.get("messages", []))
     if "conversation_store" not in st.session_state:
         st.session_state.conversation_store = None
-        if CONVERSATION_STORE_AVAILABLE and AVAILABLE:
-            try:
-                conversation_path = Config().get(
-                    "database.conversation_db_path", "./data/conversations.db"
-                )
-                store = ConversationStore(conversation_path)
-                st.session_state.conversation_store = store
-                _migrate_legacy_messages(store, legacy_messages)
-            except Exception as error:
-                record_runtime_init_failure("conversation_store", error)
+        try:
+            store = storage.conversation
+            st.session_state.conversation_store = store
+            _migrate_legacy_messages(store, legacy_messages)
+        except Exception as error:
+            record_runtime_init_failure("conversation_store", error)
 
     if "permission_store" not in st.session_state:
         st.session_state.permission_store = None
-        conversation_store = get_conversation_store()
-        if PERMISSION_RUNTIME_AVAILABLE and conversation_store is not None:
-            try:
-                st.session_state.permission_store = PermissionStore(
-                    conversation_store.db_path
-                )
-            except Exception as error:
-                record_runtime_init_failure("permission_store", error)
+        try:
+            st.session_state.permission_store = storage.permission
+        except Exception as error:
+            record_runtime_init_failure("permission_store", error)
 
     if "chat_attachment_store" not in st.session_state:
         st.session_state.chat_attachment_store = None
-        if AVAILABLE:
-            try:
-                conversation_path = Path(
-                    Config().get(
-                        "database.conversation_db_path",
-                        "./data/conversations.db",
-                    )
-                )
-                attachment_root = conversation_path.parent / "chat_attachments"
-                st.session_state.chat_attachment_store = ChatAttachmentStore(
-                    attachment_root
-                )
-            except Exception as error:
-                record_runtime_init_failure("chat_attachment_store", error)
+        try:
+            st.session_state.chat_attachment_store = storage.chat_attachments
+        except Exception as error:
+            record_runtime_init_failure("chat_attachment_store", error)
 
     if "artifact_generator" not in st.session_state:
         st.session_state.artifact_generator = None
-        if ARTIFACT_RUNTIME_AVAILABLE and get_conversation_store() is not None:
-            try:
-                conversation_path = Path(get_conversation_store().db_path)
-                artifact_root = conversation_path.parent / "artifacts" / "local-default"
-                st.session_state.artifact_generator = WorkspaceArtifactGenerator(
-                    artifact_root
-                )
-            except Exception as error:
-                record_runtime_init_failure("artifact_generator", error)
 
     if "workflow_store" not in st.session_state:
         st.session_state.workflow_store = None
-        if WORKFLOW_RUNTIME_AVAILABLE and get_conversation_store() is not None:
-            try:
-                st.session_state.workflow_store = WorkflowStore(
-                    get_conversation_store().db_path
-                )
-            except Exception as error:
-                record_runtime_init_failure("workflow_store", error)
+        try:
+            st.session_state.workflow_store = storage.workflow
+        except Exception as error:
+            record_runtime_init_failure("workflow_store", error)
 
     if "profile_store" not in st.session_state:
         st.session_state.profile_store = None
-        conversation_store = get_conversation_store()
-        if PROFILE_RUNTIME_AVAILABLE and conversation_store is not None:
-            try:
-                runtime_config = Config()
-                default_policy = QuotePolicy(
-                    overhead_rate=float(
-                        runtime_config.get("cost_config.overhead_rate", 0.15)
-                    ),
-                    tax_rate=float(runtime_config.get("cost_config.tax_rate", 0.06)),
-                    currency=str(
-                        runtime_config.get("cost_config.currency", "CNY")
-                    ).upper(),
-                )
-                st.session_state.profile_store = AgentProfileStore(
-                    conversation_store.db_path,
-                    default_identity=AgentIdentity(),
-                    default_quote_policy=default_policy,
-                )
-                st.session_state.profile_store.get_effective_profile()
-            except Exception as error:
-                record_runtime_init_failure("profile_store", error)
+        try:
+            st.session_state.profile_store = storage.profile
+            st.session_state.profile_store.get_effective_profile()
+        except Exception as error:
+            record_runtime_init_failure("profile_store", error)
 
     if "knowledge_store" not in st.session_state:
         st.session_state.knowledge_store = None
-        conversation_store = get_conversation_store()
-        if WorkspaceKnowledgeStore is not None and conversation_store is not None:
-            try:
-                vector_root = Path(
-                    Config().get("database.vector_db_path", "./data/vector_store")
-                )
-                embedding_provider = create_embedding_provider(
-                    Config().get("memory", {})
-                )
-                st.session_state.knowledge_store = WorkspaceKnowledgeStore(
-                    conversation_store.db_path,
-                    vector_store_path=vector_root / "workspace_knowledge",
-                    embedding_provider=embedding_provider,
-                )
-            except Exception as error:
-                record_runtime_init_failure("knowledge_store", error)
+        try:
+            st.session_state.knowledge_store = storage.knowledge
+        except Exception as error:
+            record_runtime_init_failure("knowledge_store", error)
 
     if "wiki_store" not in st.session_state:
         st.session_state.wiki_store = None
-        knowledge_store = get_knowledge_store()
-        if WorkspaceWikiStore is not None and knowledge_store is not None:
-            try:
-                wiki_store = WorkspaceWikiStore(knowledge_store)
-                tenant_context = st.session_state.get("tenant_context")
-                workspace_id = str(
-                    getattr(
-                        tenant_context,
-                        "workspace_id",
-                        WorkspaceKnowledgeStore.DEFAULT_WORKSPACE_ID,
-                    )
-                )
-                wiki_store.reconcile(workspace_id=workspace_id)
-                st.session_state.wiki_store = wiki_store
-            except Exception as error:
-                record_runtime_init_failure("wiki_store", error)
+        try:
+            wiki_store = storage.wiki
+            tenant_context = st.session_state.get("tenant_context")
+            workspace_id = str(
+                getattr(tenant_context, "workspace_id", "local-default")
+            )
+            wiki_store.reconcile(workspace_id=workspace_id)
+            st.session_state.wiki_store = wiki_store
+        except Exception as error:
+            record_runtime_init_failure("wiki_store", error)
 
     store = get_conversation_store()
     if store is not None:
@@ -598,7 +542,7 @@ def init_session():
 
     if "agent" not in st.session_state and AVAILABLE:
         try:
-            st.session_state.agent = ArtPMAgent()
+            st.session_state.agent = runtime_factory.agent()
             logger.info("Agent实例化成功")
         except Exception as e:
             st.session_state.agent = None
@@ -607,7 +551,12 @@ def init_session():
     if "db" not in st.session_state and AVAILABLE:
         try:
             agent = st.session_state.get("agent")
-            st.session_state.db = agent.database if agent is not None else DatabaseManager()
+            if agent is not None:
+                st.session_state.db = agent.database
+            else:
+                from artpm_agent.database.models import DatabaseManager
+
+                st.session_state.db = DatabaseManager()
             logger.info("数据库管理器初始化成功")
         except Exception as e:
             st.session_state.db = None
@@ -2329,8 +2278,7 @@ def _cached_workflow_preview(run_id):
 def _render_workflow_approvals(conversation_id):
     """Render only decision-relevant workflow state inside the conversation."""
     workflow_store = get_workflow_store()
-    coordinator = get_workflow_coordinator()
-    if workflow_store is None or coordinator is None or not conversation_id:
+    if workflow_store is None or not conversation_id:
         return
     try:
         waiting_runs = workflow_store.list_runs(
@@ -2354,6 +2302,12 @@ def _render_workflow_approvals(conversation_id):
         )
         if action == "retry":
             st.rerun()
+        return
+
+    if not waiting_runs:
+        return
+    coordinator = get_workflow_coordinator()
+    if coordinator is None:
         return
 
     actor_id, actor_role = _permission_actor()

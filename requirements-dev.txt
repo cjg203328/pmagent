@@ -1,3 +1,4 @@
-# Development dependencies are managed by the pyproject.toml dev extra.
-#   pip install -e ".[dev]"
--e ".[dev]"
+# The dev extra is quality tooling only; compose it with the runtime profiles
+# exercised by the full suite.
+#   pip install -e ".[production,dev]"
+-e ".[production,dev]"

@@ -4,54 +4,22 @@ Main entry point for ArtPM Copilot
 import sys
 from uuid import uuid4
 
-from artpm_agent.agent import ArtPMAgent
-from artpm_agent.harness import LocalHarnessRuntime
-from artpm_agent.memory.conversation_store import ConversationStore
-from artpm_agent.memory.session_store import SessionStore
+from artpm_agent.runtime.factory import get_runtime_factory
 from artpm_agent.utils.chat_intent import is_local_fast_intent
 
 
-def _build_cli_services(agent: ArtPMAgent):
+def _build_cli_services(factory):
     """Create the same request services used by the API and UI hosts."""
-    from artpm_agent.config import resolve_state_path
-    from artpm_agent.evolution.scheduler import get_default_scheduler
-    from artpm_agent.evolution.strategy_store import get_default_strategy_store
-    from artpm_agent.harness.outcome_recorder import (
-        default_episode_db_path,
-    )
-    from artpm_agent.memory.consolidation import ConsolidationScheduler
-    from artpm_agent.memory.episode_store import EpisodeStore
-    from artpm_agent.memory.feedback_store import get_default_feedback_store
-    from artpm_agent.runtime.request_services import TurnServiceBundle
-    from artpm_agent.runtime.event_bus import EventBus
-    from artpm_agent.security import PermissionStore
+    from artpm_agent.tenancy import TenantContext
 
-    conversation_store = ConversationStore(
-        agent.config.get(
-            "database.conversation_db_path",
-            "./data/conversations.db",
-        )
-    )
+    tenant_context = TenantContext.local()
+    conversation_store = factory.storage.conversation
     conversation = conversation_store.create_conversation(
         "CLI session",
-        workspace_id=ConversationStore.DEFAULT_WORKSPACE_ID,
+        workspace_id=tenant_context.require_workspace(),
     )
-    session_store = SessionStore(conversation_store)
-    services = TurnServiceBundle(
-        permission_store=PermissionStore(
-            resolve_state_path("permissions.db", "ARTPM_PERMISSION_DB")
-        ),
-        session_store=session_store,
-        memory_manager=getattr(agent, "memory", None),
-        tencentdb_memory=getattr(agent, "tencentdb_memory", None),
-        feedback_store=get_default_feedback_store(),
-        strategy_store=get_default_strategy_store(),
-        episode_store=EpisodeStore(default_episode_db_path()),
-        reflection_scheduler=get_default_scheduler(),
-        consolidation_scheduler=ConsolidationScheduler(),
-        event_bus=EventBus(),
-    )
-    return conversation["id"], conversation_store, services
+    services = factory.turn_services(tenant_context)
+    return conversation["id"], conversation_store, tenant_context, services
 
 
 def print_banner():
@@ -99,9 +67,15 @@ def main():
     # Initialize agent
     try:
         print("[System] Initializing ArtPM Agent...")
-        agent = ArtPMAgent()
-        conversation_id, conversation_store, turn_services = _build_cli_services(agent)
-        runtime = LocalHarnessRuntime(agent, services=turn_services)
+        factory = get_runtime_factory()
+        agent = factory.agent()
+        (
+            conversation_id,
+            conversation_store,
+            tenant_context,
+            turn_services,
+        ) = _build_cli_services(factory)
+        runtime = factory.harness_runtime(tenant_context)
         print("[System] Agent ready!\n")
     except Exception as e:
         print(f"[Error] Failed to initialize agent: {e}")

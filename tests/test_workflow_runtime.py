@@ -19,6 +19,7 @@ from artpm_agent.workflows.models import (
 )
 from artpm_agent.workflows.selector import WorkflowSelector
 from artpm_agent.workflows.store import WorkflowStore
+from artpm_agent.runtime.counters import counter_snapshot, reset_counters
 
 
 class _SessionState(dict):
@@ -177,6 +178,17 @@ def test_ui_learning_services_are_lazy_and_session_cached(monkeypatch, tmp_path)
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
+
+
+def test_workflow_engine_construction_is_counted(tmp_path):
+    reset_counters()
+    WorkflowEngine(
+        WorkflowStore(tmp_path / "counted-engine.sqlite"),
+        lambda _skill, _inputs: {"success": True},
+    )
+
+    assert counter_snapshot()["runtime.workflow_engine.constructed"] == 1
+    reset_counters()
 
 
 ALLOWLIST = {

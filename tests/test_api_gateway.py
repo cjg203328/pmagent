@@ -268,6 +268,7 @@ def test_default_runtime_health_exposes_runtime_counters(tmp_path):
     result = runtime.health()
 
     assert result["runtime_counters"]["harness.turns.duplicate_replays"] == 1
+    assert result["performance"]["process"]["rss_mb"] > 0
     reset_counters()
 
 

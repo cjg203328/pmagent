@@ -27,8 +27,9 @@ def test_knowledge_authority_contract_is_split_from_transaction_facade():
         validate_limit,
     )
 
-    assert SCHEMA_VERSION == 5
+    assert SCHEMA_VERSION == 6
     assert schema_contract()["scope_columns"] == ("tenant_id", "workspace_id")
+    assert "knowledge_index_outbox" in schema_contract()["tables"]
     assert validate_limit(1) == 1
     assert content_hash("a", "null", None) == content_hash("a", "null", None)
     assert serialize_json({"b": 1, "a": 2}, "metadata") == '{"a":2,"b":1}'
@@ -46,3 +47,13 @@ def test_chat_pure_boundaries_preserve_legacy_projection_contracts():
     assert not feedback_was_saved({"feedback_id": None})
     assert len(WELCOME_SUGGESTIONS) == 7
     assert welcome_suggestions() is not WELCOME_SUGGESTIONS
+
+
+def test_agent_provider_and_legacy_boundaries_are_importable():
+    from artpm_agent.providers.port import ProviderPort
+    from artpm_agent.runtime.agent_factory import AgentFactory
+    from artpm_agent.runtime.legacy_facade import record_legacy_facade_call
+
+    assert AgentFactory(lambda: "agent").create() == "agent"
+    assert ProviderPort is not None
+    assert callable(record_legacy_facade_call)

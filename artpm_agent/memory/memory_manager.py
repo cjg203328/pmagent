@@ -11,6 +11,7 @@ from typing import Dict, Any, List, Optional
 from artpm_agent.memory.embeddings import DeterministicEmbeddingProvider, EmbeddingProvider
 from artpm_agent.memory.sqlite_manager import SQLiteManager
 from artpm_agent.memory.vector_store import VectorStore
+from artpm_agent.runtime.counters import increment_counter
 from artpm_agent.tenancy import (
     TenantContext,
     TenantContextManager,
@@ -33,6 +34,7 @@ class MemoryManager:
         vector_db_path: str,
         llm_client=None,
         embedding_provider: Optional[EmbeddingProvider] = None,
+        workspace_knowledge_store: Any = None,
     ):
         """
         Initialize memory manager
@@ -52,7 +54,13 @@ class MemoryManager:
             embedding_fingerprint=self.embedding_provider.fingerprint,
         )
         self.llm_client = llm_client
+        self.workspace_knowledge_store = workspace_knowledge_store
         self._sync_vector_index()
+
+    def bind_workspace_knowledge_store(self, store: Any) -> None:
+        """Route future document facts to the canonical workspace authority."""
+
+        self.workspace_knowledge_store = store
 
     def save_document(
         self,
@@ -144,6 +152,29 @@ class MemoryManager:
         document["tenant_id"] = resolved_tenant
         document["workspace_id"] = resolved_workspace
         doc_id = document.get("id") or generate_uuid()
+        increment_counter("legacy.memory_manager.save_document")
+
+        knowledge_store = self.workspace_knowledge_store
+        if knowledge_store is not None:
+            resource = knowledge_store.ingest_resource(
+                resource_id=str(doc_id),
+                title=str(
+                    document.get("title")
+                    or document.get("file_name")
+                    or doc_id
+                ),
+                searchable_text=str(document.get("raw_text") or ""),
+                resource_type=str(document.get("document_type") or "document"),
+                source_type=str(document.get("source") or "memory-manager-facade"),
+                source_uri=str(document.get("file_path") or "") or None,
+                source_id=str(doc_id),
+                structured_data=document.get("extracted_data", {}),
+                metadata={"compatibility_facade": "MemoryManager.save_document"},
+                tenant_id=resolved_tenant,
+                workspace_id=resolved_workspace,
+                created_by="memory-manager-facade",
+            )
+            return str(resource["id"])
 
         # Save to structured database
         self.db.insert("documents", {

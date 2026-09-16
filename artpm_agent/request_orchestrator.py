@@ -15,9 +15,6 @@ from artpm_agent.utils.chat_intent import (
     is_memory_capability_query,
     is_model_query,
 )
-from artpm_agent.utils.unlimited_ocr import UnlimitedOCRClient
-from artpm_agent.utils.multimodal_markdown import LocalMarkdownConverter
-from artpm_agent.utils.mineru_adapter import MinerUDocumentConverter
 from artpm_agent.memory import (
     MemoryManager,
     SessionStore,
@@ -44,7 +41,8 @@ from artpm_agent.runtime import (
     build_capability_registry,
 )
 from artpm_agent.runtime.request_services import RequestServiceBundle
-from artpm_agent.runtime.counters import increment_counter
+from artpm_agent.runtime.lazy_capability import LazyCapability
+from artpm_agent.runtime.legacy_facade import record_legacy_facade_call
 from artpm_agent.routing.service import IntentDecision, IntentRouter
 from artpm_agent.routing.input_extractor import extract_skill_inputs
 from artpm_agent.providers import ModelGateway, StructuredProviderGateway
@@ -111,16 +109,21 @@ class RequestOrchestrator:
 
         # OCR is an optional external service. Keeping the client lightweight
         # allows the agent to start and answer normally when it is disabled.
-        self.unlimited_ocr_client = UnlimitedOCRClient(
-            self.config.get("unlimited_ocr", {})
+        self.unlimited_ocr_client = LazyCapability(
+            lambda: self._build_unlimited_ocr_client(),
+            name="unlimited-ocr",
         )
         # MinerU is deliberately an optional sidecar/CLI capability.  Creating
         # the adapter is cheap and never imports torch or downloads models;
         # conversion is attempted only for supported attachments.
-        self.mineru_converter = MinerUDocumentConverter(
-            self.config.get("mineru", {})
+        self.mineru_converter = LazyCapability(
+            lambda: self._build_mineru_converter(),
+            name="mineru",
         )
-        self.markdown_converter = LocalMarkdownConverter()
+        self.markdown_converter = LazyCapability(
+            self._build_markdown_converter,
+            name="documents",
+        )
 
         llm_config = self.config.get_all()["llm"]
         self._llm_config = dict(llm_config)
@@ -270,6 +273,22 @@ class RequestOrchestrator:
     INTENT_KEYWORDS = IntentRouter.INTENT_KEYWORDS
     SKILL_ROUTE_SIGNALS = IntentRouter.SKILL_ROUTE_SIGNALS
     INTENT_EXAMPLES = IntentRouter.INTENT_EXAMPLES
+
+    def _build_unlimited_ocr_client(self):
+        from artpm_agent.utils.unlimited_ocr import UnlimitedOCRClient
+
+        return UnlimitedOCRClient(self.config.get("unlimited_ocr", {}))
+
+    def _build_mineru_converter(self):
+        from artpm_agent.utils.mineru_adapter import MinerUDocumentConverter
+
+        return MinerUDocumentConverter(self.config.get("mineru", {}))
+
+    @staticmethod
+    def _build_markdown_converter():
+        from artpm_agent.utils.multimodal_markdown import LocalMarkdownConverter
+
+        return LocalMarkdownConverter()
 
     def create_agent_loop(self, **options: Any) -> AgentLoop:
         """Build an isolated structured-tool loop over the loaded skills."""
@@ -798,7 +817,7 @@ class RequestOrchestrator:
         context: Optional[Dict[str, Any]] = None,
     ) -> Iterator[AgentEvent]:
         """Yield a stable lifecycle protocol for UI and service adapters."""
-        increment_counter("harness.legacy.stream_events_calls")
+        record_legacy_facade_call("stream_events")
         runtime_context = dict(context or {})
 
         def optional_identifier(key: str) -> Optional[str]:
@@ -861,7 +880,7 @@ class RequestOrchestrator:
         context: Optional[Dict[str, Any]] = None,
     ) -> Iterator[str]:
         """Compatibility adapter that exposes only assistant text deltas."""
-        increment_counter("harness.legacy.stream_chat_calls")
+        record_legacy_facade_call("stream_chat")
         events = self.stream_events(user_input, context=context)
         try:
             for event in events:
@@ -961,7 +980,7 @@ class RequestOrchestrator:
         Returns:
             Agent response text
         """
-        increment_counter("harness.legacy.chat_calls")
+        record_legacy_facade_call("chat")
         self.last_response_model = None
         self.last_model_fallback_from = None
         context = context or {}
@@ -1203,6 +1222,8 @@ class RequestOrchestrator:
         try:
             converter = getattr(self, "markdown_converter", None)
             if converter is None:
+                from artpm_agent.utils.multimodal_markdown import LocalMarkdownConverter
+
                 converter = LocalMarkdownConverter()
                 self.markdown_converter = converter
             converted = converter.convert(file_path, parsed_result=result)

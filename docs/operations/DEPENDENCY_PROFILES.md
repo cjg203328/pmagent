@@ -1,65 +1,62 @@
 # Dependency Profiles
 
-The base package is the offline-first application surface. Remote services are
-installed by role so a local skill-only deployment does not need PostgreSQL,
-Qdrant, Redis, FastAPI, or telemetry SDKs.
+The base package is the core Runtime/CLI surface. UI frameworks, document
+parsers, vector engines, model SDKs and external integrations are installed as
+capabilities so a minimal worker does not carry several hundred MiB of unused
+packages.
 
 ## Profile Matrix
 
-| Profile | Intended use | Adds | Lifecycle |
-| --- | --- | --- | --- |
-| core (`.`) | Local Streamlit, CLI, SQLite and FAISS | Application runtime and offline document/LLM adapters | Current default |
-| `api` | Local REST gateway | FastAPI and Uvicorn | Current |
-| `production` | Compose server runtime | API, PostgreSQL, Qdrant, Redis, OpenTelemetry and Sentry | Current production contract |
-| `dev` | Tests, linting, typing and security checks | Quality tools plus the production integration surface | Current CI contract |
-| `postgres` / `vector-remote` / `cache` / `observability` | Install one remote integration | psycopg, Qdrant, Redis, or telemetry SDKs | Current composable profiles |
-| `mineru` / `mineru-client` | Local MinerU pipeline or remote MinerU API client | Pinned MinerU runtime or lightweight client | Current opt-in |
-| `ocr` | PaddleOCR compatibility path | PaddleOCR and PaddlePaddle | Current opt-in, heavyweight |
-| `voice` | LiveKit voice worker | LiveKit provider series and local TTS | Current opt-in |
-| `vector` | Historical FAISS install spelling | FAISS (already in core) | Compatibility extra; deprecate before next major |
+| Profile | Purpose | Main packages |
+| --- | --- | --- |
+| base / `runtime` | Harness, SQLite, configuration and CLI | SQLAlchemy, Alembic, Pydantic, NumPy |
+| `api` | REST gateway | FastAPI, Uvicorn |
+| `ui` | Streamlit application | Streamlit, pandas, Plotly |
+| `documents` | Office/PDF parsing and generation | openpyxl, python-docx, pdfplumber, PyMuPDF |
+| `vector-local` | Local derived index | FAISS CPU |
+| `vector-remote` | Remote derived index | Qdrant client |
+| `llm-openai` / `llm-anthropic` | Native provider SDK | OpenAI or Anthropic SDK |
+| `llm-langchain` | Optional LangChain bridge | LangChain integrations and LangGraph |
+| `mcp` | Model Context Protocol | MCP SDK |
+| `ocr` / `mineru` / `mineru-client` | Optional document backends | PaddleOCR or MinerU |
+| `voice` | Optional voice worker | LiveKit providers and local TTS |
+| `observability` | Exported tracing/errors | OpenTelemetry and Sentry |
+| `postgres` / `cache` | Production state adapters | psycopg or Redis |
+| `dev` | Quality gates only | pytest, Ruff, mypy, Bandit, Safety |
+| `production` | Deployable composite | UI/API/documents/vector/model/MCP plus remote adapters |
 
-`production` and `dev` intentionally repeat the integration dependencies in
-`pyproject.toml` because PEP 621 does not provide a portable way to compose
-optional extras. Keep those lists equivalent when an integration is added or
-removed, then refresh `uv.lock`. CI and `tests/test_dependency_profiles.py`
-are the contract for this duplication.
+`runtime` is an empty compatibility marker because the base dependency set is
+the runtime profile. PEP 621 extras cannot portably include other extras, so
+deployment commands explicitly compose profiles; only `production` is kept as
+a convenience composite for wheel/Docker installation. `dev` intentionally
+does not copy production dependencies.
 
 ```powershell
-# Local Streamlit and offline skills
+# Core CLI/runtime
 python -m pip install -e .
 
-# REST gateway on a local machine
-python -m pip install -e ".[api]"
+# Offline UI
+python -m pip install -e ".[ui,documents,vector-local]"
 
-# Production Compose/runtime dependencies
-python -m pip install -e ".[production]"
+# Local UI/API with native OpenAI-compatible models
+python -m pip install -e ".[ui,api,documents,vector-local,llm-openai]"
 
-# Development and test environment
-python -m pip install -e ".[dev]"
+# Full regression environment
+python -m pip install -e ".[production,dev]"
 ```
 
-The application keeps these integrations optional at import time. An unset
-Redis URL remains a SQLite-only cache mode; an unavailable Qdrant backend falls
-back to FAISS; telemetry and Sentry remain no-op when their endpoints are not
-configured. Production deployment must use the `production` profile because
-Compose intentionally disables SQLite fallback and requires PostgreSQL/RLS.
+Optional code must stay behind lazy import boundaries. Missing optional
+packages must produce a capability-unavailable status, not prevent the core
+Runtime from importing. FAISS/Qdrant remain rebuildable indexes; Redis remains
+a cache and neither is an authoritative Store.
 
-## Deprecation And Retirement
+## Compatibility
 
-- `requirements.txt`, `requirements-dev.txt`, and `requirements-security.txt`
-  are compatibility install shims. Migrate CI and deployment documentation to
-  `pyproject.toml` extras before removing them.
-- `vector` is retained only for existing installers because FAISS is already
-  a core dependency. Do not add new documentation using it; remove it in the
-  next major release after checking downstream install telemetry.
-- Do not remove `postgres`, `vector-remote`, `cache`, `observability`, `ocr`,
-  `mineru*`, or `voice` solely because they are optional. Each has a lazy
-  import boundary, configuration contract, or deployment use case.
-- To retire any profile: mark it deprecated for one release, update the
-  README, this matrix, CI, `uv.lock`, and profile tests, then remove it only in
-  a major release with a migration note.
+- `vector` remains a deprecated alias for `vector-local` for one compatibility
+  cycle. New documentation must use `vector-local`.
+- `requirements*.txt` are installer shims; `pyproject.toml` is authoritative.
+- Archived documents describe historical states and are not dependency
+  contracts. This document and `pyproject.toml` are the current contract.
 
-Every profile change must pass `uv lock --check`, the dependency profile tests,
-and an import check in a clean environment where the profile is absent. The
-core profile must continue to import and start without any remote-service
-extra installed.
+Every profile change must pass dependency-profile tests, a fresh core import
+check and `uv lock --check`.

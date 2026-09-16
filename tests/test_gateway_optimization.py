@@ -4,6 +4,7 @@ import time
 
 from artpm_agent.providers.gateway import ModelGateway
 from artpm_agent.providers.response_cache import ResponseCache
+from artpm_agent.runtime.performance import performance_snapshot, reset_performance_metrics
 
 
 class FakeClient:
@@ -48,6 +49,19 @@ def test_default_no_task_uses_primary():
     gw = _gw("gpt-4o", ["gpt-4o-mini"])
     out = gw.chat_with_failover("hi", "sys", [])
     assert "gpt-4o" in out
+
+
+def test_first_model_call_latency_is_recorded_once():
+    reset_performance_metrics()
+    gw = _gw("gpt-4o", [])
+
+    gw.chat_with_failover("first", "sys", [])
+    gw.chat_with_failover("second", "sys", [])
+
+    metric = performance_snapshot()["first_model_call"]
+    assert metric["count"] == 1
+    assert metric["latency_ms"] >= 0
+    assert metric["success"] is True
 
 
 def test_response_cache_avoid_second_llm_call():

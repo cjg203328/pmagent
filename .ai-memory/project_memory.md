@@ -63,6 +63,22 @@ CI 中运行 `docker-smoke` 和 `postgres-rls`；本地继续使用临时 SQLite
 
 待外部环境验证。
 
+## Decision Record: Canonical runtime, storage registry and derived vector outbox
+
+**日期**: 2026-09-17
+**问题**: API/UI/CLI independently assembled services, UI session state acted as a dependency container, and vector synchronization failures were only process-local.
+
+### 决策
+
+**选择**: One process `RuntimeFactory` owns one Agent and one `StorageRegistry`; workspace coordinators are keyed by tenant/workspace/profile. `WorkspaceKnowledgeStore` schema v6 writes `knowledge_index_outbox` transactionally and `KnowledgeVectorProjector` owns derived vector updates.
+**理由**: This removes per-turn Store/engine construction, preserves tenant isolation, allows unrelated workspaces to execute concurrently, and makes index lag durable and recoverable.
+**Trade-offs**: Optional learning services and document/model adapters are initialized on first capability use. A pending outbox deliberately degrades search to literal retrieval until projection succeeds.
+**撤销条件**: Replace only when a durable external event bus/projector provides the same atomic write, replay, rebuild and tenant-scope guarantees.
+
+## Convention: Dependency profiles
+
+Base dependencies are the Runtime/CLI profile. UI, documents, vector-local, provider SDKs, LangChain, MCP, OCR, MinerU, voice and observability remain optional extras. The `dev` extra contains quality tools only; full test environments explicitly install `production,dev`. Archived documents are never treated as current dependency or architecture contracts.
+
 ## Decision Record: 工作流租户适配与 UI 学习服务生命周期
 
 **日期**: 2026-09-16

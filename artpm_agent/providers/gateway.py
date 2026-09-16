@@ -16,6 +16,10 @@ import re
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
+from artpm_agent.runtime.performance import (
+    begin_first_model_call,
+    finish_first_model_call,
+)
 from artpm_agent.utils import create_llm_client, get_logger
 
 logger = get_logger(__name__)
@@ -1129,19 +1133,25 @@ class ModelGateway:
                 if model_id and not self.is_model_available(model_id):
                     continue
                 client = client or self.client_for_model(model_id)
-                if image_paths:
-                    response = client.chat_with_images(
-                        prompt,
-                        image_paths,
-                        system_prompt=system_prompt,
-                        history=history,
-                    )
-                else:
-                    response = client.chat(
-                        prompt,
-                        system_prompt=system_prompt,
-                        history=history,
-                    )
+                first_call = begin_first_model_call()
+                try:
+                    if image_paths:
+                        response = client.chat_with_images(
+                            prompt,
+                            image_paths,
+                            system_prompt=system_prompt,
+                            history=history,
+                        )
+                    else:
+                        response = client.chat(
+                            prompt,
+                            system_prompt=system_prompt,
+                            history=history,
+                        )
+                except BaseException:
+                    finish_first_model_call(first_call, success=False)
+                    raise
+                finish_first_model_call(first_call, success=True)
                 if not isinstance(response, str) or not response.strip():
                     raise RuntimeError("模型服务未返回有效回答")
                 self.record_success(
@@ -1323,20 +1333,25 @@ class ModelGateway:
                 if model_id and not self.is_model_available(model_id):
                     continue
                 client = client or self.client_for_model(model_id)
+                first_call = begin_first_model_call()
                 stream_fn = getattr(client, "stream_chat_with_images", None)
-                if image_paths and stream_fn is not None:
-                    chunks = stream_fn(
-                        user_input,
-                        image_paths,
-                        system_prompt=system_prompt,
-                        history=history,
-                    )
-                else:
-                    chunks = client.stream_chat(
-                        user_input,
-                        system_prompt=system_prompt,
-                        history=history,
-                    )
+                try:
+                    if image_paths and stream_fn is not None:
+                        chunks = stream_fn(
+                            user_input,
+                            image_paths,
+                            system_prompt=system_prompt,
+                            history=history,
+                        )
+                    else:
+                        chunks = client.stream_chat(
+                            user_input,
+                            system_prompt=system_prompt,
+                            history=history,
+                        )
+                except BaseException:
+                    finish_first_model_call(first_call, success=False)
+                    raise
                 parts = []
                 chunks = iter(chunks)
                 try:
@@ -1344,6 +1359,8 @@ class ModelGateway:
                         if not isinstance(chunk, str) or not chunk:
                             continue
                         if not yielded:
+                            finish_first_model_call(first_call, success=True)
+                            first_call = None
                             self.record_success(
                                 model_id,
                                 primary_model if is_fallback else None,
@@ -1354,6 +1371,8 @@ class ModelGateway:
                         parts.append(chunk)
                         yield chunk
                 finally:
+                    if first_call is not None:
+                        finish_first_model_call(first_call, success=False)
                     close = getattr(chunks, "close", None)
                     if callable(close):
                         try:
