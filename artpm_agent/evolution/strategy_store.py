@@ -25,14 +25,14 @@ from artpm_agent.utils import generate_uuid
 class Strategy:
     """One learned rule that influences future turns."""
 
-    capability: str                       # handler / skill / "global"
-    rule_text: str                       # human-readable instruction
-    rationale: str = ""                  # why this strategy exists
-    risk: str = "low"                    # low | medium | high | critical
+    capability: str  # handler / skill / "global"
+    rule_text: str  # human-readable instruction
+    rationale: str = ""  # why this strategy exists
+    risk: str = "low"  # low | medium | high | critical
     tenant_id: str = "local"
     workspace_id: str = "local-default"
     active: bool = True
-    source: str = "reflection"           # reflection | feedback | manual
+    source: str = "reflection"  # reflection | feedback | manual
     hit_count: int = 0
     id: str = ""
     created_at: str = ""
@@ -134,7 +134,9 @@ class StrategyStore:
             requested_tenant = str(tenant_id or "").strip()
             requested_workspace = str(workspace_id or "").strip()
             if requested_tenant and requested_tenant != current.tenant_id:
-                raise WorkspaceAccessDenied("tenant does not match the authenticated context")
+                raise WorkspaceAccessDenied(
+                    "tenant does not match the authenticated context"
+                )
             if requested_workspace and requested_workspace != current.workspace_id:
                 raise WorkspaceAccessDenied(
                     "workspace does not match the authenticated context"
@@ -273,6 +275,18 @@ class StrategyStore:
                 "UPDATE strategies SET active = 0 WHERE id = ?", (strategy_id,)
             )
             return cur.rowcount > 0
+
+    def purge_scope(self, *, tenant_id: str, workspace_id: str) -> int:
+        """Delete learned strategies for one tenant/workspace scope."""
+        resolved_tenant, resolved_workspace = self._resolve_scope(
+            tenant_id, workspace_id
+        )
+        with self.db.get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM strategies WHERE tenant_id = ? AND workspace_id = ?",
+                (resolved_tenant, resolved_workspace),
+            )
+            return cursor.rowcount
 
 
 _DEFAULT_STORE: Optional["StrategyStore"] = None

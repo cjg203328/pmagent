@@ -36,6 +36,14 @@ Run the explicit pytest performance gate. The directory is outside the normal
 python -m pytest benchmarks/test_core_performance.py -q -s --no-cov
 ```
 
+Verify that chats for distinct workspaces execute concurrently instead of
+sharing a process-wide lock:
+
+```powershell
+python -m benchmarks.workspace_concurrency
+python -m pytest benchmarks/test_workspace_concurrency.py -q -s --no-cov
+```
+
 ## Thresholds
 
 Thresholds are P95 limits per logical operation:

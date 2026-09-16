@@ -6,8 +6,8 @@ from collections.abc import Callable
 from threading import RLock
 from typing import Any
 
-from artpm_agent.runtime.counters import increment_counter
 from artpm_agent.runtime.agent_factory import AgentFactory
+from artpm_agent.runtime.counters import increment_counter
 from artpm_agent.runtime.performance import import_module_timed
 from artpm_agent.runtime.storage_registry import StorageRegistry
 
@@ -111,7 +111,7 @@ class RuntimeFactory:
                 try:
                     service = build(import_module_timed(module_name))
                     increment_counter(f"runtime.service.{name}.constructed")
-                except Exception:
+                except Exception:  # noqa: BLE001 - optional learning capability
                     service = None
                 self._learning_services[name] = service
         return self._learning_services[name]
@@ -126,6 +126,18 @@ class RuntimeFactory:
             "consolidation_scheduler",
         )
         return {name: self.learning_service(name) for name in names}
+
+    def memory_lifecycle(self) -> Any:
+        """Return lifecycle governance bound to the existing learning stores."""
+        lifecycle = self.storage.lifecycle
+        learning = self.learning_services()
+        lifecycle.bind_auxiliary_stores(
+            episode_store=learning.get("episode_store"),
+            feedback_store=learning.get("feedback_store"),
+            strategy_store=learning.get("strategy_store"),
+            meta_memory_store=learning.get("meta_memory_store"),
+        )
+        return lifecycle
 
     def workflow_coordinator(
         self,

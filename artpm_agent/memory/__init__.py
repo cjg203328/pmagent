@@ -1,4 +1,5 @@
 """Memory module — 对话压缩、跨会话记忆与知识库管理。"""
+
 from .embeddings import (
     DeterministicEmbeddingProvider,
     EmbeddingProvider,
@@ -7,7 +8,7 @@ from .embeddings import (
 from .sqlite_manager import SQLiteManager
 from .vector_store import VectorStore
 from .contracts import VectorBackend
-from .memory_manager import MemoryManager
+from .memory_manager import LegacyWorkspaceWriteRetiredError, MemoryManager
 from .tencentdb_agent_memory import (
     TencentDBAgentMemoryClient,
     TencentDBAgentMemoryConfigurationError,
@@ -35,6 +36,7 @@ __all__ = [
     "EmbeddingProvider",
     "create_embedding_provider",
     "MemoryManager",
+    "LegacyWorkspaceWriteRetiredError",
     "TencentDBAgentMemoryClient",
     "TencentDBAgentMemoryConfigurationError",
     "TencentDBAgentMemoryError",

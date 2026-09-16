@@ -11,8 +11,8 @@ Validates the architecture closure:
 import ast
 import pathlib
 
-
 _CHAT = pathlib.Path("artpm_agent/views/chat.py")
+_CHAT_EXECUTION = pathlib.Path("artpm_agent/views/chat_execution.py")
 _TURN = pathlib.Path("artpm_agent/harness/turn_service.py")
 
 
@@ -42,9 +42,11 @@ def test_chat_has_no_unreachable_post_harness_fallback():
 
 
 def test_chat_routes_through_single_harness_call():
-    """chat.py calls execute_turn_with_harness as the sole non-fast path."""
+    """chat.py delegates once to the boundary that owns the Harness adapter."""
     src = _source(_CHAT)
-    assert src.count("execute_turn_with_harness(") == 1
+    execution_src = _source(_CHAT_EXECUTION)
+    assert src.count("execute_chat_turn(") == 1
+    assert execution_src.count("execute_turn_with_harness(") == 1
     # Fast path bypasses the harness; everything else goes through it.
     assert "if local_fast:" in src
     assert "else:" in src

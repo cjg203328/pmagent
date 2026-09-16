@@ -129,9 +129,7 @@ class EpisodeStore:
                 ("principal_id", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if name not in columns:
-                    conn.execute(
-                        f"ALTER TABLE episodes ADD COLUMN {name} {definition}"
-                    )
+                    conn.execute(f"ALTER TABLE episodes ADD COLUMN {name} {definition}")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_episodes_handler ON episodes(handler)"
             )
@@ -407,8 +405,7 @@ class EpisodeStore:
         clauses = ["turn_id = ?"] + scope_clauses
         with self.db.get_connection() as conn:
             cur = conn.execute(
-                "UPDATE episodes SET feedback = ? WHERE "
-                + " AND ".join(clauses),
+                "UPDATE episodes SET feedback = ? WHERE " + " AND ".join(clauses),
                 [feedback_text, turn_id] + scope_params,
             )
             rowcount = cur.rowcount
@@ -456,9 +453,7 @@ class EpisodeStore:
                 clauses.append("created_at >= ?")
                 params.append(since)
             where = " WHERE " + " AND ".join(clauses) if clauses else ""
-            failed_where = (
-                where + (" AND " if where else " WHERE ") + "success = 0"
-            )
+            failed_where = where + (" AND " if where else " WHERE ") + "success = 0"
             total = conn.execute(
                 "SELECT COUNT(*) FROM episodes" + where,
                 params,
@@ -471,3 +466,17 @@ class EpisodeStore:
         if r is not None:
             cache_set_json(ck, rate, ttl=30)
         return rate
+
+    def purge_scope(self, *, tenant_id: str, workspace_id: str) -> int:
+        """Delete every episode owned by one trusted tenant/workspace scope."""
+        resolved_tenant, resolved_workspace, _ = self._resolve_scope(
+            tenant_id, workspace_id, None
+        )
+        with self.db.get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM episodes WHERE tenant_id = ? AND workspace_id = ?",
+                (resolved_tenant, resolved_workspace),
+            )
+            count = cursor.rowcount
+        self._invalidate_redis_caches()
+        return count

@@ -286,9 +286,10 @@ def test_vector_store_performance_comparison():
     for i, vec in enumerate(vectors):
         store_flat.add(f"doc_{i}", vec)
 
-    start = time.time()
-    results_flat = store_flat.search(query, top_k=10)
-    flat_time = time.time() - start
+    start = time.perf_counter_ns()
+    for _ in range(100):
+        results_flat = store_flat.search(query, top_k=10)
+    flat_time = max(1, time.perf_counter_ns() - start) / 1_000_000_000
 
     # Test IVF index
     store_ivf = AdaptiveVectorStore(
@@ -300,9 +301,10 @@ def test_vector_store_performance_comparison():
     for i, vec in enumerate(vectors):
         store_ivf.add(f"doc_{i}", vec)
 
-    start = time.time()
-    results_ivf = store_ivf.search(query, top_k=10)
-    ivf_time = time.time() - start
+    start = time.perf_counter_ns()
+    for _ in range(100):
+        results_ivf = store_ivf.search(query, top_k=10)
+    ivf_time = max(1, time.perf_counter_ns() - start) / 1_000_000_000
 
     print(f"Flat search: {flat_time*1000:.2f}ms")
     print(f"IVF search: {ivf_time*1000:.2f}ms")

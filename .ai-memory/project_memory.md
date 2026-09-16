@@ -108,3 +108,15 @@ Base dependencies are the Runtime/CLI profile. UI, documents, vector-local, prov
 ### 撤销条件
 
 当所有 UI 注入路由都实现强制租户绑定协议，并且学习服务由统一的进程级依赖容器管理时，可删除 UI 兼容回退和 Streamlit session cache。
+
+## Decision Record: Memory lifecycle and leased vector projection
+
+**日期**: 2026-09-17
+**问题**: The knowledge authority had a durable outbox but no explicit retention, deletion/export/offboarding contract, worker lease, bounded retry or dead-letter visibility.
+
+### 决策
+
+**选择**: Schema v7 keeps outbox rows in `pending/processing/done/dead`, uses atomic leases and exponential retry, and exposes queue/dead-letter/lag metrics. `MemoryLifecycleService` owns export, safe compaction, exact-confirmation deletion, tenant offboarding and vector rebuild tombstones. Current knowledge and accepted rules never expire automatically.
+**理由**: Authority deletion and derived-index cleanup become independently observable; concurrent projectors cannot duplicate the same claim; a failed vector backend cannot be mistaken for completed tenant erasure.
+**Trade-offs**: Completed outbox rows are retained for 30 days before compaction, and tenant offboarding may return `index_cleanup_pending` until the vector backend recovers.
+**撤销条件**: Replace only with an external queue/lifecycle service that preserves atomic enqueue, scoped export/deletion, lease recovery, dead-letter visibility and rebuildability.

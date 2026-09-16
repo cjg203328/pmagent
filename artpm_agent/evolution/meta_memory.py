@@ -156,9 +156,7 @@ class MetaMemory:
         # intentionally omit it (for example when the context budget is full)
         # while the knowledge store still returned a high-confidence hit.  A
         # real hit therefore counts as retrieval evidence on its own.
-        retrieval_empty = not (
-            bool((retrieved_block or "").strip()) or has_hits
-        )
+        retrieval_empty = not (bool((retrieved_block or "").strip()) or has_hits)
 
         # 1) 已知：检索有结果且置信度达标
         if not retrieval_empty and best_conf >= self.confidence_threshold:
@@ -256,13 +254,11 @@ def format_meta_memory_context(report: MetaMemoryReport) -> str:
     for g in report.gaps:
         if g.suggested_action == "search":
             lines.append(
-                f"- 知识缺口（{g.kind}）：建议主动联网检索「{g.topic}」"
-                f"[{g.detail}]"
+                f"- 知识缺口（{g.kind}）：建议主动联网检索「{g.topic}」[{g.detail}]"
             )
         else:
             lines.append(
-                f"- 知识缺口（{g.kind}）：建议向用户澄清「{g.topic}」"
-                f"[{g.detail}]"
+                f"- 知识缺口（{g.kind}）：建议向用户澄清「{g.topic}」[{g.detail}]"
             )
     return "【元记忆：知识缺口与建议】\n" + "\n".join(lines)
 
@@ -349,7 +345,9 @@ class MetaMemoryStore:
         conn.execute("ALTER TABLE meta_gaps RENAME TO meta_gaps_legacy")
         cls._create_scoped_schema(conn)
         tenant_expr = "tenant_id" if "tenant_id" in columns else "'local'"
-        workspace_expr = "workspace_id" if "workspace_id" in columns else "'local-default'"
+        workspace_expr = (
+            "workspace_id" if "workspace_id" in columns else "'local-default'"
+        )
         principal_expr = "principal_id" if "principal_id" in columns else "''"
         conn.execute(
             """
@@ -360,7 +358,8 @@ class MetaMemoryStore:
             SELECT topic, %s, %s, %s, kind, suggested_action, detail,
                    first_seen, last_seen, seen_count
             FROM meta_gaps_legacy
-            """ % (tenant_expr, workspace_expr, principal_expr)
+            """
+            % (tenant_expr, workspace_expr, principal_expr)
         )
         conn.execute("DROP TABLE meta_gaps_legacy")
 
@@ -503,6 +502,18 @@ class MetaMemoryStore:
                 params,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def purge_scope(self, *, tenant_id: str, workspace_id: str) -> int:
+        """Delete accumulated knowledge-gap observations for one workspace."""
+        resolved_tenant, resolved_workspace, _ = self._resolve_scope(
+            tenant_id, workspace_id, None
+        )
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM meta_gaps WHERE tenant_id = ? AND workspace_id = ?",
+                (resolved_tenant, resolved_workspace),
+            )
+            return cursor.rowcount
 
 
 # ---- 惰性单例 ------------------------------------------------------------

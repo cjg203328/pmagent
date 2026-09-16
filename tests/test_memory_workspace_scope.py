@@ -6,13 +6,29 @@ from types import SimpleNamespace
 import pytest
 
 from artpm_agent.harness.memory_retrieval import retrieve_memory_context
-from artpm_agent.memory import MemoryManager
+from artpm_agent.memory import (
+    LegacyWorkspaceWriteRetiredError,
+    MemoryManager as _MemoryManager,
+)
 from artpm_agent.request_orchestrator import RequestOrchestrator
 from artpm_agent.tenancy import (
     TenantContext,
     TenantContextManager,
     WorkspaceAccessDenied,
 )
+
+
+def MemoryManager(*args, **kwargs):
+    """Build the explicitly opted-in legacy fixture used by migration tests."""
+    kwargs.setdefault("allow_legacy_workspace_writes", True)
+    return _MemoryManager(*args, **kwargs)
+
+
+def test_unbound_memory_manager_rejects_retired_workspace_writes(tmp_path):
+    memory = _MemoryManager(str(tmp_path / "memory.db"), str(tmp_path / "vectors"))
+
+    with pytest.raises(LegacyWorkspaceWriteRetiredError, match="retired"):
+        memory.save_document({"raw_text": "must use canonical knowledge"})
 
 
 def test_memory_manager_retrieval_is_scoped_to_workspace(tmp_path):
@@ -108,13 +124,14 @@ def test_memory_manager_migrates_legacy_document_table_to_local_workspace(tmp_pa
     memory = MemoryManager(str(database_path), str(tmp_path / "vectors"))
 
     with sqlite3.connect(database_path) as connection:
-        columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(documents)")
-        }
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(documents)")}
     assert "workspace_id" in columns
-    assert memory.retrieve(
-        "legacy memory", filters={"workspace_id": "local-default"}
-    )[0]["id"] == "legacy-doc"
+    assert (
+        memory.retrieve("legacy memory", filters={"workspace_id": "local-default"})[0][
+            "id"
+        ]
+        == "legacy-doc"
+    )
 
 
 def test_memory_manager_uses_current_tenant_scope_and_rejects_conflicts(tmp_path):
@@ -174,12 +191,8 @@ def test_memory_manager_isolates_tenants_sharing_a_workspace(tmp_path):
         }
     )
 
-    tenant_a = TenantContext(
-        tenant_id="tenant-a", workspace_id="shared-workspace"
-    )
-    tenant_b = TenantContext(
-        tenant_id="tenant-b", workspace_id="shared-workspace"
-    )
+    tenant_a = TenantContext(tenant_id="tenant-a", workspace_id="shared-workspace")
+    tenant_b = TenantContext(tenant_id="tenant-b", workspace_id="shared-workspace")
 
     assert [
         item["id"]
@@ -263,16 +276,22 @@ def test_episode_store_filters_workspace_and_principal_scope(tmp_path):
         )
     )
 
-    assert [episode.turn_id for episode in store.recent(
-        tenant_id="tenant-a",
-        workspace_id="workspace-a",
-        principal_id="user-a",
-    )] == ["turn-a"]
-    assert store.count(
-        tenant_id="tenant-a",
-        workspace_id="workspace-a",
-        all_principals=True,
-    ) == 2
+    assert [
+        episode.turn_id
+        for episode in store.recent(
+            tenant_id="tenant-a",
+            workspace_id="workspace-a",
+            principal_id="user-a",
+        )
+    ] == ["turn-a"]
+    assert (
+        store.count(
+            tenant_id="tenant-a",
+            workspace_id="workspace-a",
+            all_principals=True,
+        )
+        == 2
+    )
     assert store.failure_rate(
         tenant_id="tenant-a",
         workspace_id="workspace-a",
@@ -297,23 +316,32 @@ def test_episode_store_feedback_update_respects_scope(tmp_path):
             )
         )
 
-    assert store.set_feedback(
-        "same-turn-id",
-        "workspace-a feedback",
-        tenant_id="tenant-a",
-        workspace_id="workspace-a",
-        principal_id="user-a",
-    ) == 1
-    assert store.recent_feedback(
-        tenant_id="tenant-a",
-        workspace_id="workspace-a",
-        principal_id="user-a",
-    )[0].feedback == "workspace-a feedback"
-    assert store.recent_feedback(
-        tenant_id="tenant-a",
-        workspace_id="workspace-b",
-        principal_id="user-a",
-    ) == []
+    assert (
+        store.set_feedback(
+            "same-turn-id",
+            "workspace-a feedback",
+            tenant_id="tenant-a",
+            workspace_id="workspace-a",
+            principal_id="user-a",
+        )
+        == 1
+    )
+    assert (
+        store.recent_feedback(
+            tenant_id="tenant-a",
+            workspace_id="workspace-a",
+            principal_id="user-a",
+        )[0].feedback
+        == "workspace-a feedback"
+    )
+    assert (
+        store.recent_feedback(
+            tenant_id="tenant-a",
+            workspace_id="workspace-b",
+            principal_id="user-a",
+        )
+        == []
+    )
 
 
 def test_memory_manager_rejects_explicit_context_conflicting_with_current(tmp_path):

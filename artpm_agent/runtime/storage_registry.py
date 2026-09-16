@@ -131,9 +131,13 @@ class StorageRegistry:
         def build():
             profiles = import_module_timed("artpm_agent.profiles")
             policy = profiles.QuotePolicy(
-                overhead_rate=float(_config_get(self.config, "cost_config.overhead_rate", 0.15)),
+                overhead_rate=float(
+                    _config_get(self.config, "cost_config.overhead_rate", 0.15)
+                ),
                 tax_rate=float(_config_get(self.config, "cost_config.tax_rate", 0.06)),
-                currency=str(_config_get(self.config, "cost_config.currency", "CNY")).upper(),
+                currency=str(
+                    _config_get(self.config, "cost_config.currency", "CNY")
+                ).upper(),
             )
             return profiles.AgentProfileStore(
                 self.db_path,
@@ -160,6 +164,14 @@ class StorageRegistry:
             )
 
         return self._get("artifact_generator", build)
+
+    @property
+    def lifecycle(self):
+        def build():
+            module = import_module_timed("artpm_agent.memory.lifecycle")
+            return module.MemoryLifecycleService(self)
+
+        return self._get("memory_lifecycle", build)
 
     def snapshot(self) -> dict[str, bool]:
         with self._lock:

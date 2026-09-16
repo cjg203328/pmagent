@@ -53,8 +53,9 @@ The API returns only workspaces visible to the authenticated tenant. Search
 results are normalized to `RetrievalHit` and include citation metadata. A
 vector index is a derived accelerator and never a source of truth.
 Knowledge writes enqueue `knowledge_index_outbox` in the same SQLite
-transaction. `KnowledgeVectorProjector` consumes that durable work after
-commit. While work is pending or failed, retrieval uses the authoritative
+transaction. After commit, `KnowledgeVectorProjector` claims that work with
+leases, bounded exponential retry, and dead-letter visibility. While work is
+pending or failed, retrieval uses the authoritative
 literal path; a full index can always be rebuilt from current resource rows.
 
 ## Retrieval

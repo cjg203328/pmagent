@@ -30,6 +30,12 @@ scope checks and migration history. Sharing a SQLite file is not permission to
 join tables or copy records across those boundaries.
 
 `MemoryManager.save_document()` is a counted compatibility facade. Canonical
-runtimes bind it to `WorkspaceKnowledgeStore`; unbound standalone instances
-exist only for compatibility tests and legacy integrations. New workspace
-facts must enter `WorkspaceKnowledgeStore.knowledge_resources`.
+runtimes bind it to `WorkspaceKnowledgeStore`; unbound writes are retired and
+raise `LegacyWorkspaceWriteRetiredError`. Migration tests may opt into the old
+path explicitly, but new workspace facts must enter
+`WorkspaceKnowledgeStore.knowledge_resources`.
+
+Retention, export, compaction, user deletion, tenant offboarding, and derived
+vector cleanup are governed by `MEMORY_LIFECYCLE.md` and the executable
+`MemoryLifecycleService`. A deletion is not complete while vector cleanup is
+pending or dead-lettered.

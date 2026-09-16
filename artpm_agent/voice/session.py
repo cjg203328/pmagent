@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
 import json
 import re
-from typing import Any, Callable, Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any
 from uuid import uuid4
 
 from .config import VoiceSettings, get_voice_settings
 from .contracts import VoiceConfigurationError, VoiceUnavailableError
-
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
 
@@ -39,7 +39,7 @@ class VoiceSessionContext:
         return json.dumps(asdict(self), ensure_ascii=True, separators=(",", ":"))
 
     @classmethod
-    def from_json(cls, value: str | bytes | Mapping[str, Any]) -> "VoiceSessionContext":
+    def from_json(cls, value: str | bytes | Mapping[str, Any]) -> VoiceSessionContext:
         if isinstance(value, Mapping):
             payload = dict(value)
         else:
@@ -96,6 +96,7 @@ class VoiceSessionBroker:
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self.settings = settings or get_voice_settings()
+        self._custom_token_issuer = token_issuer is not None
         self._token_issuer = token_issuer or self._issue_livekit_token
         self._now = now or (lambda: datetime.now(timezone.utc))
 
@@ -113,7 +114,10 @@ class VoiceSessionBroker:
             raise VoiceUnavailableError("voice channel is not enabled")
         if not self.settings.livekit_configured:
             raise VoiceUnavailableError("LiveKit is not configured")
-        if not self.settings.optional_dependencies_installed:
+        if (
+            not self._custom_token_issuer
+            and not self.settings.optional_dependencies_installed
+        ):
             raise VoiceUnavailableError("voice dependencies are not installed")
         if not self.settings.stt_configured:
             raise VoiceUnavailableError("speech recognition is not configured")

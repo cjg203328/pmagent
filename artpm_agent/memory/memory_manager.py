@@ -1,6 +1,7 @@
 """
 Memory Manager - Unified interface for short-term and long-term memory
 """
+
 from hashlib import sha256
 import json
 from math import isfinite
@@ -8,7 +9,10 @@ import re
 from collections.abc import Mapping
 from typing import Dict, Any, List, Optional
 
-from artpm_agent.memory.embeddings import DeterministicEmbeddingProvider, EmbeddingProvider
+from artpm_agent.memory.embeddings import (
+    DeterministicEmbeddingProvider,
+    EmbeddingProvider,
+)
 from artpm_agent.memory.sqlite_manager import SQLiteManager
 from artpm_agent.memory.vector_store import VectorStore
 from artpm_agent.runtime.counters import increment_counter
@@ -18,6 +22,10 @@ from artpm_agent.tenancy import (
     WorkspaceAccessDenied,
 )
 from artpm_agent.utils import generate_uuid
+
+
+class LegacyWorkspaceWriteRetiredError(RuntimeError):
+    """Raised when an unbound legacy workspace write is attempted."""
 
 
 class MemoryManager:
@@ -35,6 +43,8 @@ class MemoryManager:
         llm_client=None,
         embedding_provider: Optional[EmbeddingProvider] = None,
         workspace_knowledge_store: Any = None,
+        *,
+        allow_legacy_workspace_writes: bool = False,
     ):
         """
         Initialize memory manager
@@ -44,9 +54,7 @@ class MemoryManager:
             vector_db_path: Vector store path
             llm_client: LLM client for generating embeddings
         """
-        self.embedding_provider = (
-            embedding_provider or DeterministicEmbeddingProvider()
-        )
+        self.embedding_provider = embedding_provider or DeterministicEmbeddingProvider()
         self.db = SQLiteManager(db_path)
         self.vector_db = VectorStore(
             vector_db_path,
@@ -55,6 +63,7 @@ class MemoryManager:
         )
         self.llm_client = llm_client
         self.workspace_knowledge_store = workspace_knowledge_store
+        self.allow_legacy_workspace_writes = bool(allow_legacy_workspace_writes)
         self._sync_vector_index()
 
     def bind_workspace_knowledge_store(self, store: Any) -> None:
@@ -103,8 +112,7 @@ class MemoryManager:
         if tenant_id is not None:
             if (
                 requested_document_tenant is not None
-                and str(requested_document_tenant).strip()
-                != str(tenant_id).strip()
+                and str(requested_document_tenant).strip() != str(tenant_id).strip()
             ):
                 raise WorkspaceAccessDenied("tenant_id values conflict")
             requested_document_tenant = tenant_id
@@ -123,13 +131,10 @@ class MemoryManager:
         if context is not None:
             if not isinstance(context, TenantContext):
                 raise TypeError("tenant_context must be a TenantContext")
-            resolved_workspace = context.require_workspace(
-                requested_document_workspace
-            )
+            resolved_workspace = context.require_workspace(requested_document_workspace)
             if (
                 requested_document_tenant is not None
-                and str(requested_document_tenant).strip()
-                != context.tenant_id
+                and str(requested_document_tenant).strip() != context.tenant_id
             ):
                 raise WorkspaceAccessDenied("tenant_id values conflict")
             resolved_tenant = context.tenant_id
@@ -158,11 +163,7 @@ class MemoryManager:
         if knowledge_store is not None:
             resource = knowledge_store.ingest_resource(
                 resource_id=str(doc_id),
-                title=str(
-                    document.get("title")
-                    or document.get("file_name")
-                    or doc_id
-                ),
+                title=str(document.get("title") or document.get("file_name") or doc_id),
                 searchable_text=str(document.get("raw_text") or ""),
                 resource_type=str(document.get("document_type") or "document"),
                 source_type=str(document.get("source") or "memory-manager-facade"),
@@ -176,19 +177,31 @@ class MemoryManager:
             )
             return str(resource["id"])
 
+        if not self.allow_legacy_workspace_writes:
+            increment_counter("legacy.memory_manager.unbound_write_rejected")
+            raise LegacyWorkspaceWriteRetiredError(
+                "MemoryManager workspace writes are retired; bind "
+                "WorkspaceKnowledgeStore or write through StorageRegistry.knowledge"
+            )
+
         # Save to structured database
-        self.db.insert("documents", {
-            "id": doc_id,
-            "tenant_id": resolved_tenant,
-            "workspace_id": resolved_workspace,
-            "document_type": document.get("document_type", "unknown"),
-            "source": document.get("source", "local"),
-            "file_path": document.get("file_path", ""),
-            "file_hash": document.get("file_hash", ""),
-            "extracted_data": json.dumps(document.get("extracted_data", {}), ensure_ascii=False),
-            "raw_text": document.get("raw_text", "")[:10000],  # Truncate
-            "confidence": document.get("confidence", 0.0)
-        })
+        self.db.insert(
+            "documents",
+            {
+                "id": doc_id,
+                "tenant_id": resolved_tenant,
+                "workspace_id": resolved_workspace,
+                "document_type": document.get("document_type", "unknown"),
+                "source": document.get("source", "local"),
+                "file_path": document.get("file_path", ""),
+                "file_hash": document.get("file_hash", ""),
+                "extracted_data": json.dumps(
+                    document.get("extracted_data", {}), ensure_ascii=False
+                ),
+                "raw_text": document.get("raw_text", "")[:10000],  # Truncate
+                "confidence": document.get("confidence", 0.0),
+            },
+        )
 
         # Generate embedding and save to vector store
         if self.vector_db.available:
@@ -232,18 +245,14 @@ class MemoryManager:
         query = query.strip()
         if len(query) > self.MAX_RETRIEVE_QUERY_CHARS:
             raise ValueError(
-                "query cannot exceed "
-                f"{self.MAX_RETRIEVE_QUERY_CHARS} characters"
+                f"query cannot exceed {self.MAX_RETRIEVE_QUERY_CHARS} characters"
             )
         if (
             isinstance(top_k, bool)
             or not isinstance(top_k, int)
             or not 1 <= top_k <= self.MAX_RETRIEVE_TOP_K
         ):
-            raise ValueError(
-                "top_k must be between 1 and "
-                f"{self.MAX_RETRIEVE_TOP_K}"
-            )
+            raise ValueError(f"top_k must be between 1 and {self.MAX_RETRIEVE_TOP_K}")
         tenant_scope, scope, scoped_filters = self._resolve_retrieval_scope(
             filters,
             workspace_id=workspace_id,
@@ -288,8 +297,7 @@ class MemoryManager:
                     if not isinstance(meta, Mapping):
                         continue
                     if all(
-                        meta.get(key) == value
-                        for key, value in scoped_filters.items()
+                        meta.get(key) == value for key, value in scoped_filters.items()
                     ):
                         raw_score = r.get("score")
                         if isinstance(raw_score, bool):
@@ -331,12 +339,14 @@ class MemoryManager:
                         and doc_record.get("tenant_id") == tenant_scope
                         and doc_record.get("workspace_id") == scope
                     ):
-                        results.append({
-                            "id": doc_id,
-                            "score": r["score"],
-                            "metadata": r["metadata"],
-                            "data": doc_record
-                        })
+                        results.append(
+                            {
+                                "id": doc_id,
+                                "score": r["score"],
+                                "metadata": r["metadata"],
+                                "data": doc_record,
+                            }
+                        )
             except Exception as e:
                 print(f"[Warning] Vector search failed: {e}")
 
@@ -373,8 +383,7 @@ class MemoryManager:
                 ranked.sort(key=lambda item: (-item[0], str(item[1].get("id", ""))))
                 docs = [doc for _score, doc in ranked]
             results = [
-                {"id": doc["id"], "score": 1.0, "data": doc}
-                for doc in docs[:top_k]
+                {"id": doc["id"], "score": 1.0, "data": doc} for doc in docs[:top_k]
             ]
 
         return results
@@ -464,9 +473,7 @@ class MemoryManager:
                 raise WorkspaceAccessDenied("tenant_id filters conflict")
             tenant_scope = context.tenant_id
         else:
-            tenant_scope = str(
-                requested_tenant or self.DEFAULT_TENANT_ID
-            ).strip()
+            tenant_scope = str(requested_tenant or self.DEFAULT_TENANT_ID).strip()
             if not tenant_scope:
                 tenant_scope = self.DEFAULT_TENANT_ID
             scope = str(requested_workspace or self.DEFAULT_WORKSPACE_ID).strip()
@@ -523,7 +530,9 @@ class MemoryManager:
                 try:
                     member["skills"] = json.loads(skills)
                 except json.JSONDecodeError:
-                    member["skills"] = [item.strip() for item in skills.split(",") if item.strip()]
+                    member["skills"] = [
+                        item.strip() for item in skills.split(",") if item.strip()
+                    ]
         return staff
 
     def has_worked_together(self, project_id: str, staff_id: str) -> bool:
@@ -564,7 +573,9 @@ class MemoryManager:
                 extracted = extracted[:2000]
         if extracted:
             try:
-                parts.append(json.dumps(extracted, ensure_ascii=False, sort_keys=True)[:2000])
+                parts.append(
+                    json.dumps(extracted, ensure_ascii=False, sort_keys=True)[:2000]
+                )
             except (TypeError, ValueError):
                 parts.append(str(extracted)[:2000])
 
@@ -575,8 +586,7 @@ class MemoryManager:
         if not self.vector_db.available:
             return
         current = {
-            item["id"]: item["metadata"]
-            for item in self.vector_db.list_entries()
+            item["id"]: item["metadata"] for item in self.vector_db.list_entries()
         }
         documents = self.db.query("documents", {})
         specs = []
@@ -603,8 +613,7 @@ class MemoryManager:
             )
             return
         changed = [
-            item for item in specs
-            if current.get(item["id"]) != item["metadata"]
+            item for item in specs if current.get(item["id"]) != item["metadata"]
         ]
         removed_ids = set(current) - set(desired)
         if changed or removed_ids:
@@ -631,9 +640,7 @@ class MemoryManager:
             except json.JSONDecodeError:
                 extracted = {}
         project_info = (
-            extracted.get("project_info", {})
-            if isinstance(extracted, dict)
-            else {}
+            extracted.get("project_info", {}) if isinstance(extracted, dict) else {}
         )
         return {
             "tenant_id": str(doc_data.get("tenant_id") or "local"),
@@ -642,9 +649,7 @@ class MemoryManager:
             "project_name": project_info.get("project_name", ""),
             "client_name": project_info.get("client_name", ""),
             "date": project_info.get("document_date", ""),
-            "embedding_hash": sha256(
-                embedding_text.encode("utf-8")
-            ).hexdigest(),
+            "embedding_hash": sha256(embedding_text.encode("utf-8")).hexdigest(),
         }
 
     def _get_embedding(self, text: str) -> List[float]:
@@ -665,3 +670,6 @@ class MemoryManager:
             Embedding vector as list of floats
         """
         return self.embedding_provider.embed(text)
+
+
+__all__ = ["LegacyWorkspaceWriteRetiredError", "MemoryManager"]

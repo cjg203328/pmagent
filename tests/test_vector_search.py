@@ -8,11 +8,16 @@ APP_ROOT = PROJECT_ROOT / "artpm_agent"
 
 from artpm_agent.memory import (
     DeterministicEmbeddingProvider,
-    MemoryManager,
+    MemoryManager as _MemoryManager,
     VectorStore,
     WorkspaceKnowledgeStore,
 )
 import pytest
+
+
+def MemoryManager(*args, **kwargs):
+    kwargs.setdefault("allow_legacy_workspace_writes", True)
+    return _MemoryManager(*args, **kwargs)
 
 
 class SemanticTestEmbedding:
@@ -76,10 +81,13 @@ def test_vector_store_persists_upserts_and_metadata_filters(tmp_path):
     )
 
     assert store.count == 2
-    assert store.search(
-        provider.embed("角色报价预算"),
-        filters={"workspace_id": "studio-a"},
-    )[0]["id"] == "doc-a"
+    assert (
+        store.search(
+            provider.embed("角色报价预算"),
+            filters={"workspace_id": "studio-a"},
+        )[0]["id"]
+        == "doc-a"
+    )
 
     store.upsert(
         id="doc-a",
@@ -87,9 +95,12 @@ def test_vector_store_persists_upserts_and_metadata_filters(tmp_path):
         metadata={"workspace_id": "studio-a", "version": 2},
     )
     assert store.count == 2
-    assert next(
-        item for item in store.list_entries() if item["id"] == "doc-a"
-    )["metadata"]["version"] == 2
+    assert (
+        next(item for item in store.list_entries() if item["id"] == "doc-a")[
+            "metadata"
+        ]["version"]
+        == 2
+    )
 
     reopened = VectorStore(
         path,
@@ -287,9 +298,7 @@ def test_memory_manager_rebuilds_missing_index_from_sqlite(tmp_path):
         {
             "document_type": "报价单",
             "raw_text": "角色项目报价和制作预算",
-            "extracted_data": {
-                "project_info": {"project_name": "角色项目"}
-            },
+            "extracted_data": {"project_info": {"project_name": "角色项目"}},
         }
     )
     assert memory.vector_db.count == 1

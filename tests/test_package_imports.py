@@ -1,8 +1,9 @@
 import os
-from pathlib import Path
+import shutil
 import subprocess
 import sys
-
+import zipfile
+from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -59,18 +60,10 @@ def test_built_wheel_contains_and_imports_application_modules(tmp_path):
     install_dir = tmp_path / "installed"
     wheel_dir.mkdir()
 
+    uv = shutil.which("uv")
+    assert uv, "uv is required to build the package in the managed test runtime"
     build = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "wheel",
-            str(PROJECT_ROOT),
-            "--no-deps",
-            "--no-build-isolation",
-            "--wheel-dir",
-            str(wheel_dir),
-        ],
+        [uv, "build", "--wheel", "--out-dir", str(wheel_dir), str(PROJECT_ROOT)],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -80,24 +73,9 @@ def test_built_wheel_contains_and_imports_application_modules(tmp_path):
     assert build.returncode == 0, build.stderr
     wheel = next(wheel_dir.glob("artpm_agent-*.whl"))
 
-    install = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--no-deps",
-            "--target",
-            str(install_dir),
-            str(wheel),
-        ],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    assert install.returncode == 0, install.stderr
+    install_dir.mkdir()
+    with zipfile.ZipFile(wheel) as archive:
+        archive.extractall(install_dir)
 
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(install_dir)

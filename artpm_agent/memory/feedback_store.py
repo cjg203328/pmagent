@@ -24,10 +24,10 @@ from artpm_agent.utils import generate_uuid
 
 
 # Kinds of feedback/preference we persist.
-KIND_PREFERENCE = "preference"   # a general preference ("prefer concise replies")
-KIND_AVOID = "avoid"             # "don't do X"
-KIND_CORRECTION = "correction"   # an explicit correction of a past answer
-KIND_BLACKLIST = "blacklist"     # hard block a capability/skill/handler
+KIND_PREFERENCE = "preference"  # a general preference ("prefer concise replies")
+KIND_AVOID = "avoid"  # "don't do X"
+KIND_CORRECTION = "correction"  # an explicit correction of a past answer
+KIND_BLACKLIST = "blacklist"  # hard block a capability/skill/handler
 
 
 @dataclass
@@ -36,7 +36,7 @@ class FeedbackEntry:
 
     kind: str
     content: str
-    scope: str = "global"          # global | handler name | skill name | client
+    scope: str = "global"  # global | handler name | skill name | client
     tenant_id: str = "local"
     workspace_id: str = "local-default"
     principal_id: str = ""
@@ -140,7 +140,9 @@ class FeedbackStore:
             requested_workspace = str(workspace_id or "").strip()
             requested_principal = str(principal_id or "").strip()
             if requested_tenant and requested_tenant != current.tenant_id:
-                raise WorkspaceAccessDenied("tenant does not match the authenticated context")
+                raise WorkspaceAccessDenied(
+                    "tenant does not match the authenticated context"
+                )
             if requested_workspace and requested_workspace != current.workspace_id:
                 raise WorkspaceAccessDenied(
                     "workspace does not match the authenticated context"
@@ -247,8 +249,8 @@ class FeedbackStore:
             value is not None for value in (tenant_id, workspace_id, principal_id)
         )
         if scoped:
-            resolved_tenant, resolved_workspace, resolved_principal = self._resolve_scope(
-                tenant_id, workspace_id, principal_id
+            resolved_tenant, resolved_workspace, resolved_principal = (
+                self._resolve_scope(tenant_id, workspace_id, principal_id)
             )
             clauses.extend(
                 [
@@ -257,9 +259,7 @@ class FeedbackStore:
                     "(principal_id = ? OR principal_id = '')",
                 ]
             )
-            params.extend(
-                [resolved_tenant, resolved_workspace, resolved_principal]
-            )
+            params.extend([resolved_tenant, resolved_workspace, resolved_principal])
         sql = (
             "SELECT * FROM feedback WHERE "
             + " AND ".join(clauses)
@@ -278,6 +278,18 @@ class FeedbackStore:
                 "SELECT * FROM feedback WHERE id = ?", (entry_id,)
             ).fetchone()
         return _row_to_entry(row) if row else None
+
+    def purge_scope(self, *, tenant_id: str, workspace_id: str) -> int:
+        """Delete all explicit feedback and preferences for one workspace."""
+        resolved_tenant, resolved_workspace, _ = self._resolve_scope(
+            tenant_id, workspace_id, None
+        )
+        with self.db.get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM feedback WHERE tenant_id = ? AND workspace_id = ?",
+                (resolved_tenant, resolved_workspace),
+            )
+            return cursor.rowcount
 
 
 _DEFAULT_STORE: Optional["FeedbackStore"] = None

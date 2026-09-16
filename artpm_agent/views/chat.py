@@ -36,8 +36,6 @@ from artpm_agent.ui_helpers import (
     extract_knowledge_rule,  # For knowledge rule extraction (not yet in harness)
 )
 
-# Phase 3 Stage 4: Import harness integration helper
-from artpm_agent.internal.chat_harness_integration import execute_turn_with_harness
 from artpm_agent.ui_feedback import build_error_info, render_error_callback
 from artpm_agent.ui_feedback import build_attachment_error_info
 from artpm_agent.security import (
@@ -60,6 +58,11 @@ from artpm_agent.views.chat_model_selector import (
     get_current_model,
     apply_model_override_to_agent,
 )
+from artpm_agent.views.chat_execution import HarnessTurnServices, execute_chat_turn
+from artpm_agent.views.chat_feedback import render_turn_feedback as render_feedback_control
+from artpm_agent.views.chat_message_rendering import render_completed_message
+from artpm_agent.views.chat_turn import queue_suggested_prompt
+from artpm_agent.views.chat_welcome import render_welcome_suggestions
 
 _LEGACY_MODEL_RUNTIME_RE = re.compile(
     r"当前配置的生成模型 ID 是 \*\*`(?P<model>[^`]+)`\*\*.*?"
@@ -766,23 +769,20 @@ def chat_page():
                         st.rerun()
                 else:
                     # 非错误消息的正常渲染
-                    display_content = (
-                        _compact_legacy_assistant_copy(content)
-                        if role == "assistant"
-                        else content
+                    render_completed_message(
+                        st,
+                        role=role,
+                        content=content,
+                        message=msg,
+                        index=index,
+                        compact_assistant_copy=_compact_legacy_assistant_copy,
+                        render_attachments=_render_message_attachments,
+                        render_artifacts=_render_message_artifacts,
+                        render_voice_reply=_render_voice_reply,
+                        render_feedback=lambda message, position: _render_turn_feedback(
+                            message, position, active_id
+                        ),
                     )
-                    st.markdown(display_content)
-                    if role == "user":
-                        _render_message_attachments(metadata.get("attachments", []))
-                    else:
-                        _render_message_artifacts(
-                            metadata,
-                            msg.get("id", index),
-                        )
-                        _render_voice_reply(msg, index)
-                        # Phase 1 (加深): 每条成功的助手消息下方提供
-                        # 👍/👎 反馈控件，让 Agent 即时「记住」用户偏好。
-                        _render_turn_feedback(msg, index, active_id)
 
         _render_permission_approvals(active_id)
         _render_profile_approvals(active_id)
@@ -919,7 +919,7 @@ def chat_page():
                                 awaiting_approval,
                                 harness_metadata,
                                 harness_result,
-                            ) = execute_turn_with_harness(
+                            ) = execute_chat_turn(
                                 agent,
                                 prompt,
                                 pending_request["turn_id"],
@@ -927,16 +927,18 @@ def chat_page():
                                 agent_context,
                                 attachments,
                                 file_paths,
-                                get_profile_store(),
-                                get_knowledge_store(),
-                                get_artifact_coordinator(),
-                                knowledge_rule_extractor=extract_knowledge_rule,
-                                workflow_coordinator=get_workflow_coordinator(),
-                                workflow_formatter=format_workflow_result,
-                                session_store=get_session_store(),
-                                event_bus=get_event_bus(),
-                                episode_store=get_episode_store(),
-                                consolidation_scheduler=get_consolidation_scheduler(),
+                                HarnessTurnServices(
+                                    profile_store=get_profile_store(),
+                                    knowledge_store=get_knowledge_store(),
+                                    artifact_coordinator=get_artifact_coordinator(),
+                                    knowledge_rule_extractor=extract_knowledge_rule,
+                                    workflow_coordinator=get_workflow_coordinator(),
+                                    workflow_formatter=format_workflow_result,
+                                    session_store=get_session_store(),
+                                    event_bus=get_event_bus(),
+                                    episode_store=get_episode_store(),
+                                    consolidation_scheduler=get_consolidation_scheduler(),
+                                ),
                             )
                             if (
                                 harness_result is not None
@@ -1412,122 +1414,19 @@ def _feedback_was_saved(result) -> bool:
 
 
 def _render_turn_feedback(msg: dict, index: int, active_id) -> None:
-    """Render a 👍/👎 control under one assistant message.
-
-    Clicking 👍 records an approval; 👎 opens an inline text area so the user
-    can describe the problem. The signal is persisted via
-    ``record_turn_feedback`` (writes to both ``FeedbackStore`` and the
-    ``Episode``), and the UI remembers that this message was already rated.
-    Fully best-effort: any failure is swallowed so the chat never breaks.
-    """
-    message_id = str(msg.get("id", index))
-    turn_id = msg.get("turn_id") or message_id
-
-    given = (st.session_state.get("feedback_given") or {}).get(message_id)
-    if given:
-        st.caption(
-            "✅ 已记录你的反馈（%s），我会记住并在下次改进。"
-            % ("👍" if given == "up" else "👎")
-        )
-        return
-
-    user_prompt = _preceding_user_prompt(index)
-    tenant_context = st.session_state.get("tenant_context") or TenantContext.local()
-    feedback_store = st.session_state.get("feedback_store")
-    episode_store = st.session_state.get("episode_store")
-
-    up_col, down_col, _ = st.columns([1, 1, 8], gap="small")
-    with up_col:
-        if st.button(
-            "",
-            key=f"fb_up_{message_id}",
-            icon=":material/thumb_up:",
-            help="这个回答有帮助",
-        ):
-            feedback_result = record_turn_feedback(
-                turn_id,
-                True,
-                user_prompt=user_prompt,
-                assistant_content=str(msg.get("content", "")),
-                tenant_context=tenant_context,
-                feedback_store=feedback_store,
-                episode_store=episode_store,
-            )
-            if _feedback_was_saved(feedback_result):
-                st.session_state.setdefault("feedback_given", {})[message_id] = "up"
-                st.toast("👍 已记录，我会延续这个方向")
-                st.rerun()
-            else:
-                st.error("反馈未能保存，请稍后重试。")
-    with down_col:
-        if st.button(
-            "",
-            key=f"fb_down_{message_id}",
-            icon=":material/thumb_down:",
-            help="这个回答有问题",
-        ):
-            st.session_state.setdefault("feedback_pending", {})[message_id] = True
-            st.rerun()
-
-    if (st.session_state.get("feedback_pending") or {}).get(message_id):
-        with st.container(border=True):
-            st.markdown("**这次哪里不好？** 选一个分类，补充描述会变成我的长期偏好。")
-            category = st.selectbox(
-                "反馈分类",
-                options=list(FEEDBACK_CATEGORIES),
-                index=len(FEEDBACK_CATEGORIES) - 1,  # default "other"
-                format_func=lambda c: {
-                    "too_verbose": "太啰嗦",
-                    "too_brief": "太简短",
-                    "not_direct": "没直接回答",
-                    "ignored_context": "忽略上下文",
-                    "factual_error": "事实错误",
-                    "wrong_format": "格式不对",
-                    "wrong_tool": "用错工具",
-                    "other": "其他",
-                }.get(c, c),
-                key=f"fb_cat_{message_id}",
-                label_visibility="collapsed",
-            )
-            reason = st.text_area(
-                "可选：具体描述问题",
-                key=f"fb_reason_{message_id}",
-                placeholder="例如：回答太啰嗦 / 漏掉了报价金额 / 应该用表格而不是文字",
-            )
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button(
-                    "提交反馈",
-                    key=f"fb_submit_{message_id}",
-                    type="primary",
-                    width="stretch",
-                ):
-                    feedback_result = record_turn_feedback(
-                        turn_id,
-                        False,
-                        user_prompt=user_prompt,
-                        assistant_content=str(msg.get("content", "")),
-                        correction=reason,
-                        category=category,
-                        tenant_context=tenant_context,
-                        feedback_store=feedback_store,
-                        episode_store=episode_store,
-                    )
-                    if _feedback_was_saved(feedback_result):
-                        st.session_state.setdefault("feedback_given", {})[
-                            message_id
-                        ] = "down"
-                        st.session_state.get("feedback_pending", {}).pop(
-                            message_id, None
-                        )
-                        st.toast("👎 已记录，下次我会注意")
-                        st.rerun()
-                    else:
-                        st.error("反馈未能保存，请稍后重试。")
-            with c2:
-                if st.button("取消", key=f"fb_cancel_{message_id}", width="stretch"):
-                    st.session_state.get("feedback_pending", {}).pop(message_id, None)
-                    st.rerun()
+    render_feedback_control(
+        st,
+        msg,
+        index,
+        messages=st.session_state.get("messages", []),
+        tenant_context=(
+            st.session_state.get("tenant_context") or TenantContext.local()
+        ),
+        feedback_store=st.session_state.get("feedback_store"),
+        episode_store=st.session_state.get("episode_store"),
+        record_feedback=record_turn_feedback,
+        categories=tuple(FEEDBACK_CATEGORIES),
+    )
 
 
 def _render_edit_mode():
@@ -1847,111 +1746,33 @@ def _render_edit_mode():
 
 def _render_welcome_suggestions():
     """渲染欢迎页快捷建议芯片。"""
-    suggestions = [
-        {
-            "icon": ":material/analytics:",
-            "text": "分析利润率",
-            "prompt": "帮我分析当前项目的利润率和成本结构",
-        },
-        {
-            "icon": ":material/request_quote:",
-            "text": "创建报价",
-            "prompt": "帮我创建一个新的项目报价，包含客户、报价金额和工期",
-        },
-        {
-            "icon": ":material/query_stats:",
-            "text": "项目概览",
-            "prompt": "查看所有项目的整体经营概览和统计数据",
-        },
-        {
-            "icon": ":material/rule:",
-            "text": "评估需求",
-            "prompt": "我有一个新的产品需求，帮我评估技术可行性和成本",
-        },
-        {
-            "icon": ":material/summarize:",
-            "text": "生成周报",
-            "prompt": "根据近期项目数据，生成一份本周工作总结报告",
-        },
-        {
-            "icon": ":material/tune:",
-            "text": "优化流程",
-            "prompt": "根据现有工作流，给出优化项目管理的具体建议",
-        },
-        {"icon": ":material/edit_document:", "text": "智能编辑文件", "mode": "edit"},
-    ]
+    def enter_edit_mode() -> None:
+        st.session_state.edit_mode = True
+        st.session_state.pop("edit_doc", None)
+        st.session_state.pop("edit_last_result", None)
 
-    # A keyed Streamlit container is a real parent for the widgets. Raw HTML
-    # opened before a widget and closed after it is not guaranteed to survive
-    # Streamlit's delta rendering, which made the chip CSS intermittently miss.
-    with st.container(key="welcome_suggestions", border=False):
-        for row_idx in range(0, len(suggestions), 3):
-            row = suggestions[row_idx : row_idx + 3]
-            cols = st.columns(len(row), gap="small")
-            for col_idx, suggestion in enumerate(row):
-                with cols[col_idx]:
-                    if st.button(
-                        suggestion["text"],
-                        key=f"suggest_{row_idx}_{col_idx}",
-                        icon=suggestion["icon"],
-                        help=(
-                            "上传 Excel 或 Word，并用一句话生成编辑版本"
-                            if suggestion.get("mode") == "edit"
-                            else f"点击发送：{suggestion['prompt']}"
-                        ),
-                        width="stretch",
-                    ):
-                        if suggestion.get("mode") == "edit":
-                            st.session_state.edit_mode = True
-                            st.session_state.pop("edit_doc", None)
-                            st.session_state.pop("edit_last_result", None)
-                        else:
-                            _queue_suggested_prompt(suggestion["prompt"])
-                        st.rerun()
+    render_welcome_suggestions(
+        st,
+        on_prompt=_queue_suggested_prompt,
+        on_edit=enter_edit_mode,
+    )
 
 
 def _queue_suggested_prompt(prompt: str) -> None:
     """Persist a welcome suggestion exactly like a typed chat submission."""
     store = get_conversation_store()
     active_id = st.session_state.get("active_conversation_id")
-    turn_id = uuid4().hex
-    metadata = {}
-    if store is not None and active_id:
-        user_message = store.add_message(
-            active_id,
-            "user",
-            prompt,
-            turn_id=turn_id,
-            metadata=metadata,
-        )
-        conversation = store.get_conversation(active_id)
-        if conversation and conversation.get("title") == getattr(
-            ConversationStore, "DEFAULT_TITLE", "新对话"
-        ):
-            store.rename_conversation(
-                active_id, _conversation_title_from_prompt(prompt)
-            )
-        load_active_messages()
-        user_message_id = user_message.get("id")
-    else:
-        user_message_id = None
-        st.session_state.messages.append(
-            {
-                "role": "user",
-                "content": prompt,
-                "time": format_cn_date(datetime.now(), include_time=True),
-                "turn_id": turn_id,
-                "metadata": metadata,
-            }
-        )
-    st.session_state["pending_prompt"] = {
-        "prompt": prompt,
-        "conversation_id": active_id,
-        "user_message_id": user_message_id,
-        "turn_id": turn_id,
-        "attachments": [],
-        "permission_grant": _conversation_permission_grant(active_id),
-    }
+    pending = queue_suggested_prompt(
+        prompt,
+        store=store,
+        active_id=active_id,
+        messages=st.session_state.get("messages", []),
+        default_title=getattr(ConversationStore, "DEFAULT_TITLE", "新对话"),
+        title_from_prompt=_conversation_title_from_prompt,
+        load_active_messages=load_active_messages,
+    )
+    pending["permission_grant"] = _conversation_permission_grant(active_id)
+    st.session_state["pending_prompt"] = pending
 
 
 # P2 compatibility facade: state, feedback and welcome projections live in

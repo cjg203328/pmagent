@@ -17,12 +17,16 @@ from artpm_agent.core.mcp_client_enhanced import EnhancedMCPClient
 from artpm_agent.config import Config
 from artpm_agent.database.models import DatabaseManager
 from artpm_agent.memory.sqlite_manager import SQLiteManager
-from artpm_agent.memory.memory_manager import MemoryManager
+from artpm_agent.memory.memory_manager import MemoryManager as _MemoryManager
 from artpm_agent.parsers.excel_parser import ExcelQuoteParser
 from artpm_agent.skills.base_skill import BaseSkill
 from artpm_agent.skills.smart_progress_tracker import SmartProgressTracker
 from artpm_agent.skills.smart_task_allocator import SmartTaskAllocator
-from artpm_agent.skills.mcp_skills import DataAnalyzerSkill, ProjectEvaluatorSkill, TrendAnalyzerSkill
+from artpm_agent.skills.mcp_skills import (
+    DataAnalyzerSkill,
+    ProjectEvaluatorSkill,
+    TrendAnalyzerSkill,
+)
 from artpm_agent.skills.skill_router import (
     CAPABILITY_REGISTRY,
     DocumentClassifierParser,
@@ -32,7 +36,11 @@ from artpm_agent.skills.skill_router import (
     SkillRouter,
 )
 from artpm_agent.utils.validators import check_rule
-from artpm_agent.utils.llm_client import ZhipuClient, create_llm_client, is_valid_api_key
+from artpm_agent.utils.llm_client import (
+    ZhipuClient,
+    create_llm_client,
+    is_valid_api_key,
+)
 from artpm_agent.utils.cache import cached
 from artpm_agent.utils.chat_intent import (
     chat_processing_label,
@@ -43,6 +51,11 @@ from artpm_agent.utils.chat_intent import (
 from artpm_agent.visualization.advanced_charts import AdvancedVisualizer
 from artpm_agent.core.token_monitor import TokenBudgetManager, TokenMonitor
 from artpm_agent.agent import ArtPMAgent
+
+
+def MemoryManager(*args, **kwargs):
+    kwargs.setdefault("allow_legacy_workspace_writes", True)
+    return _MemoryManager(*args, **kwargs)
 
 
 class AsyncSkill(BaseSkill):
@@ -112,7 +125,9 @@ def test_mcp_rejects_paths_outside_workspace(tmp_path):
 
 def test_mcp_command_execution_is_disabled_by_default(tmp_path):
     client = EnhancedMCPClient(str(tmp_path))
-    result = asyncio.run(client.call_tool("execute_command", {"command": "python --version"}))
+    result = asyncio.run(
+        client.call_tool("execute_command", {"command": "python --version"})
+    )
     assert result["success"] is False
     assert "disabled" in result["error"]
 
@@ -144,13 +159,15 @@ def test_validation_rules_are_safe_and_support_basic_comparisons():
 
 def test_progress_tracker_handles_orm_projects(tmp_path):
     database = DatabaseManager(f"sqlite:///{(tmp_path / 'business.db').as_posix()}")
-    database.create_project({
-        "project_name": "测试项目",
-        "client": "测试客户",
-        "status": "进行中",
-        "quote_amount": 10000,
-        "deadline": datetime.now() + timedelta(days=2),
-    })
+    database.create_project(
+        {
+            "project_name": "测试项目",
+            "client": "测试客户",
+            "status": "进行中",
+            "quote_amount": 10000,
+            "deadline": datetime.now() + timedelta(days=2),
+        }
+    )
     result = SmartProgressTracker(database).check_progress(warning_days_ahead=3)
     assert result["success"] is True
     assert result["summary"]["warning_count"] == 1
@@ -179,24 +196,32 @@ class SyncLLM:
 
 def test_mcp_skill_supports_synchronous_llm_clients():
     skill = DataAnalyzerSkill({"llm_client": SyncLLM()})
-    result = asyncio.run(skill.execute({
-        "data_source": [{"amount": 1}, {"amount": 2}],
-        "visualize": True,
-    }))
+    result = asyncio.run(
+        skill.execute(
+            {
+                "data_source": [{"amount": 1}, {"amount": 2}],
+                "visualize": True,
+            }
+        )
+    )
     assert result["success"] is True
     assert result["visualizations"] == "同步结果"
 
 
 def test_trend_analyzer_calculates_direction_and_forecast():
     skill = TrendAnalyzerSkill({})
-    result = asyncio.run(skill.execute({
-        "data_series": [
-            {"date": "2026-01-01", "profit": 10},
-            {"date": "2026-01-02", "profit": 20},
-            {"date": "2026-01-03", "profit": 30},
-        ],
-        "forecast": True,
-    }))
+    result = asyncio.run(
+        skill.execute(
+            {
+                "data_series": [
+                    {"date": "2026-01-01", "profit": 10},
+                    {"date": "2026-01-02", "profit": 20},
+                    {"date": "2026-01-03", "profit": 30},
+                ],
+                "forecast": True,
+            }
+        )
+    )
     assert result["success"] is True
     assert result["trend"] == "上升"
     assert result["forecast_value"] == 40
@@ -204,16 +229,24 @@ def test_trend_analyzer_calculates_direction_and_forecast():
 
 def test_project_evaluator_validates_numbers_and_deadline():
     skill = ProjectEvaluatorSkill({})
-    invalid = asyncio.run(skill.execute({"project_data": {"quote_amount": "bad", "cost": 1}}))
+    invalid = asyncio.run(
+        skill.execute({"project_data": {"quote_amount": "bad", "cost": 1}})
+    )
     assert invalid["success"] is False
 
-    valid = asyncio.run(skill.execute({
-        "project_data": {
-            "quote_amount": "100000",
-            "cost": "70000",
-            "deadline": (datetime.now() + timedelta(days=20)).date().isoformat(),
-        }
-    }))
+    valid = asyncio.run(
+        skill.execute(
+            {
+                "project_data": {
+                    "quote_amount": "100000",
+                    "cost": "70000",
+                    "deadline": (datetime.now() + timedelta(days=20))
+                    .date()
+                    .isoformat(),
+                }
+            }
+        )
+    )
     assert valid["success"] is True
     assert valid["profit_rate"] == 0.3
     assert valid["days_left"] >= 19
@@ -247,11 +280,13 @@ def test_memory_manager_retrieves_documents_without_faiss(tmp_path):
         str(tmp_path / "vectors"),
         llm_client=None,
     )
-    document_id = memory.save_document({
-        "document_type": "报价单",
-        "raw_text": "腾讯角色项目报价十万元",
-        "extracted_data": {"project_info": {"project_name": "角色项目"}},
-    })
+    document_id = memory.save_document(
+        {
+            "document_type": "报价单",
+            "raw_text": "腾讯角色项目报价十万元",
+            "extracted_data": {"project_info": {"project_name": "角色项目"}},
+        }
+    )
     results = memory.retrieve("腾讯", top_k=5)
     assert [item["id"] for item in results] == [document_id]
 
@@ -295,18 +330,22 @@ def test_query_sql_rejects_writes(tmp_path):
 
 def test_business_database_returns_serializable_detached_tasks(tmp_path):
     database = DatabaseManager(f"sqlite:///{(tmp_path / 'business.db').as_posix()}")
-    project = database.create_project({
-        "project_name": "项目",
-        "client": "客户",
-        "quote_amount": 10000,
-    })
+    project = database.create_project(
+        {
+            "project_name": "项目",
+            "client": "客户",
+            "quote_amount": 10000,
+        }
+    )
     member = database.create_member({"name": "成员", "skills": ["建模"]})
-    database.create_task({
-        "project_id": project.id,
-        "assignee_id": member.id,
-        "task_name": "任务",
-        "progress": 50,
-    })
+    database.create_task(
+        {
+            "project_id": project.id,
+            "assignee_id": member.id,
+            "task_name": "任务",
+            "progress": 50,
+        }
+    )
 
     loaded_project = database.get_project(project.id)
     loaded_task = database.get_member_tasks(member.id)[0]
@@ -331,7 +370,12 @@ def test_incompatible_business_database_is_not_modified(tmp_path):
         raise AssertionError("incompatible schema was accepted")
 
     connection = sqlite3.connect(path)
-    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
     connection.close()
     assert tables == {"projects"}
 
@@ -361,19 +405,23 @@ def test_excel_parser_prefers_explicit_adjusted_total():
 
 def test_task_allocator_uses_existing_database_load(tmp_path):
     database = DatabaseManager(f"sqlite:///{(tmp_path / 'business.db').as_posix()}")
-    project = database.create_project({
-        "project_name": "项目",
-        "client": "客户",
-        "quote_amount": 10000,
-    })
+    project = database.create_project(
+        {
+            "project_name": "项目",
+            "client": "客户",
+            "quote_amount": 10000,
+        }
+    )
     member = database.create_member({"name": "成员", "skills": ["建模"]})
-    database.create_task({
-        "project_id": project.id,
-        "assignee_id": member.id,
-        "task_name": "已有任务",
-        "estimated_hours": 16,
-        "status": "进行中",
-    })
+    database.create_task(
+        {
+            "project_id": project.id,
+            "assignee_id": member.id,
+            "task_name": "已有任务",
+            "estimated_hours": 16,
+            "status": "进行中",
+        }
+    )
     result = SmartTaskAllocator(database).allocate(
         [{"name": "新任务", "type": "建模", "estimated_hours": 8}],
         {"max_load_per_person": 20},
@@ -384,20 +432,26 @@ def test_task_allocator_uses_existing_database_load(tmp_path):
 
 def test_task_allocator_does_not_create_fake_members_for_empty_database(tmp_path):
     database = DatabaseManager(f"sqlite:///{(tmp_path / 'business.db').as_posix()}")
-    result = SmartTaskAllocator(database).allocate([{"name": "任务", "estimated_hours": 8}])
+    result = SmartTaskAllocator(database).allocate(
+        [{"name": "任务", "estimated_hours": 8}]
+    )
     assert result == {"success": False, "error": "没有可用的团队成员"}
 
 
 def test_task_allocator_applies_project_history_score(tmp_path):
     database = DatabaseManager(f"sqlite:///{(tmp_path / 'business.db').as_posix()}")
-    project = database.create_project({"project_name": "项目", "client": "客户", "quote_amount": 10000})
+    project = database.create_project(
+        {"project_name": "项目", "client": "客户", "quote_amount": 10000}
+    )
     member = database.create_member({"name": "成员", "skills": ["建模"]})
-    database.create_task({
-        "project_id": project.id,
-        "assignee_id": member.id,
-        "task_name": "历史任务",
-        "estimated_hours": 8,
-    })
+    database.create_task(
+        {
+            "project_id": project.id,
+            "assignee_id": member.id,
+            "task_name": "历史任务",
+            "estimated_hours": 8,
+        }
+    )
     result = SmartTaskAllocator(database).allocate(
         [{"name": "新任务", "type": "建模", "estimated_hours": 8}],
         {"max_load_per_person": 40, "project_id": project.id},
@@ -407,19 +461,25 @@ def test_task_allocator_applies_project_history_score(tmp_path):
 
 def test_progress_tracker_separates_projects_without_deadlines(tmp_path):
     database = DatabaseManager(f"sqlite:///{(tmp_path / 'business.db').as_posix()}")
-    database.create_project({
-        "project_name": "待排期项目",
-        "client": "客户",
-        "quote_amount": 10000,
-        "status": "待开始",
-    })
+    database.create_project(
+        {
+            "project_name": "待排期项目",
+            "client": "客户",
+            "quote_amount": 10000,
+            "status": "待开始",
+        }
+    )
     result = SmartProgressTracker(database).check_progress()
     assert result["summary"]["unknown_count"] == 1
     assert result["summary"]["on_track_count"] == 0
 
 
 def test_reminder_bot_only_generates_preview_when_webhook_is_configured():
-    context = {"config": {"wecom": {"enabled": True, "webhook_url": "https://example.test/hook"}}}
+    context = {
+        "config": {
+            "wecom": {"enabled": True, "webhook_url": "https://example.test/hook"}
+        }
+    }
 
     with patch("requests.post") as post:
         result = ReminderBot(context).run({"recipients": "张三", "task_id": "T1"})
@@ -444,14 +504,18 @@ def test_reminder_dispatch_requires_approval_and_idempotency_key():
     }
 
     with patch("requests.post") as post:
-        missing_approval = ReminderDispatch(context).run({
-            "idempotency_key": "dispatch-1",
-            "recipients": "张三",
-        })
-        missing_key = ReminderDispatch(context).run({
-            "approved": True,
-            "recipients": "张三",
-        })
+        missing_approval = ReminderDispatch(context).run(
+            {
+                "idempotency_key": "dispatch-1",
+                "recipients": "张三",
+            }
+        )
+        missing_key = ReminderDispatch(context).run(
+            {
+                "approved": True,
+                "recipients": "张三",
+            }
+        )
 
     assert missing_approval["sent_status"] == "approval_required"
     assert missing_approval["requires_approval"] is True
@@ -543,16 +607,20 @@ def test_capability_registry_exposes_risk_and_blocks_untrusted_mcp_writes(
     router = SkillRouter({})
     remote_writer = Mock()
     router.skills["remote_writer"] = remote_writer
-    monkeypatch.setitem(SKILL_METADATA, "remote_writer", {
-        "description": "untrusted dynamic writer",
-        "version": "1.0",
-        "requires_llm": False,
-        "risk": "untrusted",
-        "read_only": False,
-        "requires_approval": True,
-        "side_effects_allowed": False,
-        "is_mcp_skill": True,
-    })
+    monkeypatch.setitem(
+        SKILL_METADATA,
+        "remote_writer",
+        {
+            "description": "untrusted dynamic writer",
+            "version": "1.0",
+            "requires_llm": False,
+            "risk": "untrusted",
+            "read_only": False,
+            "requires_approval": True,
+            "side_effects_allowed": False,
+            "is_mcp_skill": True,
+        },
+    )
 
     result = router.execute_skill(
         "remote_writer",
@@ -565,35 +633,45 @@ def test_capability_registry_exposes_risk_and_blocks_untrusted_mcp_writes(
 
 
 def test_zhipu_provider_uses_openai_compatible_client():
-    client = create_llm_client({
-        "provider": "zhipu",
-        "model": "glm-4",
-        "zhipu_api_key": "valid-zhipu-key",
-    })
+    client = create_llm_client(
+        {
+            "provider": "zhipu",
+            "model": "glm-4",
+            "zhipu_api_key": "valid-zhipu-key",
+        }
+    )
     assert isinstance(client, ZhipuClient)
     assert "open.bigmodel.cn" in str(client.client.base_url)
 
 
 def test_gantt_chart_uses_real_date_axis_durations():
-    figure = AdvancedVisualizer().create_gantt_chart([{
-        "task_name": "任务",
-        "start_date": "2026-07-01",
-        "end_date": "2026-07-03",
-        "progress": 50,
-        "status": "进行中",
-    }])
+    figure = AdvancedVisualizer().create_gantt_chart(
+        [
+            {
+                "task_name": "任务",
+                "start_date": "2026-07-01",
+                "end_date": "2026-07-03",
+                "progress": 50,
+                "status": "进行中",
+            }
+        ]
+    )
     assert figure.layout.xaxis.type == "date"
     assert figure.data[0].base.year == 2026
     assert figure.data[0].x[0] == 86400000
 
 
 def test_team_heatmap_handles_zero_capacity():
-    figure = AdvancedVisualizer().create_team_heatmap([{
-        "member": "成员",
-        "date": "2026-07-01",
-        "load": 8,
-        "capacity": 0,
-    }])
+    figure = AdvancedVisualizer().create_team_heatmap(
+        [
+            {
+                "member": "成员",
+                "date": "2026-07-01",
+                "load": 8,
+                "capacity": 0,
+            }
+        ]
+    )
     assert figure.data[0].z[0][0] == 100
 
 
@@ -1110,15 +1188,17 @@ def test_agent_sends_bounded_attachment_data_to_llm_once():
     agent = ArtPMAgent()
     agent.llm_client = Mock()
     agent.llm_client.chat.return_value = "基于附件生成的分析"
-    agent.process_document = Mock(return_value={
-        "success": True,
-        "document_type": "报价单",
-        "extracted_data": {
-            "project_info": {"project_name": "角色制作"},
-            "total_amount": 100000,
-        },
-        "raw_text": "附件正文" * 5000,
-    })
+    agent.process_document = Mock(
+        return_value={
+            "success": True,
+            "document_type": "报价单",
+            "extracted_data": {
+                "project_info": {"project_name": "角色制作"},
+                "total_amount": 100000,
+            },
+            "raw_text": "附件正文" * 5000,
+        }
+    )
     agent._format_skill_result = Mock(return_value="固定文档格式")
 
     response = agent.chat(
@@ -1150,10 +1230,12 @@ def test_agent_sends_bounded_attachment_data_to_llm_once():
 def test_agent_reports_all_attachment_parse_failures_without_llm():
     agent = ArtPMAgent()
     agent.llm_client = Mock()
-    agent.process_document = Mock(side_effect=[
-        {"success": False, "error": "文件已损坏"},
-        {"success": False, "error": "文件受密码保护"},
-    ])
+    agent.process_document = Mock(
+        side_effect=[
+            {"success": False, "error": "文件已损坏"},
+            {"success": False, "error": "文件受密码保护"},
+        ]
+    )
 
     response = agent.chat(
         "分析这些附件",
@@ -1161,8 +1243,7 @@ def test_agent_reports_all_attachment_parse_failures_without_llm():
     )
 
     assert response == (
-        "附件未能解析：损坏报价.xlsx：文件已损坏；"
-        "加密说明.pdf：文件受密码保护"
+        "附件未能解析：损坏报价.xlsx：文件已损坏；加密说明.pdf：文件受密码保护"
     )
     assert agent.process_document.call_count == 2
     agent.llm_client.chat.assert_not_called()
@@ -1222,9 +1303,12 @@ def test_long_general_chat_uses_only_one_generation_request_by_default():
     agent._detect_intent_via_llm = Mock(return_value=None)
 
     assert agent.config.get("llm.intent_classification_enabled", False) is False
-    assert agent.chat(
-        "Please explain how to improve collaboration across a distributed creative team."
-    ) == "one generated answer"
+    assert (
+        agent.chat(
+            "Please explain how to improve collaboration across a distributed creative team."
+        )
+        == "one generated answer"
+    )
     agent._detect_intent_via_llm.assert_not_called()
     agent.llm_client.chat.assert_called_once()
 
@@ -1236,4 +1320,6 @@ def test_default_chat_request_does_not_repeat_a_full_timeout():
 def test_agent_combines_asset_and_production_type_into_one_task():
     agent = ArtPMAgent()
     inputs = agent._extract_inputs("分配角色建模任务", "task_allocator", {})
-    assert inputs["tasks"] == [{"name": "角色建模", "type": "建模", "estimated_hours": 8}]
+    assert inputs["tasks"] == [
+        {"name": "角色建模", "type": "建模", "estimated_hours": 8}
+    ]

@@ -27,9 +27,15 @@ def test_knowledge_authority_contract_is_split_from_transaction_facade():
         validate_limit,
     )
 
-    assert SCHEMA_VERSION == 6
+    assert SCHEMA_VERSION == 7
     assert schema_contract()["scope_columns"] == ("tenant_id", "workspace_id")
     assert "knowledge_index_outbox" in schema_contract()["tables"]
+    assert schema_contract()["outbox_states"] == (
+        "pending",
+        "processing",
+        "done",
+        "dead",
+    )
     assert validate_limit(1) == 1
     assert content_hash("a", "null", None) == content_hash("a", "null", None)
     assert serialize_json({"b": 1, "a": 2}, "metadata") == '{"a":2,"b":1}'
@@ -47,6 +53,19 @@ def test_chat_pure_boundaries_preserve_legacy_projection_contracts():
     assert not feedback_was_saved({"feedback_id": None})
     assert len(WELCOME_SUGGESTIONS) == 7
     assert welcome_suggestions() is not WELCOME_SUGGESTIONS
+
+
+def test_knowledge_facade_is_physically_split_by_responsibility():
+    from artpm_agent.memory.knowledge_migrations import KnowledgeMigrationService
+    from artpm_agent.memory.knowledge_repository import KnowledgeRepository
+    from artpm_agent.memory.knowledge_rule_service import KnowledgeRuleService
+    from artpm_agent.memory.knowledge_search_service import KnowledgeSearchService
+    from artpm_agent.memory.workspace_knowledge_store import WorkspaceKnowledgeStore
+
+    assert issubclass(WorkspaceKnowledgeStore, KnowledgeMigrationService)
+    assert issubclass(WorkspaceKnowledgeStore, KnowledgeRepository)
+    assert issubclass(WorkspaceKnowledgeStore, KnowledgeRuleService)
+    assert issubclass(WorkspaceKnowledgeStore, KnowledgeSearchService)
 
 
 def test_agent_provider_and_legacy_boundaries_are_importable():

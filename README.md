@@ -64,7 +64,9 @@ pmagent/
 数据边界保持明确：`ConversationStore` 只负责用户可见会话消息和工作区元数据；
 `SessionStore/EventBus` 负责回合及工具事件；`MemoryManager` 只保留兼容记忆入口；
 `WorkspaceKnowledgeStore` 负责工作区资源、版本和已接受规则。写入会在同一事务登记
-`knowledge_index_outbox`，FAISS/Qdrant projector 只维护可重建的派生索引；
+`knowledge_index_outbox`；projector 使用租约、指数退避和死信状态维护 FAISS/Qdrant
+派生索引，索引滞后时自动回退字面检索。保留期、导出、压缩、用户删除和租户注销由
+`MemoryLifecycleService` 统一治理，详见 `docs/architecture/MEMORY_LIFECYCLE.md`。
 Redis 只是缓存加速层。所有 API、缓存和向量查询都必须带可信 `tenant_id/workspace_id`。
 
 ## 运行方式
@@ -325,6 +327,8 @@ artpm_agent/
 - `RuntimeFactory` 与 `StorageRegistry` 是 API/UI/CLI 的进程级服务构造入口；Store、Agent、
   WorkflowCoordinator 和学习服务不得在每回合重新构造。
 - `ArtPMAgent` 是兼容 facade，新功能不应继续扩大对旧 facade 私有实现的依赖。
+- 未绑定权威知识库的 `MemoryManager.save_document()` 已退役；工作区知识统一写入
+  `StorageRegistry.knowledge`。
 - API chat 优先使用 async handler；同步旧 Agent 在迁移完成前通过线程隔离。
 - 业务库和记忆库分离，workspace/tenant 隔离必须贯穿查询、写入、缓存和向量检索。
 - 模型工具调用先过 JSON Schema；写入型操作必须经过宿主审批。

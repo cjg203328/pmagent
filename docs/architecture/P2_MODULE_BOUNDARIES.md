@@ -26,11 +26,11 @@ P2 采用渐进式拆分：旧路径继续作为兼容 facade，新代码优先�
 
 ## 知识库
 
-`memory/schema.py` 定义表和版本，`memory/resources.py` 定义文本/JSON/limit 校验，`memory/rules.py` 定义规则状态，`memory/serializers.py` 定义 DTO 投影，`memory/vector_index.py` 只包含可重建的分块逻辑，`memory/knowledge_projector.py` 消费 durable outbox。`memory/workspace_knowledge_store.py` 仍是事务 facade，外部代码不应读取 SQLite 行结构或直接写向量索引。
+`memory/schema.py` 定义表和版本，`memory/knowledge_migrations.py` 承担迁移，`memory/knowledge_repository.py` 承担资源和摄取事务，`memory/knowledge_rule_service.py` 承担规则状态机，`memory/knowledge_search_service.py` 承担检索和向量同步，`memory/knowledge_projector.py` 以租约、退避和死信消费 durable outbox。`memory/workspace_knowledge_store.py` 仅组合这些职责并保留兼容入口。生命周期治理位于 `memory/lifecycle.py`。
 
 ## Chat 页面
 
-`views/chat_state.py`、`chat_feedback.py`、`chat_welcome.py` 和 `chat_turn.py` 只保存状态投影、反馈判断、欢迎建议和回合 ID 等纯边界。`views/chat.py` 保留 Streamlit 生命周期、事件订阅和兼容私有函数；回合执行继续由 Harness adapter 负责。
+`views/chat_state.py`、`chat_feedback.py`、`chat_welcome.py`、`chat_turn.py`、`chat_message_rendering.py` 和 `chat_execution.py` 分别保存状态投影、反馈控件、欢迎建议、排队状态、消息渲染与 canonical Harness 调用。`views/chat.py` 保留 Streamlit 页面生命周期和兼容私有函数。
 
 ## 迁移规则
 

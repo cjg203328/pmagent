@@ -56,3 +56,28 @@
 ### 已知限制
 
 - PostgreSQL RLS live test remains skipped because `ARTPM_TEST_POSTGRES_URL` is not configured locally.
+
+## Handoff Checkpoint - 2026-09-17 02:06
+
+**当前目标**: Memory lifecycle governance, knowledge/chat decomposition, projector reliability, RLS and concurrency verification
+**当前阶段**: Implementation and verification complete; pending Git commit/push and service restart
+
+### 已完成
+
+- Schema v7 outbox with atomic leases, exponential retry, dead letters and lag/queue metrics.
+- Executable retention/export/compaction/workspace deletion/tenant offboarding/vector cleanup contract.
+- `WorkspaceKnowledgeStore` reduced to a compatibility facade over migration, repository, rule and search services.
+- Unbound `MemoryManager.save_document()` retired after canonical live counter remained zero.
+- Chat execution, feedback, message rendering, state and welcome controls split behind compatibility functions.
+- RLS integration contract expanded; workspace concurrency benchmark added.
+- Full suite `1572 passed, 22 skipped`; integration `18 passed, 2 skipped`; benchmark and optimization 15/15 passed.
+
+### 已知限制
+
+- PostgreSQL RLS live assertions require `ARTPM_TEST_POSTGRES_URL` and `ARTPM_TEST_POSTGRES_ADMIN_URL`; both are absent locally.
+- Repository-wide unrestricted Ruff still reports historical lint debt outside the changed surface; targeted changed/new modules and the project optimization Ruff gate pass.
+
+### 恢复入口
+
+- **首读文件**: `docs/architecture/MEMORY_LIFECYCLE.md`, `artpm_agent/memory/lifecycle.py`, `artpm_agent/memory/knowledge_projector.py`, `artpm_agent/views/chat_execution.py`
+- **关键命令**: `.venv/Scripts/python -m pytest -q`; `.venv/Scripts/python -m benchmarks.workspace_concurrency`; `.venv/Scripts/python scripts/verify_optimization.py`
