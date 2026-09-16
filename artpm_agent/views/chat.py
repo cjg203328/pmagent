@@ -62,7 +62,10 @@ from artpm_agent.views.chat_execution import HarnessTurnServices, execute_chat_t
 from artpm_agent.views.chat_feedback import render_turn_feedback as render_feedback_control
 from artpm_agent.views.chat_message_rendering import render_completed_message
 from artpm_agent.views.chat_turn import queue_suggested_prompt
-from artpm_agent.views.chat_welcome import render_welcome_suggestions
+from artpm_agent.views.chat_welcome import (
+    render_welcome_intro,
+    render_welcome_suggestions,
+)
 
 _LEGACY_MODEL_RUNTIME_RE = re.compile(
     r"当前配置的生成模型 ID 是 \*\*`(?P<model>[^`]+)`\*\*.*?"
@@ -611,7 +614,7 @@ def chat_page():
 
     if not st.session_state.messages:
         st.markdown('<div class="chat-empty-marker"></div>', unsafe_allow_html=True)
-        st.title("有什么可以帮你？")
+        render_welcome_intro(st)
 
         # 快捷建议芯片
         _render_welcome_suggestions()
@@ -1213,7 +1216,7 @@ def chat_page():
                 disabled=(
                     not agent_ready or bool(pending_request) or permission_pending
                 ),
-                height=96,
+                height=80,
             )
             prompt_text, uploaded_files = normalize_chat_submission(user_submission)
             recorded_audio = chat_submission_audio(user_submission)

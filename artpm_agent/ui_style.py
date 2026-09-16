@@ -2654,6 +2654,12 @@ STYLE_CSS = """
 </style>
 """
 
+# New visual work lives in focused fragments.  Keep this module as the
+# compatibility injection surface while the legacy stylesheet is migrated.
+from artpm_agent.ui.style_chat import CHAT_POLISH_CSS  # noqa: E402
+
+STYLE_CSS = f"{STYLE_CSS}\n{CHAT_POLISH_CSS}"
+
 # P2 staged facade.  The full stylesheet stays a single value for the
 # Streamlit injection contract; these helpers expose the intended ownership
 # boundaries to new callers without changing rendered output.

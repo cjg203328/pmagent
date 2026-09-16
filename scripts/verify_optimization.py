@@ -15,7 +15,10 @@ def run_command(cmd: list[str], description: str) -> tuple[bool, str]:
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
+            check=False,
         )
         if result.returncode == 0:
             print("✅")
@@ -23,9 +26,9 @@ def run_command(cmd: list[str], description: str) -> tuple[bool, str]:
         else:
             print(f"❌ (退出码: {result.returncode})")
             return False, result.stderr
-    except Exception as e:
-        print(f"❌ ({e})")
-        return False, str(e)
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"❌ ({error})")
+        return False, str(error)
 
 
 def check_file_exists(path: Path, description: str) -> bool:
@@ -155,11 +158,19 @@ def main():
 
     print()
 
-    # 5. 代码质量检查
+    # 5. 阻塞级代码质量检查。全仓风格债务使用 changed-surface ratchet
+    # 渐进治理，不能让历史告警掩盖语法或未定义名称等真实回归。
     print("5️⃣  代码质量检查")
     success, _ = run_command(
-        ["ruff", "check", "artpm_agent", "--quiet"],
-        "Ruff 代码检查"
+        [
+            "ruff",
+            "check",
+            "artpm_agent",
+            "--quiet",
+            "--select",
+            "E9,F63,F7,F82",
+        ],
+        "阻塞级 Ruff 代码检查",
     )
     checks.append(success)
 

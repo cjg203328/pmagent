@@ -24,7 +24,7 @@ ArtPM Agent 面向游戏美术外包团队、制作人和项目管理者，适�
 
 | 层 | 当前实现 | 主要路径 |
 | --- | --- | --- |
-| UI | Streamlit 1.59.x | `artpm_agent/app.py`、`artpm_agent/views/` |
+| UI | Streamlit 1.59.x、CSS design tokens | `artpm_agent/app.py`、`artpm_agent/views/`、`artpm_agent/ui/` |
 | API | FastAPI 0.135.x、Uvicorn 0.51.x | `artpm_agent/api/` |
 | Agent 主链 | Harness `run_turn()`、typed events、审批边界 | `artpm_agent/harness/`、`artpm_agent/runtime/` |
 | 路由与技能 | 关键词/语义路由、业务技能、MCP 适配 | `artpm_agent/routing/`、`artpm_agent/skills/` |
@@ -50,7 +50,9 @@ pmagent/
 │   ├── providers/      模型路由、故障转移、结构化输出和缓存
 │   ├── skills/         业务技能及路由
 │   ├── tenancy/security/ 租户上下文、权限和审批
-│   └── views/ui_*.py   Streamlit 页面与 UI 兼容层
+│   ├── views/           Streamlit 页面宿主和按职责拆分的渲染模块
+│   ├── ui/              design token、页面样式片段和通用 UI 组件
+│   └── ui_style.py      旧样式注入兼容 facade
 ├── tests/              单元、契约、慢速 UI 和显式集成测试
 ├── benchmarks/         离线性能门禁
 ├── scripts/            启动、迁移、质量检查和维护脚本
@@ -81,6 +83,10 @@ Redis 只是缓存加速层。所有 API、缓存和向量查询都必须带可�
 
 基础安装不包含 UI、文档解析、FAISS、模型 SDK 或 MCP。按场景组合 extras；`dev` 只包含
 测试、lint、类型与安全工具，不再复制生产依赖。
+
+聊天界面采用紧凑工作台布局：桌面端提供三列常用动作，窄屏自动切为两列并保持至少
+`44px` 触控高度。`artpm_agent/ui_style.py` 仅保留兼容注入契约；新的页面样式进入
+`artpm_agent/ui/style_*.py`，新的渲染职责进入 `artpm_agent/views/` 下的专用模块。
 
 ## 核心能力
 

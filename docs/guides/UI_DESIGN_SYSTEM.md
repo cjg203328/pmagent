@@ -18,17 +18,19 @@ not source code or branding.
 
 ## Visual tokens
 
-The canonical token boundary is `artpm_agent/ui/style_tokens.py`; the
-compatibility stylesheet remains available as `artpm_agent/ui_style.py`.
+The canonical token boundary is `artpm_agent/ui/style_tokens.py`. Page-level
+visual work belongs in focused fragments such as `artpm_agent/ui/style_chat.py`;
+`artpm_agent/ui_style.py` remains the compatibility injection surface and must
+not accumulate new page-specific rules.
 
-- Canvas: `#fbfbfa`
+- Canvas: `#ffffff`
 - Paper: `#ffffff`
-- Primary text: `#202124`
-- Secondary text: `#41454b`
-- Muted text: `#646a73`
+- Primary text: `#172231`
+- Secondary text: `#334155`
+- Muted text: `#5b6b7d`
 - Action accent: `#2563eb`
 - Focus ring: `#1d4ed8`
-- Main radius: `8px`
+- Main radius: `10px`
 
 Chat keeps reading surfaces neutral: user turns use
 `--pm-chat-user-bg` and assistant turns remain unframed. Blue is reserved for
@@ -63,14 +65,27 @@ new color without testing it against every surface where it is used.
 - A visible model selection must be reapplied when the Agent instance is
   replaced.
 
+## Chat landing contract
+
+- The empty state has one compact product marker, one task-oriented heading,
+  one supporting sentence, and the action grid. Do not add a marketing hero.
+- Desktop uses three action columns. Viewports at or below `760px` use two
+  columns; a single action in a row spans both columns.
+- Action controls have a minimum height of `48px`, visible focus treatment,
+  stable icon geometry, and no horizontal overflow at `390px`.
+- The composer remains fixed to the bottom, reserves content space, and uses
+  the native Streamlit attachment, audio, and submit controls.
+- Welcome markup and state-independent suggestions live in
+  `artpm_agent/views/chat_welcome.py`; the chat host only coordinates state.
+
 ## Regression checks
 
 Run:
 
 ```powershell
-E:\python\python.exe -m pytest --no-cov tests/test_ui_design_system.py -q
-E:\python\python.exe -m pytest --no-cov tests/test_streamlit_app.py -q
-E:\python\python.exe -m ruff check artpm_agent tests
+uv run pytest -q tests/test_ui_design_system.py
+uv run pytest -q tests/test_streamlit_app.py
+uv run ruff check artpm_agent/ui/style_chat.py artpm_agent/views/chat_welcome.py
 ```
 
 Browser verification covers desktop and mobile layouts, JavaScript console

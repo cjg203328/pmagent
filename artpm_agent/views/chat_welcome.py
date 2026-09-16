@@ -46,10 +46,30 @@ WELCOME_SUGGESTIONS: tuple[WelcomeSuggestion, ...] = (
     {"icon": ":material/edit_document:", "text": "智能编辑文件", "mode": "edit"},
 )
 
+WELCOME_TITLE = "今天先推进哪件事？"
+WELCOME_DESCRIPTION = "查项目、算成本、起草报价，或上传文件直接处理。"
+
 
 def welcome_suggestions() -> tuple[WelcomeSuggestion, ...]:
     """Return an immutable copy so callers cannot mutate shared page state."""
     return tuple(dict(item) for item in WELCOME_SUGGESTIONS)  # type: ignore[return-value]
+
+
+def render_welcome_intro(st) -> None:
+    """Render the chat landing header without owning any session state."""
+    st.markdown(
+        f"""
+        <section class="pm-welcome" aria-labelledby="pm-welcome-title">
+            <div class="pm-welcome-kicker">
+                <span class="pm-welcome-mark" aria-hidden="true">◆</span>
+                <span>ARTPM 工作区</span>
+            </div>
+            <h1 id="pm-welcome-title">{WELCOME_TITLE}</h1>
+            <p>{WELCOME_DESCRIPTION}</p>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_welcome_suggestions(st, *, on_prompt, on_edit) -> None:
@@ -79,8 +99,11 @@ def render_welcome_suggestions(st, *, on_prompt, on_edit) -> None:
 
 
 __all__ = [
+    "WELCOME_DESCRIPTION",
     "WELCOME_SUGGESTIONS",
+    "WELCOME_TITLE",
     "WelcomeSuggestion",
+    "render_welcome_intro",
     "render_welcome_suggestions",
     "welcome_suggestions",
 ]

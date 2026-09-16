@@ -120,3 +120,23 @@ Base dependencies are the Runtime/CLI profile. UI, documents, vector-local, prov
 **理由**: Authority deletion and derived-index cleanup become independently observable; concurrent projectors cannot duplicate the same claim; a failed vector backend cannot be mistaken for completed tenant erasure.
 **Trade-offs**: Completed outbox rows are retained for 30 days before compaction, and tenant offboarding may return `index_cleanup_pending` until the vector backend recovers.
 **撤销条件**: Replace only with an external queue/lifecycle service that preserves atomic enqueue, scoped export/deletion, lease recovery, dead-letter visibility and rebuildability.
+
+## Decision Record: Focused chat visual fragments
+
+**日期**: 2026-09-17
+**问题**: The Streamlit landing screen was visually sparse, while new page rules risked further expanding the 2,600-line `ui_style.py` compatibility source.
+
+### 决策
+
+**选择**: Keep `ui_style.py` as the single compatibility injection facade, place new chat visuals in `artpm_agent/ui/style_chat.py`, and keep state-independent welcome markup in `views/chat_welcome.py`.
+**理由**: This improves the desktop/mobile experience without adding frontend dependencies, changing Runtime boundaries, or putting new page behavior into the legacy facade.
+**Trade-offs**: The legacy base stylesheet is still physically large and remains a later extraction target; focused fragments are concatenated into one Streamlit style payload for stable reruns.
+
+### 影响范围
+
+- Chat empty state, suggestion actions and composer geometry.
+- UI design-system documentation and changed-surface regression checks.
+
+### 撤销条件
+
+Replace the concatenated fragments when Streamlit exposes a stable scoped stylesheet or component theming API that preserves the current browser contract.

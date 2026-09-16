@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -32,3 +31,13 @@ def test_optimization_verifier_rejects_stale_launcher_names() -> None:
     assert 'stale = "start_optimized" in text' in verifier
     assert '"start.bat"' in verifier
     assert '"start.sh"' in verifier
+
+
+def test_optimization_verifier_uses_utf8_and_blocking_lint_rules() -> None:
+    verifier = (ROOT / "scripts" / "verify_optimization.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'encoding="utf-8"' in verifier
+    assert 'errors="replace"' in verifier
+    assert '"E9,F63,F7,F82"' in verifier

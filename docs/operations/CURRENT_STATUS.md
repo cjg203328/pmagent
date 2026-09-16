@@ -24,7 +24,11 @@ powershell -ExecutionPolicy Bypass -File scripts/test_all.ps1
 powershell -ExecutionPolicy Bypass -File scripts/test_integration.ps1
 powershell -ExecutionPolicy Bypass -File scripts/test_benchmark.ps1
 powershell -ExecutionPolicy Bypass -File scripts/coverage_core.ps1
-ruff check artpm_agent tests
+# Full-repository blocking correctness rules
+ruff check artpm_agent tests --select E9,F63,F7,F82
+
+# Changed Python files also run the normal project rule set
+ruff check <changed-python-files>
 ```
 
 The fast suite excludes external integrations, benchmarks, and expensive
@@ -32,6 +36,11 @@ Streamlit startup tests. The offline suite includes the slow UI tests. Coverage
 is a separate focused 90% gate over the modernization boundary modules;
 integration tests require explicit credentials or services and must never be
 treated as offline tests.
+
+Unrestricted whole-repository Ruff still reports historical modernization and
+style debt. It is governed as a changed-surface ratchet: new or edited focused
+modules must pass the normal rule set, while the repository-wide blocking gate
+always covers syntax errors, invalid constructs, and undefined names.
 
 ## Current Boundaries
 

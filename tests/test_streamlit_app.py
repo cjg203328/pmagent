@@ -224,6 +224,12 @@ def test_empty_chat_renders_all_welcome_actions():
     }
 
     assert welcome_labels.issubset({button.label for button in app.button})
+    welcome_markup = [
+        item.value for item in app.markdown if 'class="pm-welcome"' in item.value
+    ]
+    assert len(welcome_markup) == 1
+    assert "今天先推进哪件事？" in welcome_markup[0]
+    assert "查项目、算成本、起草报价" in welcome_markup[0]
 
 
 def test_sidebar_pills_switch_between_all_views():

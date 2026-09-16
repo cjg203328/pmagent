@@ -3,6 +3,7 @@ import re
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from artpm_agent.ui.style_chat import CHAT_POLISH_CSS
 from artpm_agent.ui_style import STYLE_CSS
 from artpm_agent.views import chat
 
@@ -58,6 +59,13 @@ def test_design_tokens_are_defined_and_motion_is_purposeful():
     assert _contrast(_token("--pm-accent"), _token("--pm-paper")) >= 4.5
     assert _contrast(_token("--pm-muted"), _token("--pm-canvas")) >= 4.5
     assert _contrast(_token("--pm-focus"), _token("--pm-paper")) >= 3.0
+
+
+def test_chat_polish_is_owned_by_a_focused_style_fragment():
+    assert CHAT_POLISH_CSS in STYLE_CSS
+    assert ".pm-welcome" in CHAT_POLISH_CSS
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in CHAT_POLISH_CSS
+    assert "min-height: 48px" in CHAT_POLISH_CSS
 
 
 def test_chat_theme_uses_neutral_semantic_surfaces():
@@ -171,7 +179,7 @@ def test_codex_style_composer_uses_native_two_row_chat_input():
     assert 'accept_file="multiple"' in source
     assert "accept_audio=voice_input_enabled" in source
     assert "audio_sample_rate=16000" in source
-    assert "height=96" in source
+    assert "height=80" in source
 
     panel = _selector_block(
         '[data-testid="stPopoverBody"]:has(.pm-access-panel-anchor)'
