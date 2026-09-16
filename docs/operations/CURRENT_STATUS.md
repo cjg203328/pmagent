@@ -1,6 +1,6 @@
 # Current Project Status
 
-Validated on 2026-09-12 from branch
+Validated on 2026-09-17 from branch
 `chore/consolidate-uncommitted-work`.
 
 ## Runtime Shape
@@ -47,6 +47,8 @@ always covers syntax errors, invalid constructs, and undefined names.
 - API chat is an async route. Native async handlers can be injected through
   `GatewayServices.chat_async_handler`; the legacy synchronous handler runs in a
   worker thread until provider clients are migrated.
+- Remote and local MCP blocking work is isolated from the host event loop;
+  transport and tool return contracts remain backward compatible.
 - API transcripts persist stable error codes rather than raw provider
   exceptions.
 - Request dependencies are grouped in `RequestServiceBundle` while old

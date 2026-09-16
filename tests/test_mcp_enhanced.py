@@ -1,14 +1,19 @@
 """
 测试增强型MCP客户端和Skills
 """
+
 import asyncio
+import subprocess
 import sys
 from pathlib import Path
 
 # 添加仓库根路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from artpm_agent.core.mcp_client_enhanced import EnhancedMCPClient, get_enhanced_mcp_client
+from artpm_agent.core.mcp_client_enhanced import (
+    EnhancedMCPClient,
+    get_enhanced_mcp_client,
+)
 from artpm_agent.skills.mcp_skills import get_mcp_skill
 
 
@@ -29,6 +34,50 @@ async def test_sensitive_files_are_never_exposed_and_output_is_bounded(tmp_path)
     assert ".env" not in listed["files"]
 
 
+async def test_blocking_local_tools_are_offloaded_from_event_loop(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "notes.txt"
+    source.write_text("alpha\nbeta\n", encoding="utf-8")
+    client = EnhancedMCPClient(str(tmp_path), allow_commands=True)
+    client.command_allowlist = frozenset({"python"})
+    offloaded = []
+
+    async def run_in_worker(function, *args, **kwargs):
+        offloaded.append(function)
+        return function(*args, **kwargs)
+
+    completed = subprocess.CompletedProcess(
+        args=["python", "--version"],
+        returncode=0,
+        stdout="Python test",
+        stderr="",
+    )
+    monkeypatch.setattr(asyncio, "to_thread", run_in_worker)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed)
+
+    read_result = await client.call_tool("read_file", {"file_path": "notes.txt"})
+    search_result = await client.call_tool(
+        "search_content",
+        {"query": "alpha", "file_pattern": "*.txt"},
+    )
+    analysis_result = await client.call_tool(
+        "analyze_data",
+        {"data_source": [{"value": 1}, {"value": 2}]},
+    )
+    command_result = await client.call_tool(
+        "execute_command",
+        {"command": ["python", "--version"]},
+    )
+
+    assert read_result["success"] is True
+    assert search_result["count"] == 1
+    assert analysis_result["analysis"]["rows"] == 2
+    assert command_result["success"] is True
+    assert len(offloaded) >= 4
+
+
 async def test_mcp_client():
     """测试MCP客户端基础功能"""
     print("=" * 60)
@@ -45,10 +94,7 @@ async def test_mcp_client():
 
     # 测试2: 搜索项目文件
     print("\n\n测试文件搜索:")
-    result = await client.call_tool("search_files", {
-        "pattern": "*.md",
-        "limit": 5
-    })
+    result = await client.call_tool("search_files", {"pattern": "*.md", "limit": 5})
     if result["success"]:
         print(f"  找到 {result['count']} 个文件:")
         for file in result["files"][:5]:
@@ -60,10 +106,9 @@ async def test_mcp_client():
     print("\n\n测试文件读取:")
     if result.get("files"):
         test_file = result["files"][0]
-        read_result = await client.call_tool("read_file", {
-            "file_path": test_file,
-            "lines_limit": 10
-        })
+        read_result = await client.call_tool(
+            "read_file", {"file_path": test_file, "lines_limit": 10}
+        )
         if read_result["success"]:
             print(f"  文件: {read_result['metadata']['file_name']}")
             print(f"  大小: {read_result['metadata']['file_size']} bytes")
@@ -86,11 +131,9 @@ async def test_file_skills():
     print("\n测试 FileSearchSkill:")
     skill = get_mcp_skill("file_search", context)
     if skill:
-        result = await skill.execute({
-            "pattern": "*.py",
-            "directory": "artpm_agent/core",
-            "limit": 5
-        })
+        result = await skill.execute(
+            {"pattern": "*.py", "directory": "artpm_agent/core", "limit": 5}
+        )
         if result["success"]:
             print(f"  找到 {result['count']} 个Python文件:")
             for file in result["files"]:
@@ -104,10 +147,7 @@ async def test_file_skills():
     print("\n测试 FileReaderSkill:")
     skill = get_mcp_skill("file_reader", context)
     if skill:
-        result = await skill.execute({
-            "file_path": "README.md",
-            "lines_limit": 15
-        })
+        result = await skill.execute({"file_path": "README.md", "lines_limit": 15})
         if result["success"]:
             print(f"  文件: {result['metadata']['file_name']}")
             print(f"  大小: {result['metadata']['file_size']} bytes")
@@ -142,10 +182,9 @@ async def test_data_analyzer():
             {"项目": "项目C", "报价": 150000, "成本": 120000, "利润率": 0.15},
         ]
 
-        result = await skill.execute({
-            "data_source": test_data,
-            "analysis_type": "descriptive"
-        })
+        result = await skill.execute(
+            {"data_source": test_data, "analysis_type": "descriptive"}
+        )
 
         if result["success"]:
             print(f"  数据行数: {result['analysis']['rows']}")
@@ -177,20 +216,22 @@ async def test_project_evaluator():
     if skill:
         # 测试案例1: 高利润率项目
         print("\n案例1: 高利润率项目")
-        result = await skill.execute({
-            "project_data": {
-                "quote_amount": 300000,
-                "cost": 180000,
-                "deadline": "2026-08-01"
+        result = await skill.execute(
+            {
+                "project_data": {
+                    "quote_amount": 300000,
+                    "cost": 180000,
+                    "deadline": "2026-08-01",
+                }
             }
-        })
+        )
 
         if result["success"]:
             print(f"  可行性评分: {result['feasibility_score']}/100")
-            print(f"  利润率: {result['profit_rate']*100:.1f}%")
+            print(f"  利润率: {result['profit_rate'] * 100:.1f}%")
             print(f"  风险等级: {result['risk_level']}")
             print(f"  利润分析:")
-            for key, value in result['profit_analysis'].items():
+            for key, value in result["profit_analysis"].items():
                 if isinstance(value, (int, float)):
                     print(f"    {key}: ¥{value:,.0f}")
                 else:
@@ -201,17 +242,19 @@ async def test_project_evaluator():
 
         # 测试案例2: 低利润率项目
         print("\n案例2: 低利润率项目")
-        result = await skill.execute({
-            "project_data": {
-                "quote_amount": 200000,
-                "cost": 180000,
-                "deadline": "2026-08-15"
+        result = await skill.execute(
+            {
+                "project_data": {
+                    "quote_amount": 200000,
+                    "cost": 180000,
+                    "deadline": "2026-08-15",
+                }
             }
-        })
+        )
 
         if result["success"]:
             print(f"  可行性评分: {result['feasibility_score']}/100")
-            print(f"  利润率: {result['profit_rate']*100:.1f}%")
+            print(f"  利润率: {result['profit_rate'] * 100:.1f}%")
             print(f"  风险等级: {result['risk_level']}")
             print(f"  建议:")
             for rec in result["recommendations"]:
@@ -231,10 +274,7 @@ async def test_integrated_workflow():
     # 步骤1: 搜索项目文件
     print("\n步骤1: 搜索项目中的Excel文件")
     search_skill = get_mcp_skill("file_search", context)
-    search_result = await search_skill.execute({
-        "pattern": "*.xlsx",
-        "limit": 3
-    })
+    search_result = await search_skill.execute({"pattern": "*.xlsx", "limit": 3})
 
     if search_result["success"] and search_result["files"]:
         print(f"  找到 {search_result['count']} 个Excel文件")
@@ -248,18 +288,20 @@ async def test_integrated_workflow():
         # 步骤3: 项目评估
         print("\n步骤3: 评估项目可行性")
         evaluator_skill = get_mcp_skill("project_evaluator", context)
-        eval_result = await evaluator_skill.execute({
-            "project_data": {
-                "quote_amount": 350000,
-                "cost": 240000,
-                "deadline": "2026-09-01"
+        eval_result = await evaluator_skill.execute(
+            {
+                "project_data": {
+                    "quote_amount": 350000,
+                    "cost": 240000,
+                    "deadline": "2026-09-01",
+                }
             }
-        })
+        )
 
         if eval_result["success"]:
             print(f"\n  📊 评估结果:")
             print(f"  • 可行性评分: {eval_result['feasibility_score']}/100")
-            print(f"  • 利润率: {eval_result['profit_rate']*100:.1f}%")
+            print(f"  • 利润率: {eval_result['profit_rate'] * 100:.1f}%")
             print(f"  • 风险等级: {eval_result['risk_level']}")
             print(f"  • 预计利润: ¥{eval_result['profit_analysis']['profit']:,.0f}")
 
@@ -290,6 +332,7 @@ async def main():
     except Exception as e:
         print(f"\n❌ 测试失败: {e}")
         import traceback
+
         traceback.print_exc()
 
 

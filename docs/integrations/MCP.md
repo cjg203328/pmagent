@@ -49,6 +49,9 @@ an explicit integration test and is skipped by the offline suite unless
   other mutation tools are not enabled by this application contract.
 - A remote connection failure is reported as a degraded optional capability;
   it must not make the local UI, API, or CLI unavailable.
+- Async calls isolate blocking HTTP, file parsing, data analysis, and approved
+  command execution in worker threads so MCP work cannot stall the host event
+  loop.
 - MCP tool execution still runs inside the Harness approval and tenant/workspace
   boundaries. MCP does not become a second request-processing entrypoint.
 

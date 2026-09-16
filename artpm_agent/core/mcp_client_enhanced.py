@@ -2,13 +2,14 @@
 Enhanced MCP Client - 连接Claude Code能力
 利用Claude Code的工具能力(Read, Write, Glob, Grep, Bash, Agent)
 """
-from copy import deepcopy
+
+import asyncio
 import logging
 import os
 import shlex
-from typing import Dict, Any, List
+from copy import deepcopy
 from pathlib import Path
-
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 MAX_TOOL_FILE_BYTES = 10 * 1024 * 1024
@@ -26,6 +27,7 @@ _SENSITIVE_FILE_SUFFIXES = frozenset(
     {".db", ".sqlite", ".sqlite3", ".pem", ".key", ".p12", ".pfx"}
 )
 _SENSITIVE_DIRECTORIES = frozenset({".git", ".ssh", ".aws", ".azure", ".gnupg"})
+
 
 # Executable basename allowlist for the execute_command tool. It must be
 # explicitly non-empty when command execution is enabled. This is defense in
@@ -171,7 +173,7 @@ class EnhancedMCPClient:
                 "description": "执行系统命令",
                 "execute": self._execute_command,
                 "input_schema": _ENHANCED_MCP_INPUT_SCHEMAS["execute_command"],
-            }
+            },
         }
 
         logger.debug("Initialized with %d local tools", len(self.available_tools))
@@ -226,6 +228,14 @@ class EnhancedMCPClient:
     # ═══════════════════════════════════════════════════════════
 
     async def _read_file(self, file_path: str, **kwargs) -> Dict[str, Any]:
+        """Read and parse a workspace file without blocking the event loop."""
+        return await asyncio.to_thread(
+            self._read_file_sync,
+            file_path,
+            **kwargs,
+        )
+
+    def _read_file_sync(self, file_path: str, **kwargs) -> Dict[str, Any]:
         """
         读取文件内容
 
@@ -251,10 +261,7 @@ class EnhancedMCPClient:
             path = self._resolve_readable_path(file_path)
 
             if not path.is_file():
-                return {
-                    "success": False,
-                    "error": f"File not found: {file_path}"
-                }
+                return {"success": False, "error": f"File not found: {file_path}"}
             if path.stat().st_size > MAX_TOOL_FILE_BYTES:
                 return {"success": False, "error": "File is larger than 10 MB"}
 
@@ -267,13 +274,15 @@ class EnhancedMCPClient:
             suffix = path.suffix.lower()
             if suffix in {".xlsx", ".xls"}:
                 import pandas as pd
+
                 content = pd.read_excel(path).to_csv(index=False)
             elif suffix == ".pdf":
                 import pdfplumber
+
                 with pdfplumber.open(path) as pdf:
                     content = "\n".join(page.extract_text() or "" for page in pdf.pages)
             else:
-                with open(path, 'r', encoding=encoding, errors='replace') as f:
+                with open(path, "r", encoding=encoding, errors="replace") as f:
                     content = f.read(MAX_TOOL_OUTPUT_CHARS + 1)
 
             if lines_limit is not None:
@@ -295,16 +304,26 @@ class EnhancedMCPClient:
                     "lines": line_count,
                     "encoding": encoding,
                     "truncated": truncated,
-                }
+                },
             }
 
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+            return {"success": False, "error": str(e)}
 
-    async def _search_files(self, pattern: str, directory: str = None, **kwargs) -> Dict[str, Any]:
+    async def _search_files(
+        self, pattern: str, directory: str = None, **kwargs
+    ) -> Dict[str, Any]:
+        """Search workspace paths without blocking the event loop."""
+        return await asyncio.to_thread(
+            self._search_files_sync,
+            pattern,
+            directory,
+            **kwargs,
+        )
+
+    def _search_files_sync(
+        self, pattern: str, directory: str = None, **kwargs
+    ) -> Dict[str, Any]:
         """
         搜索文件
 
@@ -357,16 +376,26 @@ class EnhancedMCPClient:
                 "files": file_paths,
                 "count": len(file_paths),
                 "pattern": pattern,
-                "search_dir": str(search_dir)
+                "search_dir": str(search_dir),
             }
 
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+            return {"success": False, "error": str(e)}
 
-    async def _search_content(self, query: str, file_pattern: str = "*", **kwargs) -> Dict[str, Any]:
+    async def _search_content(
+        self, query: str, file_pattern: str = "*", **kwargs
+    ) -> Dict[str, Any]:
+        """Search file contents without blocking the event loop."""
+        return await asyncio.to_thread(
+            self._search_content_sync,
+            query,
+            file_pattern,
+            **kwargs,
+        )
+
+    def _search_content_sync(
+        self, query: str, file_pattern: str = "*", **kwargs
+    ) -> Dict[str, Any]:
         """
         搜索文件内容
 
@@ -400,7 +429,11 @@ class EnhancedMCPClient:
             pattern = re.compile(query, flags)
 
             # 搜索文件
-            files_result = await self._search_files(file_pattern, str(search_dir), recursive=True)
+            files_result = self._search_files_sync(
+                file_pattern,
+                str(search_dir),
+                recursive=True,
+            )
 
             if not files_result["success"]:
                 return files_result
@@ -415,20 +448,20 @@ class EnhancedMCPClient:
                     full_path = self._resolve_readable_path(file_path)
                     if full_path.stat().st_size > 10 * 1024 * 1024:
                         continue
-                    emitted_chars = sum(
-                        len(item["content"]) for item in matches
-                    )
-                    with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    emitted_chars = sum(len(item["content"]) for item in matches)
+                    with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
                         for line_num, line in enumerate(f, 1):
                             if pattern.search(line):
                                 snippet = line.strip()[:2000]
                                 if emitted_chars + len(snippet) > MAX_TOOL_OUTPUT_CHARS:
                                     break
-                                matches.append({
-                                    "file": file_path,
-                                    "line": line_num,
-                                    "content": snippet,
-                                })
+                                matches.append(
+                                    {
+                                        "file": file_path,
+                                        "line": line_num,
+                                        "content": snippet,
+                                    }
+                                )
                                 emitted_chars += len(snippet)
 
                                 if len(matches) >= limit:
@@ -440,20 +473,30 @@ class EnhancedMCPClient:
                 "success": True,
                 "matches": matches,
                 "count": len(matches),
-                "query": query
+                "query": query,
             }
 
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+            return {"success": False, "error": str(e)}
 
     # ═══════════════════════════════════════════════════════════
     # 数据分析
     # ═══════════════════════════════════════════════════════════
 
-    async def _analyze_data(self, data_source: Any, analysis_type: str = "descriptive", **kwargs) -> Dict[str, Any]:
+    async def _analyze_data(
+        self, data_source: Any, analysis_type: str = "descriptive", **kwargs
+    ) -> Dict[str, Any]:
+        """Load and analyze structured data outside the event loop."""
+        return await asyncio.to_thread(
+            self._analyze_data_sync,
+            data_source,
+            analysis_type,
+            **kwargs,
+        )
+
+    def _analyze_data_sync(
+        self, data_source: Any, analysis_type: str = "descriptive", **kwargs
+    ) -> Dict[str, Any]:
         """
         分析数据
 
@@ -482,11 +525,11 @@ class EnhancedMCPClient:
                 if path.stat().st_size > MAX_TOOL_FILE_BYTES:
                     return {"success": False, "error": "File is larger than 10 MB"}
 
-                if path.suffix in ['.xlsx', '.xls']:
+                if path.suffix in [".xlsx", ".xls"]:
                     df = pd.read_excel(path)
-                elif path.suffix == '.csv':
+                elif path.suffix == ".csv":
                     df = pd.read_csv(path)
-                elif path.suffix == '.json':
+                elif path.suffix == ".json":
                     df = pd.read_json(path)
                 else:
                     return {"success": False, "error": "Unsupported file format"}
@@ -501,12 +544,12 @@ class EnhancedMCPClient:
                 "rows": len(df),
                 "columns": len(df.columns),
                 "column_names": list(df.columns),
-                "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()}
+                "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
             }
 
             if analysis_type in ["descriptive", "statistics"]:
                 # 描述性统计
-                numeric_cols = df.select_dtypes(include=['number']).columns
+                numeric_cols = df.select_dtypes(include=["number"]).columns
                 if len(numeric_cols) > 0:
                     desc = df[numeric_cols].describe()
                     analysis["statistics"] = desc.to_dict()
@@ -522,7 +565,7 @@ class EnhancedMCPClient:
                     insights.append(f"发现 {missing.sum()} 个缺失值")
 
                 # 数值列统计
-                numeric_cols = df.select_dtypes(include=['number']).columns
+                numeric_cols = df.select_dtypes(include=["number"]).columns
                 if len(numeric_cols) > 0:
                     insights.append(f"包含 {len(numeric_cols)} 个数值列")
 
@@ -530,20 +573,25 @@ class EnhancedMCPClient:
                 "success": True,
                 "analysis": analysis,
                 "insights": insights,
-                "preview": df.head(5).to_dict('records') if len(df) > 0 else []
+                "preview": df.head(5).to_dict("records") if len(df) > 0 else [],
             }
 
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+            return {"success": False, "error": str(e)}
 
     # ═══════════════════════════════════════════════════════════
     # 命令执行
     # ═══════════════════════════════════════════════════════════
 
     async def _execute_command(self, command: str, **kwargs) -> Dict[str, Any]:
+        """Run an approved command outside the event loop."""
+        return await asyncio.to_thread(
+            self._execute_command_sync,
+            command,
+            **kwargs,
+        )
+
+    def _execute_command_sync(self, command: str, **kwargs) -> Dict[str, Any]:
         """
         执行系统命令
 
@@ -563,15 +611,17 @@ class EnhancedMCPClient:
         if not self.allow_commands:
             return {
                 "success": False,
-                "error": "Command execution is disabled. Set MCP_ALLOW_COMMANDS=true to enable it."
+                "error": (
+                    "Command execution is disabled. Set MCP_ALLOW_COMMANDS=true "
+                    "to enable it."
+                ),
             }
 
         if not self.command_allowlist:
             return {
                 "success": False,
                 "error": (
-                    "Command execution requires a non-empty "
-                    "MCP_COMMAND_ALLOWLIST"
+                    "Command execution requires a non-empty MCP_COMMAND_ALLOWLIST"
                 ),
             }
 
@@ -580,7 +630,11 @@ class EnhancedMCPClient:
 
             cwd = self._resolve_path(kwargs.get("cwd"))
             timeout = self._bounded_int(kwargs.get("timeout"), 30, 1, 120)
-            args = command if isinstance(command, list) else shlex.split(command, posix=os.name != "nt")
+            args = (
+                command
+                if isinstance(command, list)
+                else shlex.split(command, posix=os.name != "nt")
+            )
             if not args:
                 return {"success": False, "error": "Command is empty"}
 
@@ -604,7 +658,8 @@ class EnhancedMCPClient:
                 cwd=cwd,
                 capture_output=True,
                 text=True,
-                timeout=timeout
+                timeout=timeout,
+                check=False,
             )
 
             return {
@@ -612,19 +667,13 @@ class EnhancedMCPClient:
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "exit_code": result.returncode,
-                "command": command
+                "command": command,
             }
 
         except subprocess.TimeoutExpired:
-            return {
-                "success": False,
-                "error": f"Command timeout after {timeout}s"
-            }
+            return {"success": False, "error": f"Command timeout after {timeout}s"}
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+            return {"success": False, "error": str(e)}
 
     # ═══════════════════════════════════════════════════════════
     # 公共接口
@@ -653,10 +702,7 @@ class EnhancedMCPClient:
             result = await tool["execute"](**params)
             return result
         except Exception as e:
-            return {
-                "success": False,
-                "error": f"Tool execution failed: {str(e)}"
-            }
+            return {"success": False, "error": f"Tool execution failed: {str(e)}"}
 
     def list_tools(self) -> List[Dict[str, Any]]:
         """列出所有可用工具"""
@@ -673,7 +719,9 @@ class EnhancedMCPClient:
         """Compatibility alias for callers that expose tools as skills."""
         return self.list_tools()
 
-    async def call_skill(self, skill_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def call_skill(
+        self, skill_name: str, params: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """Compatibility alias for the legacy MCP client interface."""
         return await self.call_tool(skill_name, params)
 
@@ -693,9 +741,8 @@ def get_enhanced_mcp_client(workspace_path: str = None) -> EnhancedMCPClient:
     """获取增强型MCP客户端实例"""
     global _enhanced_mcp_client
     requested = Path(workspace_path).resolve() if workspace_path else None
-    if (
-        _enhanced_mcp_client is None
-        or (requested is not None and requested != _enhanced_mcp_client.workspace_path)
+    if _enhanced_mcp_client is None or (
+        requested is not None and requested != _enhanced_mcp_client.workspace_path
     ):
         _enhanced_mcp_client = EnhancedMCPClient(workspace_path)
     return _enhanced_mcp_client

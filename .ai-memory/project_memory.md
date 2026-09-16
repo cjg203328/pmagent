@@ -152,3 +152,15 @@ Replace the concatenated fragments when Streamlit exposes a stable scoped styles
 **理由**: A prose answer is not a valid substitute for a requested file. Format-level verification turns model intent into an auditable delivery contract while preserving workspace path, no-overwrite and optional dependency boundaries.
 **Trade-offs**: Runtime verification proves openability, content and structure, not human visual approval of arbitrary complex layouts. PPTX/reportlab remain in the optional `documents` profile and are imported on capability use.
 **撤销条件**: Replace only with a richer artifact runtime that preserves strict plans, safe versioned publication, format reopen checks, content assertions and canonical Harness/UI metadata behavior.
+
+## Decision Record: MCP event-loop isolation
+
+**日期**: 2026-09-17
+**问题**: MCP exposed async APIs while the HTTP transport, local file parsing, Pandas analysis and approved command execution still performed blocking work on the host event loop.
+
+### 决策
+
+**选择**: Preserve all MCP async methods and response contracts, but dispatch blocking transport and local-tool implementations with `asyncio.to_thread`; keep the synchronous implementations private and directly test the offload boundary.
+**理由**: A slow remote skill, large local document or approved command must not serialize unrelated API/Agent coroutines. The worker boundary fixes this without introducing a second async HTTP/filesystem stack or expanding optional dependencies.
+**Trade-offs**: Very small local operations pay thread-dispatch overhead, and cancellation cannot stop an already running synchronous worker immediately. Existing timeout and output-size limits remain the resource boundary.
+**撤销条件**: Replace individual worker bridges only when the corresponding transport or parser has a native async implementation with equivalent timeout, security and compatibility behavior.

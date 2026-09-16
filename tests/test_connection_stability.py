@@ -6,10 +6,10 @@ from unittest.mock import Mock
 import pytest
 import requests
 
+from artpm_agent.agent import ArtPMAgent
 from artpm_agent.core.mcp_client import MCPClient
 from artpm_agent.core.mcp_client_stdio import StdioMCPClient
 from artpm_agent.core.mcp_client_unified import UnifiedMCPClient
-from artpm_agent.agent import ArtPMAgent
 from artpm_agent.providers.gateway import ModelGateway
 from artpm_agent.utils.streaming_progress import (
     TurnStage,
@@ -182,12 +182,40 @@ def test_http_backend_accepts_unified_force_argument(monkeypatch):
     post = Mock(return_value=response)
     monkeypatch.setattr("artpm_agent.core.mcp_client.requests.post", post)
 
-    result = asyncio.run(
-        client.call_skill("resolve_skill", {"query": "x"}, force=True)
-    )
+    result = asyncio.run(client.call_skill("resolve_skill", {"query": "x"}, force=True))
 
     assert result == {"success": True, "data": "resolved"}
     post.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_http_skill_execution_offloads_blocking_request(monkeypatch):
+    client = object.__new__(MCPClient)
+    client.enabled = True
+    client._configured = True
+    client.available_skills = [{"name": "resolve_skill"}]
+    client.base_url = "https://skills.example.test/api"
+    client.api_key = "sk_live_test"
+    client.last_error = None
+    client.last_error_category = None
+    response = SimpleNamespace(
+        raise_for_status=lambda: None,
+        json=lambda: {"success": True, "data": "resolved"},
+    )
+    post = Mock(return_value=response)
+    offloaded = []
+
+    async def run_in_worker(function, *args, **kwargs):
+        offloaded.append(function)
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr("artpm_agent.core.mcp_client.requests.post", post)
+    monkeypatch.setattr(asyncio, "to_thread", run_in_worker)
+
+    result = await client.call_skill("resolve_skill", {"query": "x"})
+
+    assert result == {"success": True, "data": "resolved"}
+    assert post in offloaded
 
 
 def test_unified_ping_rejects_backend_that_claims_ping_but_is_disabled(

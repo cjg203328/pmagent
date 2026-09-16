@@ -1,42 +1,36 @@
 ## Handoff Checkpoint
 
-**更新时间**: 2026-09-17 03:52
-**当前目标**: Deliver verified natural-language DOCX/XLSX/PPTX/PDF generation
-**当前阶段**: Implementation, verification, commit and push complete
-**完成度**: 100% for artifact capability implementation
+**更新时间**: 2026-09-17 04:18
+**当前目标**: Fix reproducible defects, remove verified performance blockers and push a fully validated revision
+**当前阶段**: Implementation and local verification complete; commit/push pending
+**完成度**: 95% (all local code and runtime verification complete)
 
 ### 已完成
 
-- Compact chat landing hierarchy and responsive action grid are implemented in focused welcome/style modules.
-- Desktop and 390x844 browser checks show zero horizontal overflow; mobile actions are 48px high.
-- Optimization verifier now decodes UTF-8 safely and separates blocking Ruff rules from historical debt.
-- Full suite `1574 passed, 22 skipped`; UI suite `59 passed`; runtime/startup suite `21 passed`; optimization `15/15`.
-- UI and API remain healthy at `127.0.0.1:8501` and `127.0.0.1:8765`.
-- Screenshot prompt now produces a real verified DOCX and never reaches ordinary chat.
-- PPTX and PDF generation, previews and format reopen verification are implemented.
-- Full suite `1581 passed, 22 skipped`; optimization `15/15`; browser verification passed.
-- Commit `a7200dd` is pushed to `origin/chore/consolidate-uncommitted-work`.
+- Reproduced async MCP event-loop blocking with failing regression tests.
+- Isolated remote HTTP, local file parsing/search, Pandas analysis and approved command execution in worker threads without changing public contracts.
+- Focused MCP suite passed `88` tests; full suite passed `1583`, with `22` explicit external-integration skips.
+- Optimization verifier passed `15/15`; benchmark passed three consecutive runs; blocking and changed-surface Ruff, compileall, lock and diff checks passed.
+- API restarted with `/ready=true`; UI restarted with HTTP `200`.
+- Browser verification showed a complete artifact conversation, zero horizontal overflow at 1280px and no console warnings/errors.
 
 ### 未完成
 
-- No unfinished local code work for this artifact capability.
-- Live PostgreSQL RLS assertions still require disposable app/admin database URLs.
-- The legacy base stylesheet, `ui_helpers.py`, and the remaining `views/chat.py` host logic are future physical split targets.
+- Commit and push this verified revision, then confirm local and remote HEAD equality.
+- Live PostgreSQL RLS still requires disposable app/admin database URLs.
+- Live remote MCP/provider latency requires explicit credentials and external services.
 
 ### 关键决策
 
-- New page-specific CSS belongs in `artpm_agent/ui/style_*.py`; `ui_style.py` remains compatibility-only.
-- Browser evidence is required for desktop and narrow-screen UI changes.
-- Repository-wide blocking lint and changed-surface lint are separate, explicit gates.
-- Explicit artifact requests stay inside the artifact handler after format/action detection.
-- Download metadata is exposed only after format reopen and publication integrity checks pass.
+- MCP async entrypoints must isolate every blocking transport/parser/process operation from the host event loop.
+- Historical whole-repository style debt is not treated as a runtime defect; blocking correctness and changed-surface rules remain mandatory gates.
 
 ### 恢复入口
 
-- **首读文件**: `artpm_agent/artifacts/coordinator.py`, `artpm_agent/artifacts/generator.py`, `artpm_agent/artifacts/verification.py`, `docs/architecture/ARTIFACT_GENERATION.md`
-- **关键命令**: `uv run pytest -q`; `uv run python scripts/verify_optimization.py`
+- **首读文件**: `artpm_agent/core/mcp_client.py`, `artpm_agent/core/mcp_client_enhanced.py`, `tests/test_connection_stability.py`, `tests/test_mcp_enhanced.py`
+- **关键命令**: `uv run pytest -q`; `uv run python scripts/verify_optimization.py`; `powershell -ExecutionPolicy Bypass -File scripts/test_benchmark.ps1`
 - **验证路径**: `http://127.0.0.1:8501`, `http://127.0.0.1:8765/health`, `http://127.0.0.1:8765/ready`
 
 ### 阻塞项
 
-- External PostgreSQL RLS only; no local code blocker.
+- No local blocker. External PostgreSQL and live MCP/provider verification depend on user-supplied disposable services and credentials.

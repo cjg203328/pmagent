@@ -354,6 +354,8 @@ artpm_agent/
 - 未绑定权威知识库的 `MemoryManager.save_document()` 已退役；工作区知识统一写入
   `StorageRegistry.knowledge`。
 - API chat 优先使用 async handler；同步旧 Agent 在迁移完成前通过线程隔离。
+- MCP 的远程 HTTP、本地文件解析、数据分析和命令执行均在线程中隔离，
+  不得阻塞 API/Agent 主事件循环。
 - 业务库和记忆库分离，workspace/tenant 隔离必须贯穿查询、写入、缓存和向量检索。
 - 模型工具调用先过 JSON Schema；写入型操作必须经过宿主审批。
 

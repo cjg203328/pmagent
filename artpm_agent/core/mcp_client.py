@@ -2,13 +2,15 @@
 MCP (Model Context Protocol) Client - 增强诊断版
 直接通过 HTTP API 连接到 Skills Forge
 """
+
+import asyncio
 import json
 import logging
 import os
 import time
+from typing import Any, Dict, List, Optional
 
 import requests
-from typing import Dict, Any, List, Optional
 
 from artpm_agent.utils.llm_client import is_valid_api_key
 
@@ -36,10 +38,14 @@ class MCPClient:
         self.available_skills: List[Dict[str, Any]] = []
         # 分类诊断信息，供 UI 展示具体原因
         self.last_error: Optional[str] = None
-        self.last_error_category: Optional[str] = None  # network | http | auth | parse | url
+        self.last_error_category: Optional[str] = (
+            None  # network | http | auth | parse | url
+        )
 
         if self.enabled:
-            logger.info("[MCP] Initializing Skills Forge connection to %s ...", self.base_url)
+            logger.info(
+                "[MCP] Initializing Skills Forge connection to %s ...", self.base_url
+            )
             self._fetch_available_skills()
         else:
             reasons = []
@@ -143,7 +149,10 @@ class MCPClient:
                     time.sleep(0.15 * (attempt + 1))
                     continue
                 return response
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as error:
+            except (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+            ) as error:
                 last_error = error
                 if attempt >= 2:
                     raise
@@ -159,7 +168,9 @@ class MCPClient:
         if "json" not in ct and "html" in ct.lower():
             raise ValueError(self._classify_error(response=response))
         payload = response.json()
-        skills = payload.get("skills", payload) if isinstance(payload, dict) else payload
+        skills = (
+            payload.get("skills", payload) if isinstance(payload, dict) else payload
+        )
         if not isinstance(skills, list):
             raise ValueError("Skills endpoint did not return a list")
         normalized = [
@@ -182,20 +193,30 @@ class MCPClient:
             self.enabled = True
             self.last_error = None
             self.last_error_category = None
-            logger.info("[MCP] Loaded %d skills from %s", len(self.available_skills), self.base_url)
+            logger.info(
+                "[MCP] Loaded %d skills from %s",
+                len(self.available_skills),
+                self.base_url,
+            )
             return True
 
         except Exception as e:
-            self.last_error = self._classify_error(response=locals().get("response"), exc=e)
+            self.last_error = self._classify_error(
+                response=locals().get("response"), exc=e
+            )
             self.enabled = False
-            logger.warning("[MCP] Failed to fetch skills [%s]: %s",
-                           self.last_error_category, self.last_error, exc_info=True)
+            logger.warning(
+                "[MCP] Failed to fetch skills [%s]: %s",
+                self.last_error_category,
+                self.last_error,
+                exc_info=True,
+            )
             return False
 
     def ping(self) -> tuple[bool, str]:
         """
         轻量级连通性测试（不拉全量技能列表）。
-        
+
         Returns:
             (success, message) — success=True 表示可达且返回合法 JSON
         """
@@ -227,22 +248,17 @@ class MCPClient:
         if not self.enabled and self._configured:
             # A transient startup failure must not permanently disable the
             # client. A direct call gets one bounded health refresh first.
-            self._fetch_available_skills()
+            await asyncio.to_thread(self._fetch_available_skills)
         if not self.enabled:
-            return {
-                "success": False,
-                "error": "MCP is not enabled"
-            }
+            return {"success": False, "error": "MCP is not enabled"}
 
         try:
             skill_info = self.get_skill_info(skill_name)
             if not skill_info:
-                return {
-                    "success": False,
-                    "error": f"Skill '{skill_name}' not found"
-                }
+                return {"success": False, "error": f"Skill '{skill_name}' not found"}
 
-            response = requests.post(
+            response = await asyncio.to_thread(
+                requests.post,
                 f"{self.base_url}/skills/{skill_name}/execute",
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 json={"parameters": params},
@@ -250,20 +266,18 @@ class MCPClient:
             )
             response.raise_for_status()
             result = response.json()
-            return result if isinstance(result, dict) else {"success": True, "data": result}
+            return (
+                result
+                if isinstance(result, dict)
+                else {"success": True, "data": result}
+            )
 
         except requests.RequestException as e:
             self.last_error = self._classify_error(exc=e)
-            return {
-                "success": False,
-                "error": f"MCP request failed: {e}"
-            }
+            return {"success": False, "error": f"MCP request failed: {e}"}
         except (TypeError, ValueError) as e:
             self.last_error = self._classify_error(exc=e)
-            return {
-                "success": False,
-                "error": f"Invalid MCP response: {e}"
-            }
+            return {"success": False, "error": f"Invalid MCP response: {e}"}
 
     def list_skills(self) -> List[Dict[str, Any]]:
         """
@@ -324,7 +338,7 @@ def get_mcp_client():
 
 
 def reset_mcp_client() -> None:
-    """清除全局 MCP 客户端单例，下次 get_mcp_client() 会重新初始化（读取最新环境变量）。"""
+    """清除全局 MCP 客户端单例，让下次调用按最新环境变量重新初始化。"""
     from artpm_agent.core.mcp_client_unified import reset_unified_mcp_client
 
     reset_unified_mcp_client()
