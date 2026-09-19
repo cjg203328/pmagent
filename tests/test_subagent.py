@@ -30,6 +30,19 @@ def test_delegate_tool_runs_subtask_and_returns_output():
     assert "error" not in result
 
 
+def test_delegate_tool_supports_agent_tool_invoke_contract():
+    tool = subagent_delegate_tool(_pool())
+
+    result = tool.invoke(
+        "call-1",
+        {"task": "调研报价公式"},
+        threading.Event(),
+    )
+
+    assert result.details["output"] == "answer:调研报价公式"
+    assert not result.is_error
+
+
 def test_delegate_tool_rejects_empty_task():
     tool = subagent_delegate_tool(_pool())
     result = tool.execute(task="   ")

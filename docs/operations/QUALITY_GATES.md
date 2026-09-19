@@ -24,6 +24,11 @@ powershell -ExecutionPolicy Bypass -File scripts/coverage_core.ps1
 
 # Cross-platform equivalent
 python scripts/coverage_core.py
+
+# Type and architecture governance
+python scripts/mypy_ratchet.py
+python scripts/build_graph.py --selftest
+python -m pytest -q tests/test_ci_contract.py tests/test_p2_module_boundaries.py --no-cov
 ```
 
 The default `pytest` command runs functional tests without coverage overhead.
@@ -39,3 +44,11 @@ Tests under `tests/integration/` are automatically marked `integration`.
 Streamlit and model synchronization modules with expensive application startup
 are marked `slow`. Marking is applied during collection so existing tests keep
 their normal names and can still be selected directly.
+
+The type ratchet has two layers. The full package keeps a reviewed diagnostic
+ceiling so legacy debt cannot grow; `runtime/`, `harness/`, `api/` and
+`tenancy/` must independently pass strict mypy with
+`--ignore-missing-imports --follow-imports=silent`. The architecture tests
+enforce physical router/store splits and Protocol-owned service fields. The
+dependency graph is only an impact-analysis accelerator; `rg`, tests and type
+checks remain authoritative.

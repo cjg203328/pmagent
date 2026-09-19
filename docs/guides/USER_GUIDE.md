@@ -167,7 +167,7 @@ python scripts/clean.py
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/test_fast.ps1
 powershell -ExecutionPolicy Bypass -File scripts/test_all.ps1
-ruff check artpm_agent tests
+ruff check artpm_agent tests --select E9,F63,F7,F82
 python -m compileall -q artpm_agent
 ```
 

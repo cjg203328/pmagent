@@ -51,23 +51,26 @@ class MemoryContextBudget:
     max_total_tokens: int = 0
     compression: str = "truncate"  # "truncate" (cut) | "compact" (clean+cut)
     token_model: str = ""  # tiktoken model name (optional; falls back to heuristic)
-    token_counter: Optional[Callable] = None  # custom token counter (optional)
-    summarize_fn: Optional[Callable] = None  # LLM summarizer hook (optional)
+    token_counter: Optional[Callable[[str], int]] = None  # custom token counter (optional)
+    summarize_fn: Optional[Callable[[str], str]] = None  # LLM summarizer hook (optional)
 
 
-def _make_llm_callable(runtime: Any):
+def _make_llm_callable(runtime: Any) -> Optional[Callable[[str], str]]:
     """Extract a best-effort compressor callable from the public runtime."""
     if runtime is None:
         return None
     factory = getattr(runtime, "make_llm_callable", None)
-    return factory() if callable(factory) else None
+    if not callable(factory):
+        return None
+    candidate = factory()
+    return candidate if callable(candidate) else None
 
 
 _COMPRESSION_INJECTOR_ATTR = "_artpm_compression_injector"
 _COMPRESSION_INJECTOR_LOCK = RLock()
 
 
-def _compression_injector(knowledge_store: Any, runtime: Any):
+def _compression_injector(knowledge_store: Any, runtime: Any) -> Any:
     """Reuse compression state for the lifetime of the owning store/runtime."""
     from artpm_agent.memory.memory_injector import MemoryInjector
 
@@ -90,7 +93,10 @@ def _compression_injector(knowledge_store: Any, runtime: Any):
         return injector
 
 
-def _build_query(user_input: str, history: Optional[List[dict]]) -> str:
+def _build_query(
+    user_input: str,
+    history: Optional[List[dict[str, Any]]],
+) -> str:
     """Compose a bounded query without feeding model output back into recall."""
     current = " ".join(str(user_input or "").split())
     if not current:
@@ -354,7 +360,7 @@ def _scoped_active_entries(store: Any, scope: Any) -> list[Any]:
 
 def retrieve_memory_context(
     user_input: str,
-    history: Optional[List[dict]] = None,
+    history: Optional[List[dict[str, Any]]] = None,
     *,
     memory_manager: Optional[Any] = None,
     tencentdb_memory: Optional[Any] = None,
@@ -1166,7 +1172,7 @@ def record_turn_feedback(
             get_default_feedback_store,
         )
 
-        store = feedback_store or get_default_feedback_store()
+        store: Any = feedback_store or get_default_feedback_store()
         tenant_id = str(tenant_id or "").strip()
         workspace_id = str(workspace_id or "").strip()
         principal_id = str(principal_id or "").strip()

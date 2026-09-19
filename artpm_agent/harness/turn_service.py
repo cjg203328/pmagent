@@ -14,10 +14,10 @@ This keeps agent.py and pages/chat.py thin by centralizing turn logic.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from threading import RLock
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 from .profile_handler import try_profile_proposal
 from .knowledge_handler import try_knowledge_ingestion
@@ -42,6 +42,9 @@ from artpm_agent.routing.service import IntentDecision
 from artpm_agent.tenancy.scope import Scope
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from artpm_agent.memory.workspace_knowledge_store import WorkspaceKnowledgeStore
 
 # Stable boundary version for hosts that exchange TurnContext/TurnResult data.
 RUN_TURN_CONTRACT_VERSION = "1"
@@ -111,6 +114,7 @@ class TurnScope(Scope):
 
     tenant_id: str = "local"
     workspace_id: str = "local-default"
+
     @property
     def actor_id(self) -> str:
         return self.principal_id
@@ -331,9 +335,7 @@ def _run_turn_core(
     knowledge_store: Optional[Any] = None,
     artifact_coordinator: Optional[Any] = None,
     request_conversation_id: Optional[str] = None,
-    knowledge_rule_extractor: Optional[
-        Callable[[str], Optional[str]]
-    ] = None,
+    knowledge_rule_extractor: Optional[Callable[[str], Optional[str]]] = None,
     workflow_coordinator: Optional[Any] = None,
     workflow_formatter: Optional[Callable[[Any, Any], str]] = None,
     response_handler: Optional[Callable[[TurnContext], Any]] = None,
@@ -419,9 +421,7 @@ def _run_turn_core(
     )
 
     # Handler 1: Profile change proposal
-    profile_result = try_profile_proposal(
-        ctx, profile_store, request_conversation_id
-    )
+    profile_result = try_profile_proposal(ctx, profile_store, request_conversation_id)
     if profile_result is not None:
         return profile_result
 
@@ -430,11 +430,7 @@ def _run_turn_core(
     file_paths = list(ctx.extra.get("file_paths", []))
     if attachments and not file_paths:
         file_paths = [
-            str(
-                attachment.get("file_path")
-                or attachment.get("stored_path")
-                or ""
-            )
+            str(attachment.get("file_path") or attachment.get("stored_path") or "")
             for attachment in attachments
             if isinstance(attachment, Mapping)
         ]
@@ -511,9 +507,7 @@ def run_turn(
     knowledge_store: Optional[Any] = None,
     artifact_coordinator: Optional[Any] = None,
     request_conversation_id: Optional[str] = None,
-    knowledge_rule_extractor: Optional[
-        Callable[[str], Optional[str]]
-    ] = None,
+    knowledge_rule_extractor: Optional[Callable[[str], Optional[str]]] = None,
     workflow_coordinator: Optional[Any] = None,
     workflow_formatter: Optional[Callable[[Any, Any], str]] = None,
     response_handler: Optional[Callable[[TurnContext], Any]] = None,
@@ -533,8 +527,12 @@ def run_turn(
     if resolved_services is not None:
         profile_store = profile_store or resolved_services.profile_store
         knowledge_store = knowledge_store or resolved_services.knowledge_store
-        artifact_coordinator = artifact_coordinator or resolved_services.artifact_coordinator
-        workflow_coordinator = workflow_coordinator or resolved_services.workflow_coordinator
+        artifact_coordinator = (
+            artifact_coordinator or resolved_services.artifact_coordinator
+        )
+        workflow_coordinator = (
+            workflow_coordinator or resolved_services.workflow_coordinator
+        )
         workflow_formatter = workflow_formatter or resolved_services.workflow_formatter
         ctx.services = resolved_services
     request_conversation_id = request_conversation_id or ctx.conversation_id
@@ -649,6 +647,10 @@ def complete_turn_lifecycle(
 
     Every operation is independently best-effort. A learning or observability
     outage must never turn a completed user response into a failed request.
+
+    **Outbox-based async execution**: Instead of executing learning operations
+    synchronously, this function enqueues them to OutboxStore for background
+    processing. This decouples user-facing latency from best-effort learning.
     """
     resolved_services = services or ctx.services
     if resolved_services is None:
@@ -662,6 +664,156 @@ def complete_turn_lifecycle(
     status: dict[str, Any] = {}
     scope = ctx.scope or TurnScope()
     feedback_text = feedback.strip() if isinstance(feedback, str) else ""
+
+    # Try to get outbox store from services
+    outbox_store = getattr(resolved_services, "outbox_store", None)
+
+    # Fallback: synchronous execution if outbox is unavailable
+    if outbox_store is None:
+        return _complete_turn_lifecycle_sync(
+            ctx, result, resolved_services, feedback_text, auto_reflect, scope, status
+        )
+
+    # Async path: enqueue jobs to outbox
+    from artpm_agent.memory.outbox_store import JobType
+
+    enqueued = 0
+
+    # Job 1: Feedback recording
+    feedback_store = resolved_services.feedback_store
+    if feedback_text and feedback_store is not None:
+        try:
+            outbox_store.enqueue(
+                turn_id=ctx.turn_id,
+                job_type=JobType.FEEDBACK,
+                payload={
+                    "kind": _feedback_kind(feedback_text),
+                    "content": feedback_text,
+                    "scope": result.handled_by or "global",
+                    "principal_id": scope.actor_id,
+                },
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+            )
+            status["feedback_enqueued"] = True
+            enqueued += 1
+        except Exception:  # noqa: BLE001 - enqueue failure must not block turn
+            logger.warning("feedback outbox enqueue failed", exc_info=True)
+            status["feedback_enqueued"] = False
+
+    # Job 2: Episode recording
+    episode_store = resolved_services.episode_store
+    if episode_store is not None:
+        try:
+            outbox_store.enqueue(
+                turn_id=ctx.turn_id,
+                job_type=JobType.EPISODE,
+                payload={
+                    "conversation_id": ctx.conversation_id,
+                    "handler": result.handled_by or "unknown",
+                    "success": result.success,
+                    "error_kind": result.metadata.get("error_kind")
+                    if not result.success
+                    else None,
+                    "user_input_excerpt": ctx.user_input[:200]
+                    if ctx.user_input
+                    else "",
+                    "feedback": feedback_text or None,
+                    "run_id": getattr(ctx, "run_id", ""),
+                    "metadata": result.metadata,
+                    "principal_id": scope.actor_id,
+                },
+                tenant_id=scope.tenant_id,
+                workspace_id=scope.workspace_id,
+            )
+            status["outcome_enqueued"] = True
+            enqueued += 1
+        except Exception:  # noqa: BLE001
+            logger.warning("episode outbox enqueue failed", exc_info=True)
+            status["outcome_enqueued"] = False
+
+    # Job 3 & 4: Reflection and Consolidation (only if auto_reflect=True)
+    if auto_reflect:
+        reflection_scheduler = resolved_services.reflection_scheduler
+        if (
+            reflection_scheduler is not None
+            and episode_store is not None
+            and feedback_store is not None
+            and resolved_services.strategy_store is not None
+        ):
+            try:
+                outbox_store.enqueue(
+                    turn_id=ctx.turn_id,
+                    job_type=JobType.REFLECTION,
+                    payload={"all_principals": True},
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                )
+                status["reflection_enqueued"] = True
+                enqueued += 1
+            except Exception:  # noqa: BLE001
+                logger.warning("reflection outbox enqueue failed", exc_info=True)
+                status["reflection_enqueued"] = False
+
+        knowledge_store = resolved_services.knowledge_store
+        consolidation_scheduler = resolved_services.consolidation_scheduler
+        if knowledge_store is not None and consolidation_scheduler is not None:
+            try:
+                outbox_store.enqueue(
+                    turn_id=ctx.turn_id,
+                    job_type=JobType.CONSOLIDATION,
+                    payload={},
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                )
+                status["consolidation_enqueued"] = True
+                enqueued += 1
+            except Exception:  # noqa: BLE001
+                logger.warning("consolidation outbox enqueue failed", exc_info=True)
+                status["consolidation_enqueued"] = False
+
+        tencentdb_memory = resolved_services.tencentdb_memory
+        if tencentdb_memory is not None:
+            try:
+                outbox_store.enqueue(
+                    turn_id=ctx.turn_id,
+                    job_type=JobType.TENCENTDB_MEMORY,
+                    payload={
+                        "user_input": ctx.user_input,
+                        "response": result.response,
+                        "scope": {
+                            "tenant_id": scope.tenant_id,
+                            "workspace_id": scope.workspace_id,
+                            "user_id": scope.actor_id,
+                            "session_id": ctx.conversation_id,
+                            "agent_id": "artpm-agent",
+                        },
+                    },
+                    tenant_id=scope.tenant_id,
+                    workspace_id=scope.workspace_id,
+                )
+                status["tencentdb_memory_enqueued"] = True
+                enqueued += 1
+            except Exception:  # noqa: BLE001
+                logger.warning("TencentDB memory outbox enqueue failed", exc_info=True)
+                status["tencentdb_memory_enqueued"] = False
+
+    status["finalized"] = True
+    status["jobs_enqueued"] = enqueued
+    status["async_mode"] = True
+    return status
+
+
+def _complete_turn_lifecycle_sync(
+    ctx: TurnContext,
+    result: TurnResult,
+    resolved_services: TurnServiceBundle,
+    feedback_text: str,
+    auto_reflect: bool,
+    scope: TurnScope,
+    status: dict[str, Any],
+) -> dict[str, Any]:
+    """Synchronous fallback for lifecycle completion (legacy path)."""
     feedback_store = resolved_services.feedback_store
     if feedback_text and feedback_store is not None:
         try:
@@ -682,11 +834,12 @@ def complete_turn_lifecycle(
     if episode_store is not None:
         try:
             from .outcome_recorder import record_outcome
+            from artpm_agent.memory.episode_store import EpisodeStore
 
             episode_id = record_outcome(
                 ctx,
                 result,
-                store=episode_store,
+                store=cast(EpisodeStore, episode_store),
                 feedback=feedback_text or None,
             )
             status["outcome_recorded"] = episode_id is not None
@@ -723,7 +876,9 @@ def complete_turn_lifecycle(
                 from artpm_agent.memory.consolidation import ConsolidationService
 
                 report = consolidation_scheduler.run_if_due(
-                    ConsolidationService(knowledge_store),
+                    ConsolidationService(
+                        cast("WorkspaceKnowledgeStore", knowledge_store)
+                    ),
                     tenant_id=scope.tenant_id,
                     workspace_id=scope.workspace_id,
                 )
@@ -733,6 +888,7 @@ def complete_turn_lifecycle(
                 status["consolidation_ran"] = False
 
     status["finalized"] = True
+    status["async_mode"] = False
     return status
 
 
@@ -817,7 +973,9 @@ def _run_thin_runtime(
 
     stream_method = getattr(runtime, "stream_with_failover", None)
     stream_target = getattr(runtime, "target", None)
-    if callable(stream_method) and callable(getattr(stream_target, "stream_chat", None)):
+    if callable(stream_method) and callable(
+        getattr(stream_target, "stream_chat", None)
+    ):
         streamed: list[str] = []
         try:
             source = stream_method(
@@ -827,7 +985,7 @@ def _run_thin_runtime(
                 image_paths=[],
                 context=response_context,
             )
-            for chunk in source:
+            for chunk in cast(Iterable[Any], source):
                 if isinstance(chunk, str) and chunk:
                     streamed.append(chunk)
             response = "".join(streamed)

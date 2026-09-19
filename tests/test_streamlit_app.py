@@ -662,7 +662,11 @@ def test_streamlit_clear_chat_requires_second_confirmation():
 def test_streamlit_generates_new_xlsx_and_exposes_download_metadata():
     app = AppTest.from_file(APP_FILE).run(timeout=30)
     app.button(key="new_conversation").click().run(timeout=30)
-    app.session_state["agent"] = ArtifactAgent()
+    agent = ArtifactAgent()
+    runtime_factory = app.session_state["runtime_factory"]
+    runtime_factory.clear_scoped_runtime_cache()
+    runtime_factory._agent = agent
+    app.session_state["agent"] = agent
 
     app.chat_input(key="chat_input").set_value("生成一个 Excel 项目清单").run(
         timeout=30

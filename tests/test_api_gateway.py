@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from pathlib import Path
 import math
 import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -25,10 +25,10 @@ from artpm_agent.api.services import (
     _store_status,
 )
 from artpm_agent.memory.conversation_store import ConversationStore
+from artpm_agent.runtime.counters import increment_counter, reset_counters
 from artpm_agent.security.permission_store import PermissionStore
 from artpm_agent.workflows.engine import WorkflowEngine
 from artpm_agent.workflows.store import WorkflowStore
-from artpm_agent.runtime.counters import increment_counter, reset_counters
 
 
 def _headers(workspace: str = "local-default", *, actor: str = "alice", role: str = "user"):
@@ -300,6 +300,93 @@ def test_default_runtime_reuses_the_coordinator_workflow_engine(tmp_path, monkey
     assert engine is coordinator.engine
 
 
+def test_default_runtime_propagates_profile_to_scoped_turn_services(monkeypatch):
+    from unittest.mock import Mock
+
+    import artpm_agent.harness as harness
+    from artpm_agent.harness import BaseHarnessRuntime, TurnResult
+
+    profile_calls = []
+    workflow_calls = []
+    artifact_calls = []
+    captured = {}
+    workflow_coordinator = SimpleNamespace(engine=object())
+    artifact_coordinator = SimpleNamespace(generator=object())
+    profile = SimpleNamespace(profile_id="studio-profile")
+
+    class ProfileStore:
+        def get_effective_profile(self, *, scope):
+            profile_calls.append(scope)
+            return profile
+
+    class Factory:
+        def __init__(self):
+            self.storage = SimpleNamespace(
+                profile=ProfileStore(),
+                knowledge=None,
+            )
+            self._agent = BaseHarnessRuntime()
+
+        def agent(self):
+            return self._agent
+
+        def workflow_coordinator(self, tenant_context, *, profile_id):
+            workflow_calls.append((tenant_context, profile_id))
+            return workflow_coordinator
+
+        def artifact_coordinator(self, tenant_context, *, profile_id):
+            artifact_calls.append((tenant_context, profile_id))
+            return artifact_coordinator
+
+    runtime = object.__new__(DefaultGatewayRuntime)
+    runtime.runtime_factory = Factory()
+    runtime.conversations = Mock()
+    runtime.conversations.build_context.return_value = []
+    runtime.permissions = Mock()
+    runtime.profile_store = runtime.runtime_factory.storage.profile
+    runtime.knowledge_store = None
+    runtime.session_store = None
+    runtime._learning_initialized = True
+    runtime.feedback_store = None
+    runtime.strategy_store = None
+    runtime.episode_store = None
+    runtime.reflection_scheduler = None
+    runtime.meta_memory_store = None
+    runtime.consolidation_scheduler = None
+    runtime.event_bus = None
+
+    def capture(ctx, **kwargs):
+        captured["ctx"] = ctx
+        captured["services"] = kwargs["services"]
+        return TurnResult(response="ok", handled_by="test")
+
+    monkeypatch.setattr(harness, "run_turn", capture)
+    principal = RequestPrincipal(
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+        profile_id="studio-profile",
+        actor_id="alice",
+    )
+    command = ChatCommand(
+        principal=principal,
+        conversation_id="conversation-a",
+        turn_id="turn-a",
+        message="create a report",
+        tenant_context=principal.tenant_context(),
+    )
+
+    outcome = runtime._chat_scoped(command)
+
+    assert workflow_calls == [(command.tenant_context, "studio-profile")]
+    assert artifact_calls == [(command.tenant_context, "studio-profile")]
+    assert profile_calls == [command.tenant_context.to_scope()]
+    assert captured["services"].workflow_coordinator is workflow_coordinator
+    assert captured["services"].artifact_coordinator is artifact_coordinator
+    assert captured["ctx"].agent_profile is profile
+    assert captured["ctx"].extra["profile_id"] == "studio-profile"
+    assert outcome.metadata["profile_id"] == "studio-profile"
+
+
 def test_store_health_probe_always_closes_sqlite_connection(tmp_path, monkeypatch):
     class ProbeConnection:
         closed = False
@@ -564,8 +651,8 @@ def test_default_runtime_excludes_current_user_message_from_history(monkeypatch)
     import threading
     from unittest.mock import Mock
 
-    from artpm_agent.harness import BaseHarnessRuntime, TurnResult
     import artpm_agent.harness as harness
+    from artpm_agent.harness import BaseHarnessRuntime, TurnResult
 
     runtime = object.__new__(DefaultGatewayRuntime)
     runtime._lock = threading.RLock()
@@ -574,7 +661,11 @@ def test_default_runtime_excludes_current_user_message_from_history(monkeypatch)
     runtime.conversations.build_context.return_value = []
     agent = BaseHarnessRuntime()
     monkeypatch.setattr(runtime, "_ensure_agent", lambda: agent)
-    monkeypatch.setattr(runtime, "_ensure_workflow_runtime", lambda _tenant: (None, None))
+    monkeypatch.setattr(
+        runtime,
+        "_ensure_workflow_runtime",
+        lambda _tenant, **_kwargs: (None, None),
+    )
     monkeypatch.setattr(
         harness,
         "run_turn",
@@ -616,7 +707,11 @@ def test_default_runtime_records_scoped_episode(monkeypatch):
     runtime.conversations.build_context.return_value = []
     agent = BaseHarnessRuntime()
     monkeypatch.setattr(runtime, "_ensure_agent", lambda: agent)
-    monkeypatch.setattr(runtime, "_ensure_workflow_runtime", lambda _tenant: (None, None))
+    monkeypatch.setattr(
+        runtime,
+        "_ensure_workflow_runtime",
+        lambda _tenant, **_kwargs: (None, None),
+    )
     monkeypatch.setattr(
         harness,
         "run_turn",
@@ -652,8 +747,8 @@ def test_default_runtime_uses_tenant_scoped_harness_adapter(monkeypatch):
     from unittest.mock import Mock
 
     import artpm_agent.harness as harness
-    from artpm_agent.harness.runtime import LegacyAgentRuntimeAdapter
     from artpm_agent.harness import TurnResult
+    from artpm_agent.harness.runtime import LegacyAgentRuntimeAdapter
 
     class Router:
         skills = {}
@@ -677,7 +772,11 @@ def test_default_runtime_uses_tenant_scoped_harness_adapter(monkeypatch):
     runtime.conversations.build_context.return_value = []
     agent = Agent()
     monkeypatch.setattr(runtime, "_ensure_agent", lambda: agent)
-    monkeypatch.setattr(runtime, "_ensure_workflow_runtime", lambda _tenant: (None, None))
+    monkeypatch.setattr(
+        runtime,
+        "_ensure_workflow_runtime",
+        lambda _tenant, **_kwargs: (None, None),
+    )
     captured = {}
 
     def capture(ctx, **_kwargs):
@@ -952,6 +1051,53 @@ def test_workflow_definition_and_run_are_scoped(gateway):
         json={"conversation_id": conversation["id"]},
     )
     assert crossed.status_code == 404
+
+
+def test_workflow_rest_runtime_receives_trusted_profile_scope(gateway):
+    client, services, _ = gateway
+    conversation = services.conversations.create_conversation(
+        "Profile workflow",
+        workspace_id="tenant-b",
+    )
+    engine = services.workflow_engine
+    captured: list[str] = []
+
+    def engine_factory(_tenant_context, *, profile_id="local-default"):
+        captured.append(profile_id)
+        return engine
+
+    services.workflow_engine = None
+    services.workflow_engine_factory = engine_factory
+    headers = {
+        **_headers("tenant-b", actor="admin", role="admin"),
+        "x-profile-id": "studio-profile",
+    }
+    definition = {
+        "id": "profile_scoped_workflow",
+        "version": 1,
+        "name": "Profile scoped workflow",
+        "description": "Profile propagation regression",
+        "read_only": True,
+        "trigger": {"always": True},
+        "steps": [
+            {
+                "id": "calculate",
+                "skill_id": "quote_calculator",
+                "capability": "quote.calculate",
+                "input_map": {},
+            }
+        ],
+    }
+
+    assert client.post("/v1/workflows", headers=headers, json=definition).status_code == 200
+    response = client.post(
+        "/v1/workflows/profile_scoped_workflow/runs",
+        headers=headers,
+        json={"conversation_id": conversation["id"]},
+    )
+
+    assert response.status_code == 200
+    assert captured == ["studio-profile"]
 
 
 def test_workflow_versions_and_risk_fields_are_server_owned(gateway):

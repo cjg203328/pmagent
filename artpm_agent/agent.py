@@ -25,7 +25,12 @@ from artpm_agent.presentation import format_skill_result
 class ArtPMAgent(RequestOrchestrator):
     """Thin compatibility facade over the request orchestrator."""
 
-    def __init__(self, config: Optional[dict[str, Any]] = None):
+    def __init__(
+        self,
+        config: Optional[dict[str, Any]] = None,
+        *,
+        business_store: Any = None,
+    ):
         # Preserve the historical module-level injection points used by tests
         # and deployment wrappers while implementation lives in its own module.
         import artpm_agent.request_orchestrator as implementation
@@ -37,6 +42,7 @@ class ArtPMAgent(RequestOrchestrator):
         registry = ComponentFactory.create(
             config,
             orchestrator_class=RequestOrchestrator,
+            business_store=business_store,
         )
         self.__dict__.update(registry.as_dict())
         # ComponentFactory builds the implementation once and the public

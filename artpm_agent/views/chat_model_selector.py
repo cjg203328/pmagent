@@ -108,7 +108,7 @@ def render_model_selector() -> Optional[str]:
     )
 
     # 检测是否切换了模型
-    if selected_model and selected_model != current_model:
+    if isinstance(selected_model, str) and selected_model != current_model:
         set_active_model(selected_model)
         return selected_model
 

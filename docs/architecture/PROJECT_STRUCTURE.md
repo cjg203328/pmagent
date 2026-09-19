@@ -45,18 +45,28 @@ artpm_agent/
 ├── agent.py                           # ArtPMAgent 兼容 facade
 ├── request_orchestrator.py             # 请求编排和兼容代理
 ├── components.py / config*.py          # 组件组装和配置分层
-├── api/                                # FastAPI 网关和 API 模型
+├── api/                                # FastAPI 网关、Protocol 和路由
+│   ├── contracts.py                    # Gateway service Protocol ports
+│   └── routers/                        # system/capabilities/permissions/workflows
 ├── harness/                            # 回合主链、知识、记忆和工作流 handler
 ├── runtime/                            # AgentLoop、事件总线、工具流水线、plan、subagent
+│   ├── service_ports.py                 # Request/turn Protocol ports
+│   ├── storage_contracts.py             # Authority and readiness contracts
+│   └── keyed_locks.py                   # Bounded workspace lock lifecycle
 ├── routing/                            # 意图识别、任务分类和输入抽取
 ├── skills/                             # 业务技能和技能路由
-├── providers/                          # Provider、故障转移、结构化输出和缓存
+├── providers/                          # Provider、故障转移、结构化输出和有界缓存
+│   ├── contracts.py                    # Provider response metadata DTO
+│   └── gateway_cache.py                # TTL/LRU/in-flight client lifecycle
 ├── memory/                             # 会话、记忆、FAISS/Qdrant 和 workspace 知识
 ├── retrieval/                          # workspace-scoped RetrievalPlan/Hit 适配层
 ├── database/                           # SQLAlchemy 模型、连接和 Alembic 适配
 ├── tenancy/ / security/                # 租户上下文、权限和审批
 ├── plugins/                            # 插件发现、allowlist 和注册
 ├── parsers/                            # Excel、OCR 和文档解析
+├── workflows/                          # 工作流协调、引擎和持久化 facade
+│   ├── store_schema.py                  # Schema/migration boundary
+│   └── store_codec.py                   # Row/DTO serialization boundary
 ├── views/                              # Streamlit 页面
 ├── ui_formatters.py                    # 无副作用的 UI 格式化纯函数
 ├── ui_helpers.py                       # UI 兼容门面和交互编排
@@ -79,6 +89,9 @@ artpm_agent/
 规范请求入口是 `HarnessRuntime` 和 `run_turn()`。API/UI 通过请求级依赖进入运行时；
 同步旧实现只作为隔离的兼容 fallback。业务库和记忆库分开，所有知识、缓存、向量和
 审批操作都必须携带正确的 tenant/workspace 上下文。
+
+架构依赖图由 `scripts/build_graph.py` 按需生成，不把生成物混入源码；查询结果只作
+影响面加速器，改码前后仍须用 `rg` 和契约测试复核。
 
 ## 文档目录
 

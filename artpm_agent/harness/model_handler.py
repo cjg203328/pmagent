@@ -8,6 +8,7 @@ Migrated from agent.py chat() method (lines 1220-1292).
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Dict, List
 
 if TYPE_CHECKING:
@@ -139,6 +140,60 @@ def fallback_to_model(
                 )
 
                 chat_kwargs["cache_scope"] = response_cache_namespace(ctx.extra)
+
+            model_tool_method = getattr(runtime, "run_model_tool_turn", None)
+            if callable(model_tool_method):
+                tool_context = dict(ctx.extra)
+                tool_context["conversation_id"] = ctx.conversation_id
+                tool_context["agent_profile"] = ctx.agent_profile
+                tool_context["knowledge_context"] = ctx.knowledge_context
+                tenant_context = tool_context.get("tenant_context")
+                scope = getattr(ctx, "scope", None)
+                tenant_id = str(
+                    getattr(scope, "tenant_id", "")
+                    or getattr(tenant_context, "tenant_id", "")
+                )
+                workspace_id = str(
+                    getattr(scope, "workspace_id", "")
+                    or getattr(tenant_context, "workspace_id", "")
+                )
+                tool_context["tenant_id"] = tenant_id
+                tool_context["workspace_id"] = workspace_id
+                if isinstance(ctx.agent_profile, Mapping):
+                    profile_id = ctx.agent_profile.get("profile_id")
+                else:
+                    profile_id = getattr(ctx.agent_profile, "profile_id", None)
+                if profile_id is not None and str(profile_id).strip():
+                    tool_context["profile_id"] = str(profile_id).strip()
+                services = getattr(ctx, "services", None)
+                session_store = getattr(services, "session_store", None)
+                model_tool_result = model_tool_method(
+                    model_prompt,
+                    conversation_id=ctx.conversation_id,
+                    workspace_id=workspace_id,
+                    history=history,
+                    context=tool_context,
+                    session_store=session_store,
+                )
+                if model_tool_result is not None:
+                    response_text, tool_metadata = model_tool_result
+                    return TurnResult(
+                        response=response_text,
+                        success=True,
+                        handled_by="model_tool_loop",
+                        metadata={
+                            "turn_id": ctx.turn_id,
+                            "conversation_id": ctx.conversation_id,
+                            "model": tool_metadata.get("model")
+                            or getattr(runtime, "last_response_model", None),
+                            "fallback_from": getattr(
+                                runtime,
+                                "last_model_fallback_from",
+                                None,
+                            ),
+                            "structured_tools": True,
+                        },
+                    )
 
             # A host may provide a renderer for incremental model deltas. The
             # stream still enters through the canonical model handler and the

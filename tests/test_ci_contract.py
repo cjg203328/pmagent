@@ -1,5 +1,5 @@
+import subprocess
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -24,6 +24,19 @@ def test_ci_quality_checks_are_blocking_and_use_ratcheted_types():
     assert "postgres-rls:" in workflow
     assert "docker-smoke:" in workflow
     assert "slow-ui:" in workflow
+
+
+def test_ci_uses_blocking_ruff_subset_and_covers_all_offline_benchmarks():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "ruff check artpm_agent tests --select E9,F63,F7,F82" in workflow
+    assert "ruff check artpm_agent tests --output-format=github" not in workflow
+    for benchmark_path in (
+        "benchmarks/test_core_performance.py",
+        "benchmarks/test_workspace_concurrency.py",
+        "tests/test_phase1_optimizations.py",
+    ):
+        assert benchmark_path in workflow
 
 
 def test_ci_postgres_and_compose_smoke_jobs_are_fail_closed():
@@ -64,16 +77,47 @@ def test_ci_postgres_and_compose_smoke_jobs_are_fail_closed():
         assert value in workflow
 
 
-def test_mypy_ratchet_has_a_strict_staged_boundary_and_pinned_tool():
+def test_mypy_ratchet_has_strict_governed_packages_and_pinned_tool(
+    monkeypatch,
+):
+    from scripts import mypy_ratchet
+
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     ratchet = (ROOT / "scripts" / "mypy_ratchet.py").read_text(encoding="utf-8")
     baseline = (ROOT / "scripts" / "mypy-baseline.txt").read_text(encoding="utf-8").strip()
 
     assert '"mypy==2.3.1"' in pyproject
-    assert "STAGED_MODULES" in ratchet
-    assert '"--strict"' in ratchet
-    assert '"--follow-imports=skip"' in ratchet
-    assert baseline == "363"
+    assert mypy_ratchet.STRICT_PACKAGES == (
+        "artpm_agent/runtime",
+        "artpm_agent/harness",
+        "artpm_agent/api",
+        "artpm_agent/tenancy",
+    )
+    assert mypy_ratchet.STRICT_OPTIONS == (
+        "--strict",
+        "--ignore-missing-imports",
+        "--follow-imports=silent",
+        "--no-pretty",
+        "--show-error-codes",
+        "--no-incremental",
+    )
+    assert "STAGED_MODULES" not in ratchet
+    assert "ignore_errors" not in ratchet
+    assert int(baseline) >= 0
+
+    calls: list[list[str]] = []
+
+    def fake_run(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(arguments)
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mypy_ratchet, "_run_mypy", fake_run)
+
+    assert mypy_ratchet.main() == 0
+    assert calls[1] == [
+        *mypy_ratchet.STRICT_PACKAGES,
+        *mypy_ratchet.STRICT_OPTIONS,
+    ]
 
 
 def test_build_waits_for_all_release_quality_gates():

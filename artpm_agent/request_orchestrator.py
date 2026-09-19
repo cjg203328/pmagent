@@ -1,19 +1,20 @@
 """
 ArtPM Copilot - Core Agent
 """
-from typing import ContextManager, Dict, Any, Iterator, Optional, List, Mapping, cast
-from pathlib import Path
 import os
+from dataclasses import replace
+from pathlib import Path
+from typing import Any, ContextManager, Dict, Iterator, List, Mapping, Optional, cast
 
 from artpm_agent.config import Config, get_config
-from artpm_agent.utils import create_llm_client, get_logger
-from artpm_agent.utils.chat_intent import (
-    is_capability_query,
-    is_exact_greeting,
-    is_identity_query,
-    is_local_fast_intent,
-    is_memory_capability_query,
-    is_model_query,
+from artpm_agent.core.mcp_client_unified import get_unified_mcp_client
+from artpm_agent.database.models import DatabaseManager
+from artpm_agent.harness import AgentSession
+from artpm_agent.harness.attachment_pipeline import (
+    parse_context_attachments,
+)
+from artpm_agent.harness.attachment_pipeline import (
+    vision_attachment_paths as prepare_vision_attachment_paths,
 )
 from artpm_agent.memory import (
     MemoryManager,
@@ -22,37 +23,39 @@ from artpm_agent.memory import (
     create_embedding_provider,
     create_tencentdb_agent_memory_client,
 )
-from artpm_agent.database.models import DatabaseManager
-from artpm_agent.skills import SkillRouter
-from artpm_agent.skills.skill_router import SKILL_METADATA
-from artpm_agent.presentation import format_skill_result as render_skill_result
-from artpm_agent.core.mcp_client_unified import get_unified_mcp_client
-from artpm_agent.harness import AgentSession
-from artpm_agent.harness.attachment_pipeline import (
-    parse_context_attachments,
-    vision_attachment_paths as prepare_vision_attachment_paths,
-)
-from artpm_agent.runtime import (
-    AgentEvent,
-    AgentEventType,
-    AgentMessage,
-    AgentLoop,
-    AgentRuntime,
-    build_capability_registry,
-)
-from artpm_agent.runtime.request_services import RequestServiceBundle
-from artpm_agent.runtime.lazy_capability import LazyCapability
-from artpm_agent.runtime.legacy_facade import record_legacy_facade_call
-from artpm_agent.routing.service import IntentDecision, IntentRouter
-from artpm_agent.routing.input_extractor import extract_skill_inputs
-from artpm_agent.providers import ModelGateway, StructuredProviderGateway
-from artpm_agent.providers.response_cache import response_cache_namespace
-from artpm_agent.security import permission_preflight
-from artpm_agent.tenancy import TenantContext, tenant_context_from_host
 from artpm_agent.plugins import (
     PluginConfigurationError,
     PluginManager,
     build_plugin_manager_from_environment,
+)
+from artpm_agent.presentation import format_skill_result as render_skill_result
+from artpm_agent.providers import ModelGateway, StructuredProviderGateway
+from artpm_agent.providers.response_cache import response_cache_namespace
+from artpm_agent.routing.input_extractor import extract_skill_inputs
+from artpm_agent.routing.service import IntentDecision, IntentRouter
+from artpm_agent.runtime import (
+    AgentEvent,
+    AgentEventType,
+    AgentLoop,
+    AgentMessage,
+    AgentRuntime,
+    build_capability_registry,
+)
+from artpm_agent.runtime.lazy_capability import LazyCapability
+from artpm_agent.runtime.legacy_facade import record_legacy_facade_call
+from artpm_agent.runtime.request_services import RequestServiceBundle
+from artpm_agent.security import permission_preflight
+from artpm_agent.skills import SkillRouter
+from artpm_agent.skills.skill_router import SKILL_METADATA
+from artpm_agent.tenancy import TenantContext, tenant_context_from_host
+from artpm_agent.utils import create_llm_client, get_logger
+from artpm_agent.utils.chat_intent import (
+    is_capability_query,
+    is_exact_greeting,
+    is_identity_query,
+    is_local_fast_intent,
+    is_memory_capability_query,
+    is_model_query,
 )
 
 # 初始化日志系统
@@ -81,7 +84,12 @@ class RequestOrchestrator:
         "pixtral",
     )
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        config: Optional[Dict[str, Any]] = None,
+        *,
+        business_store: DatabaseManager | None = None,
+    ):
         """
         Initialize ArtPM Agent
 
@@ -175,22 +183,31 @@ class RequestOrchestrator:
             )
         except TencentDBAgentMemoryConfigurationError as error:
             logger.error("TencentDB Agent Memory is disabled: %s", error)
-        business_db_path = Path(self.config.get("database.db_path"))
-        database_url = (
-            os.getenv("DATABASE_URL")
-            or self.config.get("database.url")
-            or f"sqlite:///{business_db_path.as_posix()}"
-        )
-        try:
-            self.database = DatabaseManager(database_url)
-        except (ImportError, ModuleNotFoundError):
-            fallback_enabled = os.getenv(
-                "ARTPM_SQLITE_FALLBACK", "true"
-            ).strip().lower() in {"1", "true", "yes", "on"}
-            if not str(database_url).startswith("postgresql") or not fallback_enabled:
-                raise
-            logger.warning("PostgreSQL driver unavailable; using SQLite fallback")
-            self.database = DatabaseManager(f"sqlite:///{business_db_path.as_posix()}")
+        self._owns_database = business_store is None
+        if business_store is not None:
+            self.database = business_store
+        else:
+            business_db_path = Path(self.config.get("database.db_path"))
+            database_url = (
+                os.getenv("DATABASE_URL")
+                or self.config.get("database.url")
+                or f"sqlite:///{business_db_path.as_posix()}"
+            )
+            try:
+                self.database = DatabaseManager(database_url)
+            except (ImportError, ModuleNotFoundError):
+                fallback_enabled = os.getenv(
+                    "ARTPM_SQLITE_FALLBACK", "true"
+                ).strip().lower() in {"1", "true", "yes", "on"}
+                if (
+                    not str(database_url).startswith("postgresql")
+                    or not fallback_enabled
+                ):
+                    raise
+                logger.warning("PostgreSQL driver unavailable; using SQLite fallback")
+                self.database = DatabaseManager(
+                    f"sqlite:///{business_db_path.as_posix()}"
+                )
 
         # External Python plugins are deployment-owned and disabled by default.
         # Invalid environment configuration fails closed without preventing the
@@ -290,15 +307,75 @@ class RequestOrchestrator:
 
         return LocalMarkdownConverter()
 
-    def create_agent_loop(self, **options: Any) -> AgentLoop:
+    def create_agent_loop(
+        self,
+        *,
+        tenant_context: TenantContext | None = None,
+        profile_id: str = "local-default",
+        **options: Any,
+    ) -> AgentLoop:
         """Build an isolated structured-tool loop over the loaded skills."""
         options.setdefault("before_tool_call", permission_preflight)
-        return AgentLoop(self.tool_registry, **options)
+        registry = self.tool_registry
+        if tenant_context is not None:
+            scoped_router = self.router.for_tenant(tenant_context)
+            scoped_mcp = None
+            bind_mcp = getattr(self.mcp_client, "for_tenant", None)
+            if callable(bind_mcp):
+                scoped_mcp = bind_mcp(tenant_context)
+            registry = build_capability_registry(
+                skill_router=scoped_router,
+                mcp_client=scoped_mcp,
+            )
+            resolved_profile_id = str(profile_id or "local-default").strip()
+            resolved_profile_id = resolved_profile_id or "local-default"
+            loaded_skills = getattr(scoped_router, "skills", {})
+            skill_names = (
+                set(loaded_skills)
+                if isinstance(loaded_skills, Mapping)
+                else set()
+            )
+            for skill_name in skill_names:
+                tool = registry.get(skill_name)
+                if tool is None:
+                    continue
+                original_prepare = tool.prepare_arguments
+
+                def bind_trusted_scope(
+                    arguments: Mapping[str, Any],
+                    *,
+                    prepare=original_prepare,
+                    trusted_profile_id=resolved_profile_id,
+                ) -> Mapping[str, Any]:
+                    prepared = (
+                        prepare(arguments)
+                        if prepare is not None
+                        else dict(arguments)
+                    )
+                    bound = tenant_context.bind_inputs(prepared)
+                    requested_profile = bound.get("profile_id")
+                    requested_profile_id = str(requested_profile or "").strip()
+                    if requested_profile_id and (
+                        requested_profile_id != trusted_profile_id
+                    ):
+                        raise ValueError(
+                            "profile_id does not match the trusted context"
+                        )
+                    bound["profile_id"] = trusted_profile_id
+                    return bound
+
+                registry.register(
+                    replace(tool, prepare_arguments=bind_trusted_scope),
+                    replace=True,
+                )
+        return AgentLoop(registry, **options)
 
     def create_agent_session(
         self,
         provider: Any = None,
         session_store: Any = None,
+        tenant_context: TenantContext | None = None,
+        profile_id: str = "local-default",
         **loop_options: Any,
     ) -> AgentSession:
         """Assemble the gated, persisted path without changing ``chat()``."""
@@ -320,7 +397,11 @@ class RequestOrchestrator:
             ),
         )
         return AgentSession(
-            self.create_agent_loop(**loop_options),
+            self.create_agent_loop(
+                tenant_context=tenant_context,
+                profile_id=profile_id,
+                **loop_options,
+            ),
             provider,
             session_store,
             model_tool_calls_enabled=bool(
@@ -330,6 +411,89 @@ class RequestOrchestrator:
                 )
             ),
         )
+
+    def run_model_tool_turn(
+        self,
+        prompt: str,
+        *,
+        conversation_id: str,
+        workspace_id: str,
+        history: Any = (),
+        context: Optional[Mapping[str, Any]] = None,
+        session_store: Any = None,
+    ) -> tuple[str, Mapping[str, Any]] | None:
+        """Run the structured tool loop for one canonical Harness model turn."""
+
+        runtime_context = dict(context or {})
+        runtime_context.setdefault("conversation_id", conversation_id)
+        runtime_context.setdefault("workspace_id", workspace_id)
+        runtime_context.setdefault("conversation_history", list(history or ()))
+        if not self._should_use_model_tool_session(prompt, runtime_context):
+            return None
+        tenant_context = tenant_context_from_host(runtime_context)
+        if tenant_context is None:
+            raise RuntimeError("trusted tenant context is required for model tools")
+        runtime_context["tenant_context"] = tenant_context
+        runtime_context.setdefault("tenant_id", tenant_context.tenant_id)
+        profile_id = self._model_tool_profile_id(runtime_context)
+        runtime_context["profile_id"] = profile_id
+        runtime_context["system_prompt"] = self._build_system_prompt(
+            runtime_context.get("agent_profile"),
+            runtime_context.get("knowledge_context", ""),
+        )
+        answer = ""
+        metadata: Mapping[str, Any] = {}
+        runtime_error = ""
+        events = self.create_agent_session(
+            session_store=session_store,
+            tenant_context=tenant_context,
+            profile_id=profile_id,
+        ).run(
+            prompt,
+            conversation_id=conversation_id,
+            workspace_id=workspace_id,
+            history=self._structured_history(runtime_context),
+            context=runtime_context,
+            run_id=str(runtime_context.get("run_id") or "") or None,
+            turn_id=str(runtime_context.get("turn_id") or "") or None,
+        )
+        try:
+            for event in events:
+                if event.type == AgentEventType.RUNTIME_ERROR:
+                    runtime_error = str(event.error or "model tool loop failed")
+                if (
+                    event.type == AgentEventType.MESSAGE_END
+                    and event.message is not None
+                    and event.message.role == "assistant"
+                    and event.message.content.strip()
+                ):
+                    answer = event.message.content
+                    metadata = event.message.metadata
+        finally:
+            close = getattr(events, "close", None)
+            if callable(close):
+                close()
+        if not answer:
+            raise RuntimeError(runtime_error or "model tool loop returned no answer")
+        return answer, metadata
+
+    @staticmethod
+    def _model_tool_profile_id(context: Mapping[str, Any]) -> str:
+        profile = context.get("agent_profile")
+        if isinstance(profile, Mapping):
+            profile_value = profile.get("profile_id")
+        else:
+            profile_value = getattr(profile, "profile_id", None)
+        context_value = context.get("profile_id")
+        resolved_profile = str(profile_value or "").strip()
+        resolved_context = str(context_value or "").strip()
+        if (
+            resolved_profile
+            and resolved_context
+            and resolved_profile != resolved_context
+        ):
+            raise RuntimeError("profile scope does not match the trusted context")
+        return resolved_profile or resolved_context or "local-default"
 
     def _get_model_tool_session_store(self) -> SessionStore:
         store = self._model_tool_session_store
@@ -421,7 +585,9 @@ class RequestOrchestrator:
         router = self._intent_router()
         detector = getattr(router, "detect_decision", None)
         if callable(detector):
-            return detector(user_input)
+            decision = detector(user_input)
+            if isinstance(decision, IntentDecision):
+                return decision
         return IntentDecision(
             intent=self._detect_intent(user_input),
             confidence=1.0,
@@ -450,7 +616,10 @@ class RequestOrchestrator:
         return cast(Optional[str], self._intent_router().detect_via_keywords(user_input))
     def _format_skill_result(self, skill_name: str, result: Dict[str, Any]) -> str:
         """Format a skill execution result as a natural-language response."""
-        services = getattr(self, "request_services", None)
+        services = cast(
+            Optional[RequestServiceBundle],
+            getattr(self, "request_services", None),
+        )
         if services is not None:
             return services.format_result(skill_name, result)
         return render_skill_result(skill_name, result)
@@ -473,7 +642,10 @@ class RequestOrchestrator:
         if not self.mcp_client.enabled:
             return {"success": False, "error": "MCP is not enabled"}
 
-        return await self.mcp_client.call_skill(skill_name, params)
+        result = await self.mcp_client.call_skill(skill_name, params)
+        if isinstance(result, Mapping):
+            return dict(result)
+        return {"success": False, "error": "MCP skill returned an invalid result"}
 
     @staticmethod
     def _skill_input_with_history(
@@ -512,7 +684,10 @@ class RequestOrchestrator:
         context: Dict[str, Any],
     ) -> tuple[List[Dict[str, Any]], str]:
         """Compatibility delegate for the extracted attachment pipeline."""
-        services = getattr(self, "request_services", None)
+        services = cast(
+            Optional[RequestServiceBundle],
+            getattr(self, "request_services", None),
+        )
         if services is not None:
             return services.parse_attachments(user_input, context)
         return parse_context_attachments(user_input, context, self.process_document)
@@ -523,7 +698,10 @@ class RequestOrchestrator:
         visual_semantics_requested: bool,
     ) -> ContextManager[List[str]]:
         """Compatibility delegate for bounded visual attachment preparation."""
-        services = getattr(self, "request_services", None)
+        services = cast(
+            Optional[RequestServiceBundle],
+            getattr(self, "request_services", None),
+        )
         if services is not None:
             return services.prepare_vision_attachments(
                 cast(List[Mapping[str, Any]], parsed_files),
@@ -804,8 +982,6 @@ class RequestOrchestrator:
         gateway._primary_client_model = (
             gateway.primary_model_id() if value is not None else None
         )
-        if value is not None and gateway.last_response_model:
-            gateway._clients[gateway.last_response_model] = value
         if hasattr(self, "structured_provider"):
             self.structured_provider = (
                 StructuredProviderGateway(gateway) if value is not None else None
@@ -849,7 +1025,12 @@ class RequestOrchestrator:
                 runtime_context.get("agent_profile"),
                 runtime_context.get("knowledge_context", ""),
             )
-            yield from self.create_agent_session().run(
+            profile_id = self._model_tool_profile_id(structured_context)
+            structured_context["profile_id"] = profile_id
+            yield from self.create_agent_session(
+                tenant_context=tenant_context_from_host(structured_context),
+                profile_id=profile_id,
+            ).run(
                 user_input,
                 conversation_id=conversation_id,
                 workspace_id=workspace_id,
@@ -1224,8 +1405,11 @@ class RequestOrchestrator:
             if converter is None:
                 from artpm_agent.utils.multimodal_markdown import LocalMarkdownConverter
 
-                converter = LocalMarkdownConverter()
-                self.markdown_converter = converter
+                self.markdown_converter = LazyCapability(
+                    LocalMarkdownConverter,
+                    name="documents",
+                )
+                converter = self.markdown_converter
             converted = converter.convert(file_path, parsed_result=result)
             if converted.success:
                 result["markdown"] = converted.markdown
@@ -1451,6 +1635,12 @@ class RequestOrchestrator:
             "model_gateway",
             "tencentdb_memory",
         ):
+            if resource_name == "database" and not getattr(
+                self,
+                "_owns_database",
+                True,
+            ):
+                continue
             resource = getattr(self, resource_name, None)
             close = getattr(resource, "close", None)
             if callable(close):

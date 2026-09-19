@@ -2,8 +2,34 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any
+
+from .service_ports import (
+    ArtifactCoordinatorPort,
+    AttachmentParser,
+    ConsolidationSchedulerPort,
+    EpisodeStorePort,
+    EventBusPort,
+    FeedbackStorePort,
+    IntentRouterPort,
+    KnowledgeStorePort,
+    MemoryManagerPort,
+    MetaMemoryStorePort,
+    ModelGatewayPort,
+    PermissionStorePort,
+    ProfileStorePort,
+    ReflectionSchedulerPort,
+    SessionStorePort,
+    SkillResultFormatter,
+    SkillRouterPort,
+    StrategyStorePort,
+    TencentMemoryPort,
+    VisionAttachmentPreparer,
+    WorkflowCoordinatorPort,
+    WorkflowResultFormatter,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,27 +41,27 @@ class RequestServiceBundle:
     one request concern without rebuilding the whole agent.
     """
 
-    intent_router: Any
-    skill_router: Any
-    model_gateway: Any
-    parse_attachments: Callable[[str, Mapping[str, Any]], Any]
-    prepare_vision_attachments: Callable[[Any, bool], Any]
-    format_skill_result: Callable[[str, dict[str, Any]], str]
+    intent_router: IntentRouterPort
+    skill_router: SkillRouterPort
+    model_gateway: ModelGatewayPort
+    parse_attachments: AttachmentParser
+    prepare_vision_attachments: VisionAttachmentPreparer
+    format_skill_result: SkillResultFormatter
 
-    def detect_intent(self, user_input: str) -> Any:
+    def detect_intent(self, user_input: str) -> object:
         return self.intent_router.detect(user_input)
 
-    def detect_intent_decision(self, user_input: str) -> Any:
+    def detect_intent_decision(self, user_input: str) -> object:
         detector = getattr(self.intent_router, "detect_decision", None)
         if callable(detector):
             return detector(user_input)
         return self.detect_intent(user_input)
 
-    def execute_skill(self, skill_name: str, inputs: Mapping[str, Any]) -> Any:
+    def execute_skill(self, skill_name: str, inputs: Mapping[str, Any]) -> object:
         return self.skill_router.execute_skill(skill_name, dict(inputs))
 
-    def format_result(self, skill_name: str, result: dict[str, Any]) -> str:
-        return self.format_skill_result(skill_name, result)
+    def format_result(self, skill_name: str, result: Mapping[str, Any]) -> str:
+        return self.format_skill_result(skill_name, dict(result))
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,24 +74,25 @@ class TurnServiceBundle:
     persistence paths.
     """
 
-    profile_store: Any = None
-    knowledge_store: Any = None
-    artifact_coordinator: Any = None
-    workflow_coordinator: Any = None
-    workflow_formatter: Callable[[Any, Any], str] | None = None
-    feedback_store: Any = None
-    strategy_store: Any = None
-    episode_store: Any = None
-    reflection_scheduler: Any = None
-    consolidation_scheduler: Any = None
-    meta_memory_store: Any = None
-    memory_manager: Any = None
-    tencentdb_memory: Any = None
-    permission_store: Any = None
-    event_bus: Any = None
-    session_store: Any = None
+    profile_store: ProfileStorePort | None = None
+    knowledge_store: KnowledgeStorePort | None = None
+    artifact_coordinator: ArtifactCoordinatorPort | None = None
+    workflow_coordinator: WorkflowCoordinatorPort | None = None
+    workflow_formatter: WorkflowResultFormatter | None = None
+    feedback_store: FeedbackStorePort | None = None
+    strategy_store: StrategyStorePort | None = None
+    episode_store: EpisodeStorePort | None = None
+    reflection_scheduler: ReflectionSchedulerPort | None = None
+    consolidation_scheduler: ConsolidationSchedulerPort | None = None
+    meta_memory_store: MetaMemoryStorePort | None = None
+    memory_manager: MemoryManagerPort | None = None
+    tencentdb_memory: TencentMemoryPort | None = None
+    permission_store: PermissionStorePort | None = None
+    event_bus: EventBusPort | None = None
+    session_store: SessionStorePort | None = None
+    outbox_store: Any | None = None  # OutboxStore for async learning tail
 
-    def get(self, name: str, fallback: Any = None) -> Any:
+    def get(self, name: str, fallback: object = None) -> object:
         """Read an optional request service without reaching into ``extra``."""
 
         return getattr(self, name, fallback)

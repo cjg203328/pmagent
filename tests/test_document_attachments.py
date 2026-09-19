@@ -7,13 +7,22 @@ from docx import Document
 from PIL import Image
 import pytest
 
-
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"
 
 from artpm_agent.skills.skill_router import (
     MAX_DOCUMENT_FILE_SIZE,
     DocumentClassifierParser,
 )
+from artpm_agent.security.document_paths import TrustedDocumentRoots
+
+
+def _parser(root: Path, **context) -> DocumentClassifierParser:
+    return DocumentClassifierParser(
+        {
+            **context,
+            "document_roots": TrustedDocumentRoots.from_paths(root),
+        }
+    )
 
 
 def test_document_parser_reads_real_pdf_docx_and_image(tmp_path):
@@ -31,7 +40,7 @@ def test_document_parser_reads_real_pdf_docx_and_image(tmp_path):
     image_path = tmp_path / "reference.png"
     Image.new("RGB", (23, 17), "blue").save(image_path, "PNG")
 
-    parser = DocumentClassifierParser()
+    parser = _parser(tmp_path)
     pdf_result = parser.run({"file_path": str(pdf_path)})
     docx_result = parser.run({"file_path": str(docx_path)})
     image_result = parser.run({"file_path": str(image_path)})
@@ -76,8 +85,9 @@ def test_document_parser_uses_optional_unlimited_ocr_and_keeps_image_fallback(tm
                 error=None,
             )
 
-    parsed = DocumentClassifierParser(
-        {"unlimited_ocr_client": SuccessfulOCR()}
+    parsed = _parser(
+        tmp_path,
+        unlimited_ocr_client=SuccessfulOCR(),
     ).run({"file_path": str(image_path)})
 
     assert parsed["success"] is True
@@ -97,8 +107,9 @@ def test_document_parser_uses_optional_unlimited_ocr_and_keeps_image_fallback(tm
                 error="service unavailable",
             )
 
-    fallback = DocumentClassifierParser(
-        {"unlimited_ocr_client": FailedOCR()}
+    fallback = _parser(
+        tmp_path,
+        unlimited_ocr_client=FailedOCR(),
     ).run({"file_path": str(image_path)})
     assert fallback["success"] is True
     assert fallback["raw_text"] == ""
@@ -126,8 +137,9 @@ def test_scanned_pdf_uses_multi_page_ocr_fallback(tmp_path):
                 error=None,
             )
 
-    result = DocumentClassifierParser(
-        {"unlimited_ocr_client": SuccessfulPDFOCR()}
+    result = _parser(
+        tmp_path,
+        unlimited_ocr_client=SuccessfulPDFOCR(),
     ).run({"file_path": str(pdf_path)})
 
     assert result["success"] is True
@@ -137,7 +149,7 @@ def test_scanned_pdf_uses_multi_page_ocr_fallback(tmp_path):
 
 
 def test_document_parser_validates_path_extension_empty_and_size(tmp_path):
-    parser = DocumentClassifierParser()
+    parser = _parser(tmp_path)
     directory = tmp_path / "folder"
     directory.mkdir()
     unsupported = tmp_path / "payload.exe"
@@ -156,9 +168,9 @@ def test_document_parser_validates_path_extension_empty_and_size(tmp_path):
     oversized_result = parser.run({"file_path": str(oversized)})
 
     assert missing_result["success"] is False
-    assert "文件不存在" in missing_result["error"]
+    assert missing_result["error_code"] == "document_not_found"
     assert directory_result["success"] is False
-    assert "文件不存在" in directory_result["error"]
+    assert directory_result["error_code"] == "document_not_file"
     assert unsupported_result["success"] is False
     assert "暂不支持" in unsupported_result["error"]
     assert empty_result["success"] is False
@@ -183,7 +195,7 @@ def test_document_parser_rejects_corrupt_supported_formats(
     path = tmp_path / filename
     path.write_bytes(contents)
 
-    result = DocumentClassifierParser().run({"file_path": str(path)})
+    result = _parser(tmp_path).run({"file_path": str(path)})
 
     assert result["success"] is False
     assert result["error"]
@@ -193,7 +205,7 @@ def test_document_parser_rejects_image_content_extension_mismatch(tmp_path):
     disguised = tmp_path / "disguised.png"
     Image.new("RGB", (8, 8), "red").save(disguised, "JPEG")
 
-    result = DocumentClassifierParser().run({"file_path": str(disguised)})
+    result = _parser(tmp_path).run({"file_path": str(disguised)})
 
     assert result["success"] is False
     assert "与扩展名" in result["error"]

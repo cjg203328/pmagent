@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from artpm_agent.memory.conversation_store import ConversationStore
+from artpm_agent.runtime.counters import counter_snapshot, reset_counters
 from artpm_agent.workflows.defaults import get_builtin_workflows
 from artpm_agent.workflows.engine import WorkflowEngine
 from artpm_agent.workflows.models import (
@@ -19,7 +20,6 @@ from artpm_agent.workflows.models import (
 )
 from artpm_agent.workflows.selector import WorkflowSelector
 from artpm_agent.workflows.store import WorkflowStore
-from artpm_agent.runtime.counters import counter_snapshot, reset_counters
 
 
 class _SessionState(dict):
@@ -175,6 +175,81 @@ def test_ui_learning_services_are_lazy_and_session_cached(monkeypatch, tmp_path)
     assert first_scheduler is second_scheduler
     assert episode_calls == [episode_path]
     assert consolidation_calls == [True]
+
+
+def test_ui_artifacts_follow_factory_tenant_workspace_and_profile_scope(monkeypatch):
+    from artpm_agent import ui_state
+    from artpm_agent.tenancy import TenantContext
+
+    state = _SessionState(
+        tenant_context=TenantContext(
+            tenant_id="tenant-a",
+            workspace_id="workspace-a",
+            principal_id="alice",
+        ),
+        profile_id="profile-a",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "streamlit",
+        SimpleNamespace(session_state=state),
+    )
+    calls = []
+
+    class Factory:
+        def __init__(self):
+            self.generators = {}
+            self.coordinators = {}
+
+        @staticmethod
+        def _key(tenant_context, profile_id):
+            return (
+                tenant_context.tenant_id,
+                tenant_context.workspace_id,
+                profile_id,
+            )
+
+        def artifact_generator(self, tenant_context, *, profile_id):
+            key = self._key(tenant_context, profile_id)
+            calls.append(("generator", key))
+            return self.generators.setdefault(key, SimpleNamespace(scope=key))
+
+        def artifact_coordinator(self, tenant_context, *, profile_id):
+            key = self._key(tenant_context, profile_id)
+            calls.append(("coordinator", key))
+            return self.coordinators.setdefault(
+                key,
+                SimpleNamespace(
+                    scope=key,
+                    generator=self.generators.setdefault(
+                        key,
+                        SimpleNamespace(scope=key),
+                    ),
+                ),
+            )
+
+    factory = Factory()
+    monkeypatch.setattr(ui_state, "_get_runtime_factory", lambda: factory)
+    monkeypatch.setattr(ui_state, "ARTIFACT_RUNTIME_AVAILABLE", True)
+
+    first_generator = ui_state.get_artifact_generator()
+    first_coordinator = ui_state.get_artifact_coordinator()
+    state.profile_id = "profile-b"
+    second_generator = ui_state.get_artifact_generator()
+    second_coordinator = ui_state.get_artifact_coordinator()
+
+    assert first_coordinator.generator is first_generator
+    assert second_coordinator.generator is second_generator
+    assert first_generator is not second_generator
+    assert first_coordinator is not second_coordinator
+    assert calls == [
+        ("generator", ("tenant-a", "workspace-a", "profile-a")),
+        ("coordinator", ("tenant-a", "workspace-a", "profile-a")),
+        ("generator", ("tenant-a", "workspace-a", "profile-b")),
+        ("coordinator", ("tenant-a", "workspace-a", "profile-b")),
+    ]
+    assert state.artifact_generator is second_generator
+    assert state.artifact_coordinator is second_coordinator
 
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "artpm_agent"

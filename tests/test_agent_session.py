@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from artpm_agent.agent import ArtPMAgent
@@ -14,6 +16,7 @@ from artpm_agent.runtime import (
     ToolRegistry,
     ToolResult,
 )
+from artpm_agent.runtime.counters import runtime_counters
 
 
 def _stores(tmp_path):
@@ -127,6 +130,84 @@ def test_session_persists_every_event_before_exposing_it(tmp_path):
     assert assistant_entries[0].message["metadata"]["stop_reason"] == "tool_use"
     assert assistant_entries[-1].message["content"] == "done"
     assert len(provider_messages) == 2
+
+
+def test_event_bus_failure_is_observable_without_breaking_durable_session(
+    tmp_path,
+    caplog,
+):
+    conversation, store = _stores(tmp_path)
+
+    class FailingEventBus:
+        def __init__(self):
+            self.calls = 0
+
+        def publish(self, _event):
+            self.calls += 1
+            raise RuntimeError("sink unavailable")
+
+    event_bus = FailingEventBus()
+    session = AgentSession(
+        AgentLoop(),
+        lambda *_: AssistantTurn("done"),
+        store,
+        model_tool_calls_enabled=True,
+    )
+    metric = "harness.agent_session.event_bus_publish_failures"
+    before = runtime_counters.get(metric)
+
+    with caplog.at_level(logging.WARNING, logger="artpm_agent.harness.agent_session"):
+        events = list(
+            session.run(
+                "hello",
+                conversation_id=conversation["id"],
+                context={"event_bus": event_bus},
+                run_id="run-event-bus",
+                turn_id="turn-event-bus",
+            )
+        )
+
+    assert len(store.replay(conversation["id"])) == len(events)
+    assert event_bus.calls == len(events)
+    assert runtime_counters.get(metric) - before == len(events)
+    records = [
+        record
+        for record in caplog.records
+        if record.message == "agent session event bus publish failed"
+    ]
+    assert len(records) == len(events)
+    assert records[0].conversation_id == conversation["id"]
+    assert records[0].event_type == "agent_start"
+    assert records[0].run_id == "run-event-bus"
+    assert records[0].turn_id == "turn-event-bus"
+
+
+def test_session_injects_explicit_workspace_into_loop_context(tmp_path):
+    conversation, store = _stores(tmp_path)
+    provider_contexts = []
+
+    def provider(_messages, _tools, context):
+        provider_contexts.append(dict(context))
+        return AssistantTurn("done")
+
+    session = AgentSession(
+        AgentLoop(),
+        provider,
+        store,
+        model_tool_calls_enabled=True,
+    )
+    list(
+        session.run(
+            "hello",
+            conversation_id=conversation["id"],
+            workspace_id=ConversationStore.DEFAULT_WORKSPACE_ID,
+            context={},
+        )
+    )
+
+    assert provider_contexts == [
+        {"workspace_id": ConversationStore.DEFAULT_WORKSPACE_ID}
+    ]
 
 
 def test_unknown_conversation_fails_before_calling_provider_and_releases_loop(

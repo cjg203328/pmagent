@@ -6,6 +6,18 @@ Review cadence: each release and every architecture-affecting change
 
 这份文档是当前风险治理计划。`docs/archive/` 下的报告只用于追溯，不作为实现契约。
 
+## 本轮执行状态（2026-09-18）
+
+| 阶段 | 状态 | 可验证产物 |
+| --- | --- | --- |
+| P0 多工作区隔离 | 已完成 | `(tenant, workspace, profile)` scoped runtime、UI/API 回归 |
+| P1 稳定性边界 | 已完成 | `/ready` authority probes、有界锁/模型 client/tool loop/spill 测试 |
+| P2 治理基础 | 已完成 | API router、workflow schema/codec、Protocol ports、四包 strict gate |
+| P2 后续迁移 | 进行中 | `api/app.py` 剩余 workspace/chat/embed/voice 路由、旧 UI facade 逐步迁移 |
+
+本表中的“已完成”只代表本地离线契约已通过；PostgreSQL RLS、真实 MCP 和外部模型
+延迟仍需显式集成环境验证。
+
 ## 目标架构
 
 ```text
@@ -114,7 +126,12 @@ trusted scope -> RetrievalPlan -> bounded search -> dedup/fusion -> citation
 
 每次架构变更至少验证：
 1. `pytest -q -m "not integration and not slow and not benchmark"`；
-2. `ruff check .` 与 `python -m compileall -q artpm_agent`；
+2. `ruff check artpm_agent tests --select E9,F63,F7,F82` 与
+   `python -m compileall -q artpm_agent`；改动 Python 文件再按正常规则集做
+   changed-surface 检查；
 3. scope 隔离、空检索、附件幂等和兼容 facade 回归；
 4. `/ready`、`/v1/workspaces`、`/v1/search`、`/v1/chat/stream` 实测；
 5. Streamlit 首屏可见工作区选择器，切换后不会复用旧会话或审批状态。
+6. `python scripts/mypy_ratchet.py`：`runtime/`、`harness/`、`api/`、`tenancy/`
+   使用 `--strict --follow-imports=silent` 且无诊断。
+7. `python scripts/build_graph.py --selftest`，并对改动模块用 `rg` 独立复核影响面。

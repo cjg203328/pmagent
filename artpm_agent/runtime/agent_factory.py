@@ -14,11 +14,11 @@ class AgentFactory:
     def __init__(self, builder: Callable[[], Any] | None = None) -> None:
         self._builder = builder
 
-    def create(self) -> Any:
+    def create(self, *, business_store: Any = None) -> Any:
         if self._builder is not None:
             return self._builder()
         module = import_module_timed("artpm_agent.agent")
-        return module.ArtPMAgent()
+        return module.ArtPMAgent(business_store=business_store)
 
 
 __all__ = ["AgentFactory"]

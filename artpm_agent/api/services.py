@@ -7,21 +7,29 @@ the default adapter is lazy and exists for the local/CLI deployment.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 import asyncio
+import inspect
+import logging
+import os
+import re
+import sqlite3
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import closing, nullcontext
 from dataclasses import dataclass, field
 from hmac import compare_digest
-import logging
-import os
 from pathlib import Path
-import re
-import inspect
-import sqlite3
 from typing import Any
 
-from artpm_agent.security.permission_store import PermissionRequest
+from artpm_agent.api.contracts import (
+    CapabilityCatalog,
+    ConversationStorePort,
+    EventBusPort,
+    PermissionStorePort,
+    WorkflowEnginePort,
+    WorkflowStorePort,
+)
 from artpm_agent.runtime.counters import counter_snapshot
+from artpm_agent.security.permission_store import PermissionRequest
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +44,9 @@ _STORE_REQUIRED_TABLES: dict[str, tuple[str, ...]] = {
 }
 
 
-def _store_status(value: Any, *, required_tables: tuple[str, ...] = ()) -> dict[str, Any]:
+def _store_status(
+    value: Any, *, required_tables: tuple[str, ...] = ()
+) -> dict[str, Any]:
     """Probe one SQLite store without creating or mutating its database."""
 
     if value is None:
@@ -91,10 +101,14 @@ def validate_identifier(value: Any, field: str, *, max_length: int = 128) -> str
 
     if not isinstance(value, str):
         raise IdentityError(f"{field} must be a string")
-    value = value.strip()
-    if len(value) == 0 or len(value) > max_length or not _IDENTIFIER_RE.fullmatch(value):
+    normalized = value.strip()
+    if (
+        len(normalized) == 0
+        or len(normalized) > max_length
+        or not _IDENTIFIER_RE.fullmatch(normalized)
+    ):
         raise IdentityError(f"{field} has an invalid format")
-    return value
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,18 +167,28 @@ class TrustedHeaderIdentityResolver:
     _LOCAL_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
     _FORWARDED_HEADERS = frozenset({"forwarded", "x-forwarded-for", "x-forwarded-host"})
 
-    def __init__(self, gateway_secret: str | None = None, *, require_secret: bool = False):
+    def __init__(
+        self, gateway_secret: str | None = None, *, require_secret: bool = False
+    ):
         self.gateway_secret = gateway_secret or os.getenv("ARTPM_GATEWAY_SHARED_SECRET")
-        environment = (os.getenv("ARTPM_ENV") or os.getenv("ENV") or "development").strip().lower()
+        environment = (
+            (os.getenv("ARTPM_ENV") or os.getenv("ENV") or "development")
+            .strip()
+            .lower()
+        )
         self.production = environment in {"prod", "production"}
-        self.require_secret = bool(require_secret or self.gateway_secret or self.production)
+        self.require_secret = bool(
+            require_secret or self.gateway_secret or self.production
+        )
 
     def __call__(self, request: Any) -> RequestPrincipal:
         headers = getattr(request, "headers", request)
         token = headers.get(self.TOKEN_HEADER)
         if self.require_secret:
-            if not self.gateway_secret or not token or not compare_digest(
-                str(token), str(self.gateway_secret)
+            if (
+                not self.gateway_secret
+                or not token
+                or not compare_digest(str(token), str(self.gateway_secret))
             ):
                 raise IdentityError("trusted gateway token is missing or invalid")
         else:
@@ -230,41 +254,54 @@ class ChatOutcome:
 class GatewayServices:
     """All mutable dependencies behind :func:`artpm_agent.api.create_app`."""
 
-    conversations: Any
-    permissions: Any
-    workflows: Any
-    chat_handler: Callable[[ChatCommand], Any]
-    capability_provider: Callable[[], Any]
-    chat_async_handler: Callable[[ChatCommand], Any] | None = None
-    workflow_capability_provider: Callable[[], Any] | None = None
-    permission_executor: Callable[[PermissionRequest], Any] | None = None
+    conversations: ConversationStorePort
+    permissions: PermissionStorePort
+    workflows: WorkflowStorePort
+    chat_handler: Callable[[ChatCommand], object]
+    capability_provider: Callable[[], CapabilityCatalog]
+    chat_async_handler: Callable[[ChatCommand], object] | None = None
+    workflow_capability_provider: Callable[[], Mapping[str, frozenset[str]]] | None = (
+        None
+    )
+    permission_executor: Callable[..., object] | None = None
     permission_executor_sources: frozenset[str] | None = None
-    workflow_engine: Any | None = None
-    workflow_engine_factory: Callable[[], Any] | None = None
+    workflow_engine: WorkflowEnginePort | None = None
+    workflow_engine_factory: Callable[..., WorkflowEnginePort] | None = None
     health_handler: Callable[[], Mapping[str, Any]] | None = None
     close_handler: Callable[[], None] | None = None
-    event_bus: Any | None = None
+    event_bus: EventBusPort | None = None
     # Keep newly introduced optional providers after the historical positional
     # fields. Some embedders construct GatewayServices positionally and rely on
     # the pre-retrieval ordering remaining stable.
-    knowledge_search_handler: Callable[[RequestPrincipal, Mapping[str, Any]], Any] | None = None
-    deployment_capability_provider: Callable[[], Any] | None = None
+    knowledge_search_handler: (
+        Callable[[RequestPrincipal, Mapping[str, Any]], object] | None
+    ) = None
+    deployment_capability_provider: Callable[[], CapabilityCatalog] | None = None
     # Optional provider-neutral stream adapter.  It is intentionally appended
     # after all historical fields so positional GatewayServices construction
     # remains compatible with older hosts.
-    chat_stream_handler: Callable[[ChatCommand], Any] | None = None
+    chat_stream_handler: Callable[[ChatCommand], object] | None = None
 
-    def get_workflow_engine(self, tenant_context: Any = None) -> Any:
+    def get_workflow_engine(
+        self,
+        tenant_context: object = None,
+        *,
+        profile_id: str = "local-default",
+    ) -> WorkflowEnginePort:
         engine = self.workflow_engine
         if engine is not None:
             return engine
         if self.workflow_engine_factory is not None:
             factory = self.workflow_engine_factory
             try:
-                parameters = inspect.signature(factory).parameters
+                has_parameters = bool(inspect.signature(factory).parameters)
+                accepts_profile = "profile_id" in inspect.signature(factory).parameters
             except (TypeError, ValueError):
-                parameters = {}
-            if tenant_context is not None and parameters:
+                has_parameters = False
+                accepts_profile = False
+            if tenant_context is not None and accepts_profile:
+                engine = factory(tenant_context, profile_id=profile_id)
+            elif tenant_context is not None and has_parameters:
                 engine = factory(tenant_context)
             else:
                 engine = factory()
@@ -288,7 +325,11 @@ class GatewayServices:
                 value,
                 required_tables=_STORE_REQUIRED_TABLES[name],
             )
-        status = "ok" if all(item["status"] == "ok" for item in checks.values()) else "degraded"
+        status = (
+            "ok"
+            if all(item["status"] == "ok" for item in checks.values())
+            else "degraded"
+        )
         return {
             "status": status,
             "checks": checks,
@@ -308,7 +349,9 @@ class GatewayServices:
         """
         handler = self.chat_async_handler or self.chat_handler
         call = getattr(handler, "__call__", None)
-        is_async = inspect.iscoroutinefunction(handler) or inspect.iscoroutinefunction(call)
+        is_async = inspect.iscoroutinefunction(handler) or inspect.iscoroutinefunction(
+            call
+        )
         if is_async:
             result = handler(command)
             return await result if inspect.isawaitable(result) else result
@@ -324,7 +367,9 @@ def _plain_json(value: Any, *, depth: int = 0) -> Any:
     if depth > 16:
         raise GatewayServiceError("permission payload exceeds nesting limit")
     if isinstance(value, Mapping):
-        return {str(key): _plain_json(item, depth=depth + 1) for key, item in value.items()}
+        return {
+            str(key): _plain_json(item, depth=depth + 1) for key, item in value.items()
+        }
     if isinstance(value, (tuple, list)):
         return [_plain_json(item, depth=depth + 1) for item in value]
     return value
@@ -346,11 +391,14 @@ class DefaultGatewayRuntime:
             storage=StorageRegistry(db_path=db_path)
         )
         storage = self.runtime_factory.storage
+        storage.initialize_authoritative_schema()
         self.db_path = str(storage.db_path)
+        self.business_store = storage.business
         self.conversations = storage.conversation
         self.session_store = storage.session
         self.permissions = storage.permission
         self.workflows = storage.workflow
+        self.profile_store = storage.profile
         self.knowledge_store: Any = None
         self.episode_store: Any = None
         self.feedback_store: Any = None
@@ -391,7 +439,11 @@ class DefaultGatewayRuntime:
         store = self._ensure_knowledge_store()
         if store is None:
             raise GatewayServiceError("workspace knowledge retrieval is unavailable")
-        from artpm_agent.retrieval import RetrievalPlan, SearchTarget, WorkspaceRetriever
+        from artpm_agent.retrieval import (
+            RetrievalPlan,
+            SearchTarget,
+            WorkspaceRetriever,
+        )
 
         target = SearchTarget(
             tenant_id=principal.tenant_id,
@@ -443,15 +495,24 @@ class DefaultGatewayRuntime:
             self._agent = ArtPMAgent()
         return self._agent
 
-    def _ensure_workflow_runtime(self, tenant_context: Any) -> tuple[Any, Any]:
+    def _ensure_workflow_runtime(
+        self,
+        tenant_context: Any,
+        *,
+        profile_id: str = "local-default",
+    ) -> tuple[Any, Any]:
         factory = getattr(self, "runtime_factory", None)
         if factory is not None:
-            coordinator = factory.workflow_coordinator(tenant_context)
+            coordinator = factory.workflow_coordinator(
+                tenant_context,
+                profile_id=profile_id,
+            )
             return coordinator.engine, coordinator
         agent = self._ensure_agent()
         workspace_id = tenant_context.require_workspace()
         self.workflows.ensure_builtins(
             workspace_id=workspace_id,
+            profile_id=profile_id,
             tenant_id=tenant_context.tenant_id,
         )
         scoped_router = agent.router.for_tenant(tenant_context)
@@ -472,9 +533,24 @@ class DefaultGatewayRuntime:
             ScopedWorkflowAgent(agent, scoped_router),
             capability_allowlist=allowlist,
             workspace_id=workspace_id,
+            profile_id=profile_id,
             tenant_id=tenant_context.tenant_id,
         )
         return coordinator.engine, coordinator
+
+    def _ensure_artifact_coordinator(
+        self,
+        tenant_context: Any,
+        *,
+        profile_id: str = "local-default",
+    ) -> Any:
+        factory = getattr(self, "runtime_factory", None)
+        if factory is None:
+            return None
+        return factory.artifact_coordinator(
+            tenant_context,
+            profile_id=profile_id,
+        )
 
     def workflow_capabilities(self) -> Mapping[str, frozenset[str]]:
         """Return the policy-intersected workflow catalog for this deployment."""
@@ -512,13 +588,33 @@ class DefaultGatewayRuntime:
         tenant_context = command.tenant_context
         if tenant_context is None:
             raise GatewayServiceError("tenant context is required for chat")
-        _engine, coordinator = self._ensure_workflow_runtime(tenant_context)
+        profile_id = command.principal.profile_id
+        _engine, coordinator = self._ensure_workflow_runtime(
+            tenant_context,
+            profile_id=profile_id,
+        )
+        artifact_coordinator = self._ensure_artifact_coordinator(
+            tenant_context,
+            profile_id=profile_id,
+        )
         knowledge_store = self._ensure_knowledge_store()
+        profile_store = getattr(self, "profile_store", None)
+        if profile_store is None:
+            factory = getattr(self, "runtime_factory", None)
+            storage = getattr(factory, "storage", None)
+            profile_store = getattr(storage, "profile", None)
+        agent_profile = (
+            profile_store.get_effective_profile(scope=tenant_context.to_scope())
+            if profile_store is not None
+            else None
+        )
         from artpm_agent.runtime.request_services import TurnServiceBundle
 
         turn_services = TurnServiceBundle(
+            profile_store=profile_store,
             knowledge_store=knowledge_store,
             permission_store=self.permissions,
+            artifact_coordinator=artifact_coordinator,
             workflow_coordinator=coordinator,
             session_store=getattr(self, "session_store", None),
             memory_manager=getattr(agent, "memory", None),
@@ -542,6 +638,7 @@ class DefaultGatewayRuntime:
         context = {
             "tenant_id": command.principal.tenant_id,
             "workspace_id": command.principal.workspace_id,
+            "profile_id": profile_id,
             "conversation_id": command.conversation_id,
             "turn_id": command.turn_id,
             "run_id": command.run_id or command.turn_id,
@@ -563,6 +660,7 @@ class DefaultGatewayRuntime:
             conversation_id=command.conversation_id,
             user_input=command.message,
             attachments=list(command.attachments),
+            agent_profile=agent_profile,
             conversation_history=history,
             runtime=runtime,
             services=turn_services,
@@ -573,6 +671,7 @@ class DefaultGatewayRuntime:
             services=turn_services,
             request_conversation_id=command.conversation_id,
         )
+        result.metadata.setdefault("profile_id", profile_id)
         # A canonical run_turn() owns the learning tail. Keep the adapter
         # fallback for injected legacy runners used by downstream hosts.
         if not result.metadata.get("lifecycle_managed"):
@@ -593,53 +692,20 @@ class DefaultGatewayRuntime:
         result: Any,
         services: Any,
     ) -> None:
-        """Run the host-independent learning tail for an API turn."""
-
+        """Reuse the canonical Harness lifecycle for legacy API runners."""
         try:
-            from artpm_agent.harness.outcome_recorder import record_outcome
+            from artpm_agent.harness.turn_service import complete_turn_lifecycle
 
-            record_outcome(
+            complete_turn_lifecycle(
                 turn_context,
                 result,
-                store=getattr(services, "episode_store", None),
+                services=services,
+                auto_reflect=True,
             )
         except Exception as error:  # noqa: BLE001 - learning is non-fatal
-            logger.warning("API outcome recording failed: %s", error, exc_info=True)
-
-        scope = getattr(turn_context, "scope", None)
-        if scope is None:
-            return
-        scheduler = getattr(services, "reflection_scheduler", None)
-        if scheduler is not None:
-            try:
-                episode_store = getattr(services, "episode_store", None)
-                feedback_store = getattr(services, "feedback_store", None)
-                strategy_store = getattr(services, "strategy_store", None)
-                if episode_store is not None and feedback_store is not None and strategy_store is not None:
-                    scheduler.run_if_due(
-                        episode_store,
-                        feedback_store,
-                        strategy_store,
-                        tenant_id=scope.tenant_id,
-                        workspace_id=scope.workspace_id,
-                        all_principals=True,
-                    )
-            except Exception as error:  # noqa: BLE001 - learning is non-fatal
-                logger.warning("API reflection failed: %s", error, exc_info=True)
-
-        knowledge_store = getattr(services, "knowledge_store", None)
-        consolidation_scheduler = getattr(services, "consolidation_scheduler", None)
-        if knowledge_store is not None and consolidation_scheduler is not None:
-            try:
-                from artpm_agent.memory.consolidation import ConsolidationService
-
-                consolidation_scheduler.run_if_due(
-                    ConsolidationService(knowledge_store),
-                    tenant_id=scope.tenant_id,
-                    workspace_id=scope.workspace_id,
-                )
-            except Exception as error:  # noqa: BLE001 - learning is non-fatal
-                logger.warning("API consolidation failed: %s", error, exc_info=True)
+            logger.warning(
+                "API turn lifecycle recording failed: %s", error, exc_info=True
+            )
 
     def execute_permission(
         self,
@@ -649,7 +715,9 @@ class DefaultGatewayRuntime:
         """Execute only a server-created Skill request after CAS claim."""
 
         if request.source != "skill" or not request.action.startswith("skill."):
-            raise GatewayServiceError("permission source is not executable by this host")
+            raise GatewayServiceError(
+                "permission source is not executable by this host"
+            )
         payload = _plain_json(request.payload)
         if not isinstance(payload, Mapping):
             raise GatewayServiceError("permission payload is malformed")
@@ -668,20 +736,35 @@ class DefaultGatewayRuntime:
         safe_inputs["confirmation_token"] = f"gateway:{request.id}"
         safe_inputs["idempotency_key"] = f"permission:{request.id}"
         if tenant_context is None:
-            raise GatewayServiceError("tenant context is required for permission execution")
+            raise GatewayServiceError(
+                "tenant context is required for permission execution"
+            )
         if tenant_context.workspace_id != request.workspace_id:
-            raise GatewayServiceError("permission workspace does not match tenant context")
+            raise GatewayServiceError(
+                "permission workspace does not match tenant context"
+            )
         agent = self._ensure_agent()
         scoped_router = agent.router.for_tenant(tenant_context)
-        metadata = getattr(scoped_router, "list_skills", lambda: [])()
-        known = {item.get("name") for item in metadata if isinstance(item, Mapping)}
+        raw_metadata: object = getattr(scoped_router, "list_skills", lambda: [])()
+        metadata_source = (
+            raw_metadata
+            if isinstance(raw_metadata, Iterable)
+            and not isinstance(raw_metadata, (str, bytes, Mapping))
+            else ()
+        )
+        metadata: list[Mapping[str, object]] = [
+            item for item in metadata_source if isinstance(item, Mapping)
+        ]
+        known = {item.get("name") for item in metadata}
         if skill_name not in known:
             raise GatewayServiceError(f"unknown Skill: {skill_name}")
         result = scoped_router.execute_skill(skill_name, safe_inputs)
         if not isinstance(result, Mapping):
             raise GatewayServiceError("Skill returned a non-object result")
         if result.get("success") is False:
-            raise GatewayServiceError(str(result.get("error") or "Skill execution failed"))
+            raise GatewayServiceError(
+                str(result.get("error") or "Skill execution failed")
+            )
         return result
 
     def capabilities(self) -> list[dict[str, Any]]:
@@ -695,7 +778,9 @@ class DefaultGatewayRuntime:
             # Optional agent dependencies may be absent in a minimal gateway
             # process.  Do not hide runtime/configuration bugs behind a stale
             # static catalog; those should surface through the API error path.
-            logger.warning("agent capability registry unavailable; using static catalog: %s", error)
+            logger.warning(
+                "agent capability registry unavailable; using static catalog: %s", error
+            )
             from artpm_agent.skills.skill_router import SKILL_METADATA
 
             raw_items = [
@@ -772,21 +857,34 @@ class DefaultGatewayRuntime:
     def health(self) -> Mapping[str, Any]:
         """Cheap readiness probe; it never initializes an LLM or OCR model."""
 
-        checks = {
-            name: _store_status(
+        factory = getattr(self, "runtime_factory", None)
+        storage = getattr(factory, "storage", None)
+        if storage is not None and callable(getattr(storage, "readiness", None)):
+            checks = storage.readiness()
+        else:
+            checks = {
+                name: _store_status(
+                    value,
+                    required_tables=_STORE_REQUIRED_TABLES[name],
+                )
+                for name, value in (
+                    ("conversation_store", self.conversations),
+                    ("permission_store", self.permissions),
+                    ("workflow_store", self.workflows),
+                )
+            }
+        for name, value in (
+            ("permission_store", self.permissions),
+            ("workflow_store", self.workflows),
+        ):
+            checks[name] = _store_status(
                 value,
                 required_tables=_STORE_REQUIRED_TABLES[name],
             )
-            for name, value in (
-                ("conversation_store", self.conversations),
-                ("permission_store", self.permissions),
-                ("workflow_store", self.workflows),
-            )
-        }
         checks["agent"] = {"status": "lazy"}
         status = (
             "ok"
-            if all(checks[name]["status"] == "ok" for name in _STORE_REQUIRED_TABLES)
+            if all(check.get("status") in {"ok", "lazy"} for check in checks.values())
             else "degraded"
         )
         from artpm_agent.runtime.performance import performance_snapshot
@@ -824,7 +922,12 @@ def build_default_services(db_path: str | Path | None = None) -> GatewayServices
         workflow_capability_provider=runtime.workflow_capabilities,
         permission_executor=runtime.execute_permission,
         permission_executor_sources=frozenset({"skill"}),
-        workflow_engine_factory=lambda tenant_context=None: runtime._ensure_workflow_runtime(tenant_context)[0],
+        workflow_engine_factory=lambda tenant_context=None, profile_id="local-default": (
+            runtime._ensure_workflow_runtime(
+                tenant_context,
+                profile_id=profile_id,
+            )[0]
+        ),
         health_handler=runtime.health,
         close_handler=runtime.close,
         event_bus=runtime.event_bus,

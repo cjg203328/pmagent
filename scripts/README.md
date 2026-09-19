@@ -16,15 +16,22 @@
 | 启动 | `prepare_streamlit_port.ps1` | 识别并处理本项目占用的 UI 端口 |
 | 检查 | `verify_optimization.py` | 启动、文档和优化契约检查 |
 | 检查 | `verify_new_features.py` | 历史功能验证脚本，按需运行 |
+| 检查 | `mypy_ratchet.py` | 全树诊断 ratchet + runtime/harness/api/tenancy strict gate |
+| 检查 | `build_graph.py` | 可重建、限界的源码依赖图查询和新鲜度检查 |
 | 看板 | `telemetry_dashboard_app.py` | 独立 Streamlit 遥测看板入口 |
 
 推荐先运行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/test_fast.ps1
-ruff check artpm_agent tests
+ruff check artpm_agent tests --select E9,F63,F7,F82
 python -m compileall -q artpm_agent
+python scripts/mypy_ratchet.py
+python scripts/build_graph.py --selftest
 ```
 
 运行脚本产生的 coverage、类型检查、基准、截图和 HTML 报告归入 `artifacts/`，不要
 重新写回仓库根目录。
+
+仓库级 Ruff 只阻断语法、无效构造和未定义名称；正常规则集在改动面上渐进收敛，
+避免历史样式债务阻断运行时质量门禁。

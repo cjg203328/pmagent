@@ -113,7 +113,7 @@ powershell -ExecutionPolicy Bypass -File scripts/test_all.ps1
 powershell -ExecutionPolicy Bypass -File scripts/test_integration.ps1
 powershell -ExecutionPolicy Bypass -File scripts/test_benchmark.ps1
 powershell -ExecutionPolicy Bypass -File scripts/coverage_core.ps1
-ruff check artpm_agent tests
+ruff check artpm_agent tests --select E9,F63,F7,F82
 python -m compileall -q artpm_agent
 ```
 

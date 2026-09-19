@@ -217,6 +217,40 @@ def test_openai_adapter_rejects_invalid_structured_arguments():
         )
 
 
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_openai_adapter_rejects_non_finite_arguments(constant):
+    response = {
+        "choices": [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-bad-number",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": f'{{"query": {constant}}}',
+                            },
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+    wrapper = _Wrapper(
+        "openai",
+        SimpleNamespace(chat=SimpleNamespace(completions=_Recorder(response))),
+    )
+
+    with pytest.raises(ProviderResponseError, match="invalid JSON arguments"):
+        OpenAIStructuredAdapter(wrapper)(
+            (AgentMessage(role="user", content="hello"),),
+            TOOL_SPEC,
+            {},
+        )
+
+
 def test_anthropic_adapter_serializes_tool_results_and_parses_content_blocks():
     response = SimpleNamespace(
         id="msg-1",

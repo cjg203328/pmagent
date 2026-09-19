@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from threading import Event
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Event, Thread
+from typing import ClassVar
 
 import pytest
 
@@ -147,6 +150,58 @@ def test_invalid_schema_is_rejected_when_tool_is_defined():
         )
 
 
+def test_recursive_schema_is_rejected_without_recursing_into_the_registry():
+    schema = {"type": "object"}
+    schema["properties"] = {"self": schema}
+
+    with pytest.raises(ToolDefinitionError, match="recursive values"):
+        AgentTool(
+            name="recursive",
+            description="Recursive",
+            parameters=schema,
+            execute=lambda *_: ToolResult("unexpected"),
+        )
+
+
+def test_external_schema_references_are_rejected_without_network_retrieval():
+    requests: list[str] = []
+
+    class SchemaHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            payload = json.dumps({"type": "string"}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/schema+json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format, *_args):
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), SchemaHandler)
+    server_thread = Thread(target=server.serve_forever)
+    server_thread.start()
+    try:
+        reference = f"http://127.0.0.1:{server.server_port}/schema.json"
+        with pytest.raises(ToolDefinitionError, match="external JSON Schema"):
+            AgentTool(
+                name="remote_reference",
+                description="Remote reference",
+                parameters={
+                    "type": "object",
+                    "properties": {"value": {"$ref": reference}},
+                },
+                execute=lambda *_: ToolResult("unexpected"),
+            )
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=1)
+        server.server_close()
+
+    assert requests == []
+
+
 @pytest.mark.parametrize(
     ("mutate", "expected"),
     [
@@ -256,11 +311,17 @@ def test_valid_arguments_reach_callback_after_schema_validation():
     assert callback_arguments == [arguments]
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_tool_call_rejects_non_finite_json_numbers(value):
+    with pytest.raises(ValueError, match="numbers must be finite"):
+        ToolCall("measure", {"value": value})
+
+
 def test_skill_schema_runs_before_legacy_validator_and_callback():
     order = []
 
     class Skill:
-        input_schema = {
+        input_schema: ClassVar[dict[str, object]] = {
             "type": "object",
             "required": ["project_id"],
             "properties": {"project_id": {"type": "string"}},
@@ -272,7 +333,7 @@ def test_skill_schema_runs_before_legacy_validator_and_callback():
             return False, "legacy policy rejected arguments"
 
     class Router:
-        skills = {"read_project": Skill()}
+        skills: ClassVar[dict[str, Skill]] = {"read_project": Skill()}
 
         def list_skills(self):
             return [

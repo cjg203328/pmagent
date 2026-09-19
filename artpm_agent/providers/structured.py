@@ -42,21 +42,35 @@ def _text_content(content: Any) -> str:
 
 def _json_arguments(value: Any, *, tool_name: str) -> dict[str, Any]:
     if isinstance(value, Mapping):
-        return dict(value)
-    if not isinstance(value, str):
-        raise ProviderResponseError(
-            f"provider returned non-JSON arguments for tool '{tool_name}'"
-        )
-    try:
-        parsed = json.loads(value or "{}")
-    except json.JSONDecodeError as error:
-        raise ProviderResponseError(
-            f"provider returned invalid JSON arguments for tool '{tool_name}'"
-        ) from error
+        parsed = dict(value)
+    else:
+        if not isinstance(value, str):
+            raise ProviderResponseError(
+                f"provider returned non-JSON arguments for tool '{tool_name}'"
+            )
+
+        def reject_non_finite(constant: str) -> None:
+            raise ValueError(f"non-finite JSON number: {constant}")
+
+        try:
+            parsed = json.loads(
+                value or "{}",
+                parse_constant=reject_non_finite,
+            )
+        except (json.JSONDecodeError, ValueError) as error:
+            raise ProviderResponseError(
+                f"provider returned invalid JSON arguments for tool '{tool_name}'"
+            ) from error
     if not isinstance(parsed, Mapping):
         raise ProviderResponseError(
             f"provider returned non-object arguments for tool '{tool_name}'"
         )
+    try:
+        json.dumps(parsed, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as error:
+        raise ProviderResponseError(
+            f"provider returned non-JSON arguments for tool '{tool_name}'"
+        ) from error
     return dict(parsed)
 
 
@@ -490,7 +504,11 @@ class AnthropicStructuredAdapter(StructuredProviderAdapter):
                         f"provider returned non-object arguments for tool '{name}'"
                     )
                 calls.append(
-                    ToolCall(name.strip(), dict(arguments), id=call_id.strip())
+                    ToolCall(
+                        name.strip(),
+                        _json_arguments(arguments, tool_name=name),
+                        id=call_id.strip(),
+                    )
                 )
 
         try:

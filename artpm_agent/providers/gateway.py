@@ -14,8 +14,16 @@ import json
 import os
 import re
 import time
+from contextlib import contextmanager
+from threading import RLock, local
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
+from artpm_agent.providers.contracts import ModelResponseMetadata
+from artpm_agent.providers.gateway_cache import BoundedClientCache
+from artpm_agent.providers.health_tracker import ProviderHealthTracker
+from artpm_agent.providers.model_selector import ProviderSelector
+from artpm_agent.providers.request_limiter import ModelRequestLimiter
+from artpm_agent.providers.vision_router import VisionModelRouter
 from artpm_agent.runtime.performance import (
     begin_first_model_call,
     finish_first_model_call,
@@ -23,6 +31,7 @@ from artpm_agent.runtime.performance import (
 from artpm_agent.utils import create_llm_client, get_logger
 
 logger = get_logger(__name__)
+ModelAttempt = tuple[str, Any, bool]
 
 
 class ModelGateway:
@@ -53,15 +62,58 @@ class ModelGateway:
         self,
         llm_config: Mapping[str, Any],
         primary_client: Any,
-        client_factory: Callable[[Mapping[str, Any]], Any] = create_llm_client,
+        client_factory: Callable[[Dict[str, Any]], Any] = create_llm_client,
         telemetry: Any = None,
         response_cache: Any = None,
     ) -> None:
         self._llm_config = dict(llm_config)
         self._client_factory = client_factory
         self._primary_client = primary_client
-        self._clients: Dict[str, Any] = {}
+        self._state_lock = RLock()
+        self._response_state = local()
+
+        # Initialize component modules
+        self._health_tracker = ProviderHealthTracker(
+            cooldown_seconds=self.MODEL_FAILOVER_COOLDOWN_SECONDS,
+            max_entries=self._read_bounded_int(
+                "health_cache_max_entries", 64, minimum=1, maximum=512
+            ),
+        )
+        self._model_selector = ProviderSelector(llm_config)
+        self._request_limiter = ModelRequestLimiter(
+            max_concurrent=self._read_bounded_int(
+                "max_concurrent_requests", 8, minimum=1, maximum=64
+            ),
+            timeout_seconds=self._read_bounded_float(
+                "request_queue_timeout_seconds", 30.0, minimum=0.1, maximum=300.0
+            ),
+        )
+        self._vision_router = VisionModelRouter(llm_config, client_factory)
+        # Keep the historical attributes available to integrations that read
+        # the configured "eyes" model directly.  Routing itself remains owned
+        # by VisionModelRouter so the compatibility values cannot affect
+        # request selection.
+        self._vision_model = self._vision_router._vision_model
+        self._vision_provider = self._vision_router._vision_provider
+
+        # Client cache
+        self._client_cache_max_entries = self._read_bounded_int(
+            "client_cache_max_entries", 8, minimum=1, maximum=64
+        )
+        self._client_cache_ttl_seconds = self._read_bounded_float(
+            "client_cache_ttl_seconds", 900.0, minimum=1.0, maximum=86400.0
+        )
+        self._clients: BoundedClientCache[Any] = BoundedClientCache(
+            max_entries=self._client_cache_max_entries,
+            ttl_seconds=self._client_cache_ttl_seconds,
+            close_client=self._close_provider_client,
+        )
+
+        # Legacy state for backward compatibility
         self._unavailable_until: Dict[str, float] = {}
+        self._health_max_entries = self._read_bounded_int(
+            "health_cache_max_entries", 64, minimum=1, maximum=512
+        )
         self._capability_registry: Optional[Any] = None
         self._response_cache: Optional[Any] = (
             response_cache
@@ -77,84 +129,147 @@ class ModelGateway:
         self._task_classifier: Optional[Any] = None
         self._task_classification_enabled = self._read_task_classifier_flag()
         self._failover_max_attempts = self._read_failover_max_attempts()
-        self.last_response_model: Optional[str] = (
-            str(self._llm_config.get("model", "") or "").strip() or None
-        )
+        primary_model = str(self._llm_config.get("model", "") or "").strip() or None
+        self._default_response_metadata = ModelResponseMetadata(primary_model)
         self._primary_client_model: Optional[str] = (
-            self.last_response_model if primary_client is not None else None
+            primary_model if primary_client is not None else None
         )
-        self.last_model_fallback_from: Optional[str] = None
-        if primary_client is not None and self.last_response_model:
-            self._clients[self.last_response_model] = primary_client
 
-        # "Eyes model" pairing: an optional dedicated vision model (e.g.
-        # GLM-4V-Flash) that handles image requests independently of the
-        # text primary model, so a non-vision primary (DeepSeek, …) can still
-        # understand images. Configured via LLM_VISION_* env vars.
-        self._vision_provider: Optional[str] = (
-            str(self._llm_config.get("vision_provider", "") or "").strip().lower()
-            or None
-        )
-        self._vision_model: Optional[str] = (
-            str(self._llm_config.get("vision_model", "") or "").strip() or None
-        )
+        # Vision client state
         self._vision_client: Optional[Any] = None
         self._vision_client_built = False
+
+    def _read_bounded_int(
+        self,
+        key: str,
+        default: int,
+        *,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        try:
+            value = int(self._llm_config.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(value, maximum))
+
+    def _read_bounded_float(
+        self,
+        key: str,
+        default: float,
+        *,
+        minimum: float,
+        maximum: float,
+    ) -> float:
+        try:
+            value = float(self._llm_config.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(value, maximum))
+
+    @staticmethod
+    def _close_provider_client(client: Any) -> None:
+        close = getattr(client, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception:
+            logger.warning("Failed to close model client", exc_info=True)
+
+    @property
+    def response_metadata(self) -> ModelResponseMetadata:
+        """Return model metadata isolated to the current request thread."""
+
+        return getattr(
+            self._response_state,
+            "metadata",
+            self._default_response_metadata,
+        )
+
+    @property
+    def last_response_model(self) -> Optional[str]:
+        return self.response_metadata.model_id
+
+    @last_response_model.setter
+    def last_response_model(self, value: Optional[str]) -> None:
+        current = self.response_metadata
+        self._response_state.metadata = ModelResponseMetadata(
+            str(value).strip() if value else None,
+            current.fallback_from,
+        )
+
+    @property
+    def last_model_fallback_from(self) -> Optional[str]:
+        return self.response_metadata.fallback_from
+
+    @last_model_fallback_from.setter
+    def last_model_fallback_from(self, value: Optional[str]) -> None:
+        current = self.response_metadata
+        self._response_state.metadata = ModelResponseMetadata(
+            current.model_id,
+            str(value).strip() if value else None,
+        )
+
+    @contextmanager
+    def _model_request_slot(self):
+        with self._request_limiter.acquire_slot():
+            yield
+
+    def cleanup_clients(self) -> int:
+        """Close expired idle model clients."""
+
+        return self._clients.prune()
+
+    def client_cache_snapshot(self) -> dict[str, object]:
+        snapshot = self._clients.snapshot()
+        snapshot["max_concurrent_requests"] = self._request_limiter.max_concurrent
+        return snapshot
 
     # ── Vision pairing ("eyes model") ──
 
     def _vision_client_config(self) -> Dict[str, Any]:
         """Assemble a client config for the dedicated vision model."""
-        cfg = dict(self._llm_config)
-        provider = self._vision_provider or str(cfg.get("provider", "")).strip().lower()
-        cfg["provider"] = provider
-        cfg["model"] = self._vision_model or ""
-        if provider == "zhipu":
-            key = cfg.get("vision_api_key") or cfg.get("zhipu_api_key")
-            base = (
-                cfg.get("vision_api_base")
-                or cfg.get("zhipu_api_base")
-                or "https://open.bigmodel.cn/api/paas/v4"
-            )
-        elif provider in {"openai", "custom"}:
-            key = cfg.get("vision_api_key") or cfg.get("openai_api_key")
-            base = cfg.get("vision_api_base") or cfg.get("openai_api_base")
-        elif provider == "deepseek":
-            key = cfg.get("vision_api_key") or cfg.get("deepseek_api_key")
-            base = cfg.get("vision_api_base") or cfg.get("deepseek_api_base")
-        else:
-            key = cfg.get("vision_api_key")
-            base = cfg.get("vision_api_base")
-        if key:
-            cfg[f"{provider}_api_key"] = key
-        if base:
-            cfg[f"{provider}_api_base"] = base
-        # GLM-4V-Flash caps output at 1024 tokens; be safe for other models too.
-        try:
-            configured_max = int(cfg.get("max_tokens", 1200))
-        except (TypeError, ValueError):
-            configured_max = 1200
-        cfg["max_tokens"] = min(configured_max, 1024)
-        cfg["retry_max_attempts"] = 1
-        return cfg
+        return self._vision_router.vision_client_config()
 
     def vision_client(self) -> Any:
-        """Lazily build (once) the dedicated vision client."""
-        if not self._vision_client_built:
+        """Lazily build the dedicated vision client under the bounded cache."""
+
+        cache_key = self._vision_cache_key()
+        try:
+            client = self._clients.get_or_create(
+                cache_key,
+                lambda: self._client_factory(self._vision_client_config()),
+            )
+        except Exception:
+            logger.exception("vision client failed to build")
+            client = None
+        with self._state_lock:
             self._vision_client_built = True
-            try:
-                self._vision_client = self._client_factory(
-                    self._vision_client_config()
-                )
-            except Exception:
-                logger.exception("vision client failed to build")
-                self._vision_client = None
-        return self._vision_client
+            self._vision_client = client
+        return client
+
+    def _vision_cache_key(self) -> str:
+        return self._vision_router.cache_key()
+
+    @contextmanager
+    def _vision_client_lease(self, candidate: Any = None):
+        with self._clients.lease(
+            self._vision_cache_key(),
+            lambda: self._client_factory(self._vision_client_config()),
+            candidate=candidate,
+        ) as client:
+            yield client
+
+    def _leased_vision_stream(self, candidate: Any, build_stream: Callable):
+        with self._vision_client_lease(candidate) as client:
+            with self._model_request_slot():
+                yield from build_stream(client)
 
     @property
     def has_vision_pairing(self) -> bool:
         """True when a dedicated vision model is configured."""
-        return bool(self._vision_model)
+        return self._vision_router.has_vision_model()
 
     def _chat_with_vision(
         self,
@@ -171,13 +286,16 @@ class ModelGateway:
         back to the text primary model (which may reject images outright);
         they go straight to the vision model (e.g. GLM-4V-Flash).
         """
-        model_id = self._vision_model or ""
+        if not self._vision_router.has_vision_model():
+            raise RuntimeError("视觉模型未配置或不可用，无法识别图片")
+
+        model_id = self._vision_router._vision_model or ""
         client = self.vision_client()
         if client is None:
             raise RuntimeError("视觉模型未配置或不可用，无法识别图片")
         cached, reservation = self._cache_acquire(
             model_id,
-            system_prompt,
+            system_prompt or "",
             prompt,
             history,
             image_paths,
@@ -189,12 +307,14 @@ class ModelGateway:
                 self._cache_release(reservation)
             return cached
         try:
-            response = client.chat_with_images(
-                prompt,
-                image_paths,
-                system_prompt=system_prompt,
-                history=history,
-            )
+            with self._vision_client_lease(client) as active_client:
+                with self._model_request_slot():
+                    response = active_client.chat_with_images(
+                        prompt,
+                        image_paths,
+                        system_prompt=system_prompt,
+                        history=history,
+                    )
         except Exception:
             if reservation:
                 self._cache_release(reservation)
@@ -207,7 +327,7 @@ class ModelGateway:
         self.record_success(model_id, None)
         self._cache_put(
             model_id,
-            system_prompt,
+            system_prompt or "",
             prompt,
             history,
             image_paths,
@@ -226,13 +346,16 @@ class ModelGateway:
         cache_scope: str = "local:default",
     ) -> Any:
         """Stream an image request through the dedicated vision client."""
-        model_id = self._vision_model or ""
+        if not self._vision_router.has_vision_model():
+            raise RuntimeError("视觉模型未配置或不可用，无法识别图片")
+
+        model_id = self._vision_router._vision_model or ""
         client = self.vision_client()
         if client is None:
             raise RuntimeError("视觉模型未配置或不可用，无法识别图片")
         cached, reservation = self._cache_acquire(
             model_id,
-            system_prompt,
+            system_prompt or "",
             user_input,
             history,
             image_paths,
@@ -246,24 +369,34 @@ class ModelGateway:
             return
         parts: list[str] = []
         yielded = False
+        chunks = None
         try:
-            stream_fn = getattr(client, "stream_chat_with_images", None)
-            if stream_fn is not None:
-                chunks = stream_fn(
-                    user_input,
-                    image_paths,
-                    system_prompt=system_prompt,
-                    history=history,
+
+            def build_stream(active_client):
+                stream_fn = getattr(
+                    active_client,
+                    "stream_chat_with_images",
+                    None,
                 )
-            else:
-                chunks = iter(
-                    [client.chat_with_images(
+                if stream_fn is not None:
+                    return stream_fn(
                         user_input,
                         image_paths,
                         system_prompt=system_prompt,
                         history=history,
-                    )]
+                    )
+                return iter(
+                    [
+                        active_client.chat_with_images(
+                            user_input,
+                            image_paths,
+                            system_prompt=system_prompt,
+                            history=history,
+                        )
+                    ]
                 )
+
+            chunks = self._leased_vision_stream(client, build_stream)
             for chunk in chunks:
                 if not isinstance(chunk, str) or not chunk:
                     continue
@@ -273,13 +406,16 @@ class ModelGateway:
                 parts.append(chunk)
                 yield chunk
         finally:
+            close = getattr(chunks, "close", None)
+            if callable(close):
+                close()
             if reservation:
                 self._cache_release(reservation)
         if parts:
             try:
                 self._cache_put(
                     model_id,
-                    system_prompt,
+                    system_prompt or "",
                     user_input,
                     history,
                     image_paths,
@@ -289,7 +425,6 @@ class ModelGateway:
             except Exception:
                 logger.warning("vision stream cache put failed", exc_info=True)
 
-
     @staticmethod
     def _model_family(model_id: str) -> str:
         """Return a stable family prefix without assuming vendor naming rules."""
@@ -298,9 +433,9 @@ class ModelGateway:
 
     @staticmethod
     def _error_chain_text(error: BaseException) -> str:
-        parts = []
-        current = error
-        seen = set()
+        parts: list[str] = []
+        current: BaseException | None = error
+        seen: set[int] = set()
         while current is not None and id(current) not in seen and len(parts) < 6:
             seen.add(id(current))
             parts.append(f"{type(current).__name__}: {current}".casefold())
@@ -333,13 +468,13 @@ class ModelGateway:
 
     def _is_retryable_model_error(self, error: BaseException) -> bool:
         """Only fail over for transient provider or transport failures."""
-        current = error
-        seen = set()
+        current: BaseException | None = error
+        seen: set[int] = set()
         while current is not None and id(current) not in seen:
             seen.add(id(current))
-            status_code = getattr(current, "status_code", None)
+            raw_status = getattr(current, "status_code", None)
             try:
-                status_code = int(status_code)
+                status_code = int(raw_status) if raw_status is not None else None
             except (TypeError, ValueError):
                 status_code = None
             if status_code is not None:
@@ -394,15 +529,37 @@ class ModelGateway:
         return model_id or None
 
     def is_model_available(self, model_id: str) -> bool:
-        return self._unavailable_until.get(model_id, 0) <= time.monotonic()
+        now = time.monotonic()
+        with self._state_lock:
+            expires_at = self._unavailable_until.get(model_id, 0)
+            if expires_at <= now:
+                self._unavailable_until.pop(model_id, None)
+                return True
+            return False
 
     def mark_model_unavailable(self, model_id: str) -> None:
-        self._unavailable_until[model_id] = (
-            time.monotonic() + self.MODEL_FAILOVER_COOLDOWN_SECONDS
-        )
+        if not model_id:
+            return
+        with self._state_lock:
+            now = time.monotonic()
+            self._unavailable_until = {
+                key: value
+                for key, value in self._unavailable_until.items()
+                if value > now
+            }
+            self._unavailable_until[model_id] = (
+                now + self.MODEL_FAILOVER_COOLDOWN_SECONDS
+            )
+            while len(self._unavailable_until) > self._health_max_entries:
+                victim = min(
+                    self._unavailable_until,
+                    key=self._unavailable_until.__getitem__,
+                )
+                self._unavailable_until.pop(victim, None)
 
     def mark_model_healthy(self, model_id: str) -> None:
-        self._unavailable_until.pop(model_id, None)
+        with self._state_lock:
+            self._unavailable_until.pop(model_id, None)
 
     def fallback_model_ids(self, primary_model: str) -> List[str]:
         provider = str(self._llm_config.get("provider", "") or "").strip().lower()
@@ -461,9 +618,16 @@ class ModelGateway:
         primary_model = self.primary_model_id()
         if model_id == primary_model and model_id == self._primary_client_model:
             return self._primary_client
-        client = self._clients.get(model_id)
-        if client is not None:
-            return client
+        return self._clients.get_or_create(
+            model_id,
+            lambda: self._build_client_for_model(model_id, primary_model),
+        )
+
+    def _build_client_for_model(
+        self,
+        model_id: str,
+        primary_model: Optional[str] = None,
+    ) -> Any:
         config = dict(self._llm_config)
         config["model"] = model_id
         if model_id != primary_model:
@@ -478,9 +642,34 @@ class ModelGateway:
                 )
             except (TypeError, ValueError):
                 config["request_timeout_seconds"] = 8
-        client = self._client_factory(config)
-        self._clients[model_id] = client
-        return client
+        return self._client_factory(config)
+
+    @contextmanager
+    def _model_client_lease(self, model_id: str, candidate: Any = None):
+        primary_model = self.primary_model_id()
+        if (
+            candidate is None
+            and model_id == primary_model
+            and model_id == self._primary_client_model
+        ):
+            candidate = self._primary_client
+        if candidate is self._primary_client and candidate is not None:
+            yield candidate
+            return
+        cache_key = model_id or "__primary__"
+        with self._clients.lease(
+            cache_key,
+            lambda: self._build_client_for_model(model_id, primary_model),
+            candidate=candidate,
+        ) as client:
+            yield client
+
+    def _leased_stream(self, model_id: str, candidate: Any, build_stream: Callable):
+        """Hold both the client lease and concurrency slot while streaming."""
+
+        with self._model_client_lease(model_id, candidate) as client:
+            with self._model_request_slot():
+                yield from build_stream(client)
 
     # ── Task-aware model selection (deployment-level "model recognition") ──
 
@@ -540,7 +729,8 @@ class ModelGateway:
         if classifier is None:
             return "chat"
         try:
-            return classifier.classify(user_input, image_paths)
+            result = classifier.classify(user_input, image_paths)
+            return str(result or "chat")
         except Exception:  # noqa: BLE001 - never break a turn over classification
             return "chat"
 
@@ -556,16 +746,17 @@ class ModelGateway:
         registry = self._get_capability_registry()
         if registry is None:
             return None
-        return registry.select_model(
+        selected = registry.select_model(
             task_type,
             self.primary_model_id(),
             self.fallback_model_ids(self.primary_model_id() or ""),
             require_vision=require_vision,
         )
+        return str(selected) if selected else None
 
     def _attempts_with_preference(
         self, preferred: Optional[str], require_vision: bool
-    ) -> List:
+    ) -> list[ModelAttempt]:
         attempts = self.model_attempts(require_vision=require_vision)
         if preferred and attempts:
             reordered = [(m, c, f) for (m, c, f) in attempts if m == preferred]
@@ -668,11 +859,13 @@ class ModelGateway:
             image_paths,
         )
         try:
-            return cache.get(*args, cache_scope)
+            result = cache.get(*args, cache_scope)
+            return result if isinstance(result, str) else None
         except TypeError:
             # Compatibility with injected cache implementations using the v1 API.
             try:
-                return cache.get(*args)
+                result = cache.get(*args)
+                return result if isinstance(result, str) else None
             except Exception:
                 logger.debug("Response cache read failed", exc_info=True)
                 return None
@@ -772,13 +965,13 @@ class ModelGateway:
 
     @staticmethod
     def _http_status(error: BaseException) -> Optional[int]:
-        current = error
-        seen = set()
+        current: BaseException | None = error
+        seen: set[int] = set()
         while current is not None and id(current) not in seen:
             seen.add(id(current))
-            status_code = getattr(current, "status_code", None)
+            raw_status = getattr(current, "status_code", None)
             try:
-                status_code = int(status_code)
+                status_code = int(raw_status) if raw_status is not None else None
             except (TypeError, ValueError):
                 status_code = None
             if status_code is not None:
@@ -798,7 +991,10 @@ class ModelGateway:
             if status >= 500:
                 return "server_error"
         text = self._error_chain_text(error)
-        if any(m in text for m in ("invalid api key", "authentication", "unauthorized", "forbidden")):
+        if any(
+            m in text
+            for m in ("invalid api key", "authentication", "unauthorized", "forbidden")
+        ):
             return "auth"
         if self._is_vision_capability_error(error):
             return "vision_unsupported"
@@ -819,7 +1015,17 @@ class ModelGateway:
             return "timeout"
         if any(m in text for m in ("model not found", "unsupported model", "404")):
             return "not_found"
-        if any(m in text for m in ("500", "503", "service unavailable", "服务繁忙", "overloaded", "capacity")):
+        if any(
+            m in text
+            for m in (
+                "500",
+                "503",
+                "service unavailable",
+                "服务繁忙",
+                "overloaded",
+                "capacity",
+            )
+        ):
             return "server_error"
         return "other"
 
@@ -887,8 +1093,15 @@ class ModelGateway:
         try:
             from artpm_agent.runtime.pricing import estimate_cost
 
-            cost = 0.0 if cache_hit else estimate_cost(
-                model or "", prompt_tokens, completion_tokens, provider=self._provider()
+            cost = (
+                0.0
+                if cache_hit
+                else estimate_cost(
+                    model or "",
+                    prompt_tokens,
+                    completion_tokens,
+                    provider=self._provider(),
+                )
             )
         except Exception:  # noqa: BLE001
             cost = 0.0
@@ -1001,7 +1214,7 @@ class ModelGateway:
         except Exception:  # noqa: BLE001
             return None
 
-    def model_attempts(self, *, require_vision: bool = False):
+    def model_attempts(self, *, require_vision: bool = False) -> list[ModelAttempt]:
         primary_model = self.primary_model_id()
         if self._primary_client is None:
             return []
@@ -1011,7 +1224,7 @@ class ModelGateway:
         if not primary_model:
             return [("", self._primary_client, False)]
 
-        attempts = []
+        attempts: list[ModelAttempt] = []
         if self.is_model_available(primary_model):
             primary_client = (
                 self._primary_client
@@ -1030,8 +1243,10 @@ class ModelGateway:
     def record_success(
         self, model_id: str, fallback_from: Optional[str] = None
     ) -> None:
-        self.last_response_model = model_id or None
-        self.last_model_fallback_from = fallback_from
+        self._response_state.metadata = ModelResponseMetadata(
+            model_id or None,
+            fallback_from,
+        )
         if model_id:
             self.mark_model_healthy(model_id)
 
@@ -1050,7 +1265,8 @@ class ModelGateway:
         cache_scope: str = "local:default",
     ) -> str:
         primary_model = self.primary_model_id()
-        requires_vision = bool(image_paths)
+        vision_paths = image_paths or []
+        requires_vision = bool(vision_paths)
 
         # "Eyes model" pairing: when a dedicated vision model is configured,
         # image requests bypass the text primary/failover path entirely and
@@ -1060,7 +1276,7 @@ class ModelGateway:
                 prompt,
                 system_prompt,
                 history,
-                image_paths,
+                vision_paths,
                 cache_scope=cache_scope,
             )
 
@@ -1132,26 +1348,28 @@ class ModelGateway:
 
                 if model_id and not self.is_model_available(model_id):
                     continue
-                client = client or self.client_for_model(model_id)
-                first_call = begin_first_model_call()
-                try:
-                    if image_paths:
-                        response = client.chat_with_images(
-                            prompt,
-                            image_paths,
-                            system_prompt=system_prompt,
-                            history=history,
-                        )
-                    else:
-                        response = client.chat(
-                            prompt,
-                            system_prompt=system_prompt,
-                            history=history,
-                        )
-                except BaseException:
-                    finish_first_model_call(first_call, success=False)
-                    raise
-                finish_first_model_call(first_call, success=True)
+                with self._model_client_lease(model_id, client) as leased_client:
+                    client = leased_client
+                    first_call = begin_first_model_call()
+                    try:
+                        with self._model_request_slot():
+                            if image_paths:
+                                response = client.chat_with_images(
+                                    prompt,
+                                    image_paths,
+                                    system_prompt=system_prompt,
+                                    history=history,
+                                )
+                            else:
+                                response = client.chat(
+                                    prompt,
+                                    system_prompt=system_prompt,
+                                    history=history,
+                                )
+                    except BaseException:
+                        finish_first_model_call(first_call, success=False)
+                        raise
+                    finish_first_model_call(first_call, success=True)
                 if not isinstance(response, str) or not response.strip():
                     raise RuntimeError("模型服务未返回有效回答")
                 self.record_success(
@@ -1228,9 +1446,7 @@ class ModelGateway:
 
         latency = (time.monotonic() - start) * 1000
         error_type = self._classify_error(last_error) if last_error is not None else ""
-        http_status = (
-            self._http_status(last_error) if last_error is not None else None
-        )
+        http_status = self._http_status(last_error) if last_error is not None else None
         self._record_telemetry(
             task_type,
             primary_model,
@@ -1255,7 +1471,8 @@ class ModelGateway:
         cache_scope: str = "local:default",
     ):
         primary_model = self.primary_model_id()
-        requires_vision = bool(image_paths)
+        vision_paths = image_paths or []
+        requires_vision = bool(vision_paths)
 
         # "Eyes model" pairing: image streams go straight to the vision model.
         if requires_vision and self.has_vision_pairing:
@@ -1263,7 +1480,7 @@ class ModelGateway:
                 user_input,
                 system_prompt,
                 history,
-                image_paths,
+                vision_paths,
                 cache_scope=cache_scope,
             )
             return
@@ -1332,26 +1549,30 @@ class ModelGateway:
 
                 if model_id and not self.is_model_available(model_id):
                     continue
-                client = client or self.client_for_model(model_id)
                 first_call = begin_first_model_call()
-                stream_fn = getattr(client, "stream_chat_with_images", None)
-                try:
+                leased_client: list[Any] = []
+
+                def build_stream(active_client):
+                    leased_client.append(active_client)
+                    stream_fn = getattr(
+                        active_client,
+                        "stream_chat_with_images",
+                        None,
+                    )
                     if image_paths and stream_fn is not None:
-                        chunks = stream_fn(
+                        return stream_fn(
                             user_input,
                             image_paths,
                             system_prompt=system_prompt,
                             history=history,
                         )
-                    else:
-                        chunks = client.stream_chat(
-                            user_input,
-                            system_prompt=system_prompt,
-                            history=history,
-                        )
-                except BaseException:
-                    finish_first_model_call(first_call, success=False)
-                    raise
+                    return active_client.stream_chat(
+                        user_input,
+                        system_prompt=system_prompt,
+                        history=history,
+                    )
+
+                chunks = self._leased_stream(model_id, client, build_stream)
                 parts = []
                 chunks = iter(chunks)
                 try:
@@ -1403,6 +1624,8 @@ class ModelGateway:
                     latency_ms=latency,
                     task_type=task_type,
                 )
+                if leased_client:
+                    client = leased_client[-1]
                 usage = self._estimate_usage(
                     system_prompt=system_prompt,
                     prompt=user_input,
@@ -1450,9 +1673,7 @@ class ModelGateway:
 
         latency = (time.monotonic() - start) * 1000
         error_type = self._classify_error(last_error) if last_error is not None else ""
-        http_status = (
-            self._http_status(last_error) if last_error is not None else None
-        )
+        http_status = self._http_status(last_error) if last_error is not None else None
         self._record_telemetry(
             task_type,
             primary_model,
@@ -1468,21 +1689,12 @@ class ModelGateway:
 
     def close(self) -> None:
         """Close every distinct cached provider client exactly once."""
-        clients = list(self._clients.values())
-        if self._primary_client is not None:
-            clients.append(self._primary_client)
-        self._clients.clear()
+        cached_clients = list(self._clients.values())
+        cached_ids = {id(client) for client in cached_clients}
+        primary_client = self._primary_client
+        self._clients.close_all()
         self._primary_client = None
         self._primary_client_model = None
-        closed: set[int] = set()
-        for client in clients:
-            if client is None or id(client) in closed:
-                continue
-            closed.add(id(client))
-            close = getattr(client, "close", None)
-            if not callable(close):
-                continue
-            try:
-                close()
-            except Exception:
-                logger.warning("Failed to close model client", exc_info=True)
+        self._vision_client = None
+        if primary_client is not None and id(primary_client) not in cached_ids:
+            self._close_provider_client(primary_client)

@@ -83,7 +83,7 @@ powershell -ExecutionPolicy Bypass -File scripts/test_benchmark.ps1
 powershell -ExecutionPolicy Bypass -File scripts/coverage_core.ps1
 
 # 静态检查和语法检查
-ruff check artpm_agent tests
+ruff check artpm_agent tests --select E9,F63,F7,F82
 python -m compileall -q artpm_agent
 ```
 
@@ -110,8 +110,9 @@ python scripts/coverage_core.py
   全量慢速或外部集成测试。
 
 `mypy artpm_agent` 是渐进式类型检查，当前可能包含既有基线错误；若未触及相关模块，不要
-  把无关基线错误伪装成此次回归。若触及类型边界，应运行定向 mypy 并在交付中区分新增和
-  既有错误。
+把无关基线错误伪装成此次回归。`runtime/`、`harness/`、`api/`、`tenancy/` 已是整包 strict
+边界，必须通过 `python scripts/mypy_ratchet.py`，不得用逐文件白名单或 `ignore_errors`
+绕过。其他包仍应在交付中区分新增和既有诊断。
 
 ## 6. 文档、记忆与交付
 

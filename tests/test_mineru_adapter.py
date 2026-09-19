@@ -9,6 +9,7 @@ import zipfile
 from docx import Document
 
 from artpm_agent.agent import ArtPMAgent
+from artpm_agent.security.document_paths import TrustedDocumentRoots
 from artpm_agent.skills.skill_router import DocumentClassifierParser
 from artpm_agent.utils.chat_attachments import DEFAULT_ALLOWED_EXTENSIONS
 from artpm_agent.utils.mineru_adapter import (
@@ -342,7 +343,10 @@ def test_document_skill_prefers_mineru_and_preserves_contract(tmp_path):
             )
 
     parsed = DocumentClassifierParser(
-        {"mineru_converter": FakeConverter()}
+        {
+            "mineru_converter": FakeConverter(),
+            "document_roots": TrustedDocumentRoots.from_paths(tmp_path),
+        }
     ).run({"file_path": str(source), "user_hint": "extract tables"})
 
     assert parsed["success"] is True
@@ -368,7 +372,10 @@ def test_document_skill_falls_back_when_mineru_is_unavailable(tmp_path):
             )
 
     parsed = DocumentClassifierParser(
-        {"mineru_converter": UnavailableConverter()}
+        {
+            "mineru_converter": UnavailableConverter(),
+            "document_roots": TrustedDocumentRoots.from_paths(tmp_path),
+        }
     ).run({"file_path": str(source)})
 
     assert parsed["success"] is True

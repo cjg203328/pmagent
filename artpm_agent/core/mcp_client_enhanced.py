@@ -27,6 +27,28 @@ _SENSITIVE_FILE_SUFFIXES = frozenset(
     {".db", ".sqlite", ".sqlite3", ".pem", ".key", ".p12", ".pfx"}
 )
 _SENSITIVE_DIRECTORIES = frozenset({".git", ".ssh", ".aws", ".azure", ".gnupg"})
+# Generated and dependency trees are not useful project search targets by
+# default. Filtering them from bounded results keeps searches focused on
+# project files while retaining the existing safety checks.
+_SEARCH_EXCLUDED_DIRECTORIES = frozenset(
+    {
+        ".ai-memory",
+        ".cache",
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "env",
+        "node_modules",
+        "site-packages",
+        "venv",
+    }
+)
 
 
 # Executable basename allowlist for the execute_command tool. It must be
@@ -351,19 +373,35 @@ class EnhancedMCPClient:
             if recursive and not pattern.startswith("**"):
                 pattern = f"**/{pattern}"
 
-            # 搜索文件
-            files = sorted(search_dir.glob(pattern), key=lambda item: str(item).lower())
-
             # 只保留文件(排除目录)
             safe_files = []
-            for file_path in files:
+            for file_path in search_dir.glob(pattern):
                 try:
                     resolved = self._resolve_path(str(file_path))
-                    if resolved.is_file() and not self._is_sensitive_path(resolved):
+                    relative_parts = resolved.relative_to(self.workspace_path).parts
+                    if (
+                        resolved.is_file()
+                        and not self._is_sensitive_path(resolved)
+                        and not any(
+                            part.casefold() in _SEARCH_EXCLUDED_DIRECTORIES
+                            for part in relative_parts[:-1]
+                        )
+                    ):
                         safe_files.append(file_path)
                 except ValueError:
                     continue
-            files = safe_files
+
+            # Prefer files nearest to the requested root, then use a stable
+            # relative-path order. This keeps root-level project files useful
+            # when a bounded search also finds many nested documents.
+            files = sorted(
+                safe_files,
+                key=lambda item: (
+                    len(item.relative_to(search_dir).parts),
+                    str(item.relative_to(self.workspace_path)).casefold(),
+                    str(item.relative_to(self.workspace_path)),
+                ),
+            )
 
             # 限制数量
             files = files[:limit]

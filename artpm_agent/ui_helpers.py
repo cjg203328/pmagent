@@ -176,6 +176,28 @@ def _conversation_title_from_prompt(prompt, max_length=28):
 def _message_for_ui(message):
     """Keep storage metadata nested while exposing legacy fields used by the UI."""
     return _ui_rendering.message_for_ui(message)
+
+
+def _trusted_ui_context() -> TenantContext:
+    """Return the host-created identity scope used by UI persistence calls."""
+
+    tenant_context = st.session_state.get("tenant_context")
+    if tenant_context is None:
+        tenant_context = TenantContext.local()
+    if not isinstance(tenant_context, TenantContext):
+        raise RuntimeError("tenant_context must be created by the application host")
+    tenant_context.require_workspace()
+    return tenant_context
+
+
+def _conversation_workspace_id() -> str:
+    return _trusted_ui_context().workspace_id
+
+
+def _conversation_scope_key(conversation_id) -> tuple[str, str]:
+    return (_conversation_workspace_id(), str(conversation_id))
+
+
 # Shared UI state getters, constants, and availability flags now live in
 # artpm_agent.ui_state and are re-exported through the import above.
 def build_knowledge_context(prompt, *, max_chars=6000):
@@ -301,10 +323,15 @@ def load_active_messages():
     conversation_id = st.session_state.get("active_conversation_id")
     if store is None or not conversation_id:
         return st.session_state.get("messages", [])
+    workspace_id = _conversation_workspace_id()
     st.session_state.messages = [
         _message_for_ui(message)
-        for message in store.list_messages(conversation_id)
+        for message in store.list_messages(
+            conversation_id,
+            workspace_id=workspace_id,
+        )
     ]
+    st.session_state.messages_loaded_for = (workspace_id, str(conversation_id))
     return st.session_state.messages
 def activate_conversation(conversation_id):
     store = get_conversation_store()
@@ -321,8 +348,12 @@ def activate_conversation(conversation_id):
             retry=False,
         )
         return
+    workspace_id = _conversation_workspace_id()
     try:
-        conversation = store.get_conversation(conversation_id)
+        conversation = store.get_conversation(
+            conversation_id,
+            workspace_id=workspace_id,
+        )
     except Exception as exc:
         logger.error("activate_conversation 查询失败: %s", exc)
         render_error_callback(
@@ -351,11 +382,15 @@ def activate_conversation(conversation_id):
     st.session_state.pop("edit_mode", None)
     load_active_messages()
     # 同步 messages_loaded_for，避免 _init_session_state 重复加载
-    st.session_state.messages_loaded_for = conversation_id
+    st.session_state.messages_loaded_for = (workspace_id, str(conversation_id))
 def delete_conversation_and_activate_next(store, conversation_id):
     """Delete one conversation and keep the workspace on a valid active thread."""
+    workspace_id = _conversation_workspace_id()
     active_id = st.session_state.get("active_conversation_id")
-    deleted = store.delete_conversation(conversation_id)
+    deleted = store.delete_conversation(
+        conversation_id,
+        workspace_id=workspace_id,
+    )
     if not deleted:
         raise KeyError(f"Unknown conversation: {conversation_id}")
 
@@ -377,18 +412,28 @@ def delete_conversation_and_activate_next(store, conversation_id):
     st.session_state.pop("pending_conversation_delete", None)
     st.session_state.pop("_conv_list_cache", None)
 
-    current = store.get_conversation(active_id) if active_id else None
+    current = (
+        store.get_conversation(active_id, workspace_id=workspace_id)
+        if active_id
+        else None
+    )
     if active_id == conversation_id or current is None:
-        remaining = store.list_conversations(limit=1)
+        remaining = store.list_conversations(workspace_id=workspace_id, limit=1)
         next_conversation = (
-            remaining[0] if remaining else store.create_conversation()
+            remaining[0]
+            if remaining
+            else store.create_conversation(workspace_id=workspace_id)
         )
         activate_conversation(next_conversation["id"])
 def _migrate_legacy_messages(store, messages):
     """Preserve messages from a live pre-upgrade Streamlit session once."""
-    if not messages or store.list_conversations(limit=1):
+    workspace_id = _conversation_workspace_id()
+    if not messages or store.list_conversations(
+        workspace_id=workspace_id,
+        limit=1,
+    ):
         return None
-    conversation = store.create_conversation()
+    conversation = store.create_conversation(workspace_id=workspace_id)
     current_turn_id = None
     first_prompt = None
     for message in messages:
@@ -410,10 +455,13 @@ def _migrate_legacy_messages(store, messages):
             status=message.get("status", "complete"),
             turn_id=current_turn_id,
             metadata=metadata,
+            workspace_id=workspace_id,
         )
     if first_prompt:
         conversation = store.rename_conversation(
-            conversation["id"], _conversation_title_from_prompt(first_prompt)
+            conversation["id"],
+            _conversation_title_from_prompt(first_prompt),
+            workspace_id=workspace_id,
         )
     return conversation
 # _RUNTIME_COMPONENT_LABELS and _record_runtime_init_failure are now in
@@ -523,20 +571,32 @@ def init_session():
 
     store = get_conversation_store()
     if store is not None:
+        workspace_id = _conversation_workspace_id()
         conversation_id = st.session_state.get("active_conversation_id")
         conversation = (
-            store.get_conversation(conversation_id) if conversation_id else None
+            store.get_conversation(
+                conversation_id,
+                workspace_id=workspace_id,
+            )
+            if conversation_id
+            else None
         )
         if conversation is None:
-            conversations = store.list_conversations(limit=1)
+            conversations = store.list_conversations(
+                workspace_id=workspace_id,
+                limit=1,
+            )
             conversation = (
-                conversations[0] if conversations else store.create_conversation()
+                conversations[0]
+                if conversations
+                else store.create_conversation(workspace_id=workspace_id)
             )
             st.session_state.active_conversation_id = conversation["id"]
         # 仅在切换会话后首次渲染时从 DB 载入，避免每次 rerun 都打一次库。
-        if st.session_state.get("messages_loaded_for") != conversation["id"]:
+        if st.session_state.get("messages_loaded_for") != _conversation_scope_key(
+            conversation["id"]
+        ):
             load_active_messages()
-            st.session_state.messages_loaded_for = conversation["id"]
     elif "messages" not in st.session_state:
         st.session_state.messages = []
 
@@ -566,6 +626,7 @@ def render_conversation_sidebar():
     if store is None:
         return
 
+    workspace_id = _conversation_workspace_id()
     active_id = st.session_state.get("active_conversation_id")
     request_pending = bool(st.session_state.get("pending_prompt"))
     pending_delete_id = st.session_state.get("pending_conversation_delete")
@@ -578,7 +639,7 @@ def render_conversation_sidebar():
             disabled=request_pending or bool(pending_delete_id),
         ):
             try:
-                conversation = store.create_conversation()
+                conversation = store.create_conversation(workspace_id=workspace_id)
                 activate_conversation(conversation["id"])
                 st.session_state.pop("_conv_list_cache", None)
                 st.rerun()
@@ -604,10 +665,18 @@ def render_conversation_sidebar():
 
         # 30 秒内的重复 rerun 复用缓存，避免高频刷新反复打库。
         _conv_cache = st.session_state.get("_conv_list_cache")
-        if not _conv_cache or (time.monotonic() - _conv_cache["ts"]) > 30:
-            conversations = store.list_conversations(limit=20)
+        if (
+            not _conv_cache
+            or _conv_cache.get("workspace_id") != workspace_id
+            or (time.monotonic() - _conv_cache["ts"]) > 30
+        ):
+            conversations = store.list_conversations(
+                workspace_id=workspace_id,
+                limit=20,
+            )
             st.session_state._conv_list_cache = {
                 "ts": time.monotonic(),
+                "workspace_id": workspace_id,
                 "data": conversations,
             }
         else:
@@ -1260,10 +1329,14 @@ def _persist_workflow_response(run, content, *, status="complete"):
     store = get_conversation_store()
     if store is None or not run.conversation_id or not run.turn_id:
         return
+    workspace_id = _conversation_workspace_id()
     existing = next(
         (
             message
-            for message in store.list_messages(run.conversation_id)
+            for message in store.list_messages(
+                run.conversation_id,
+                workspace_id=workspace_id,
+            )
             if message.get("role") == "assistant"
             and message.get("turn_id") == run.turn_id
         ),
@@ -1278,6 +1351,7 @@ def _persist_workflow_response(run, content, *, status="complete"):
             turn_id=run.turn_id,
             model_id=_current_model_id(st.session_state.get("agent")),
             metadata={"workflow_run_id": run.id, "workflow_id": run.workflow_id},
+            workspace_id=workspace_id,
         )
     load_active_messages()
 
@@ -1367,13 +1441,7 @@ def _permission_actor():
 def _trusted_knowledge_context() -> TenantContext:
     """Return the current UI workspace from the host-created tenant context."""
 
-    tenant_context = st.session_state.get("tenant_context")
-    if tenant_context is None:
-        tenant_context = TenantContext.local()
-    if not isinstance(tenant_context, TenantContext):
-        raise RuntimeError("tenant_context must be created by the application host")
-    tenant_context.require_workspace()
-    return tenant_context
+    return _trusted_ui_context()
 
 
 def _trusted_knowledge_workspace_id() -> str:
@@ -1435,10 +1503,14 @@ def _persist_permission_response(request, content, *, status="complete"):
     store = get_conversation_store()
     if store is None or not request.conversation_id or not request.turn_id:
         return
+    workspace_id = _conversation_workspace_id()
     existing = next(
         (
             message
-            for message in store.list_messages(request.conversation_id)
+            for message in store.list_messages(
+                request.conversation_id,
+                workspace_id=workspace_id,
+            )
             if message.get("role") == "assistant"
             and message.get("turn_id") == request.turn_id
         ),
@@ -1457,6 +1529,7 @@ def _persist_permission_response(request, content, *, status="complete"):
                 "permission_status": request.status,
                 "permission_source": request.source,
             },
+            workspace_id=workspace_id,
         )
     load_active_messages()
 
@@ -1956,10 +2029,14 @@ def _persist_profile_response(proposal, content):
         or not proposal.turn_id
     ):
         return
+    workspace_id = _conversation_workspace_id()
     existing = next(
         (
             message
-            for message in store.list_messages(proposal.conversation_id)
+            for message in store.list_messages(
+                proposal.conversation_id,
+                workspace_id=workspace_id,
+            )
             if message.get("role") == "assistant"
             and message.get("turn_id") == proposal.turn_id
         ),
@@ -1973,6 +2050,7 @@ def _persist_profile_response(proposal, content):
             turn_id=proposal.turn_id,
             model_id=_current_model_id(st.session_state.get("agent")),
             metadata={"agent_profile_proposal_id": proposal.id},
+            workspace_id=workspace_id,
         )
     load_active_messages()
 def _render_profile_approvals(conversation_id):
@@ -2049,10 +2127,14 @@ def _persist_knowledge_response(rule, content):
     turn_id = rule.get("source_message_id")
     if store is None or not conversation_id or not turn_id:
         return
+    workspace_id = _conversation_workspace_id()
     existing = next(
         (
             message
-            for message in store.list_messages(conversation_id)
+            for message in store.list_messages(
+                conversation_id,
+                workspace_id=workspace_id,
+            )
             if message.get("role") == "assistant"
             and message.get("turn_id") == turn_id
         ),
@@ -2066,6 +2148,7 @@ def _persist_knowledge_response(rule, content):
             turn_id=turn_id,
             model_id=_current_model_id(st.session_state.get("agent")),
             metadata={"knowledge_rule_id": rule["id"]},
+            workspace_id=workspace_id,
         )
     load_active_messages()
 def _persist_ingestion_response(proposal, content):
@@ -2074,10 +2157,14 @@ def _persist_ingestion_response(proposal, content):
     turn_id = proposal.get("turn_id")
     if store is None or not conversation_id or not turn_id:
         return
+    workspace_id = _conversation_workspace_id()
     existing = next(
         (
             message
-            for message in store.list_messages(conversation_id)
+            for message in store.list_messages(
+                conversation_id,
+                workspace_id=workspace_id,
+            )
             if message.get("role") == "assistant"
             and message.get("turn_id") == turn_id
         ),
@@ -2091,6 +2178,7 @@ def _persist_ingestion_response(proposal, content):
             turn_id=turn_id,
             model_id=_current_model_id(st.session_state.get("agent")),
             metadata={"knowledge_ingestion_proposal_id": proposal["id"]},
+            workspace_id=workspace_id,
         )
     load_active_messages()
 def _render_knowledge_ingestion_approvals(conversation_id):

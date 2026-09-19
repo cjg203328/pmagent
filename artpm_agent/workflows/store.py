@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-import hashlib
-import json
 from pathlib import Path
-import sqlite3
-from typing import Any, Iterator
+from typing import Any
 from uuid import uuid4
+
+from artpm_agent.tenancy.scope import Scope
 
 from .defaults import get_builtin_workflows
 from .models import (
@@ -26,7 +27,25 @@ from .models import (
     WorkflowStepRun,
 )
 from .risk_policy import DEFAULT_RISK_POLICY
-from artpm_agent.tenancy.scope import Scope
+from .store_codec import (
+    approval_from_row,
+    decode_json,
+    definition_checksum,
+    definition_json,
+    encode_json,
+    event_from_row,
+    resolved_definition_from_row,
+    run_from_row,
+    step_from_row,
+)
+from .store_schema import (
+    SCHEMA_VERSION as WORKFLOW_SCHEMA_VERSION,
+)
+from .store_schema import (
+    migrate_retry_columns,
+    migrate_tenant_columns,
+    migrate_workflow_schema,
+)
 
 
 class WorkflowConflictError(RuntimeError):
@@ -36,7 +55,7 @@ class WorkflowConflictError(RuntimeError):
 class WorkflowStore:
     """Own workflow tables in the same SQLite database as conversations."""
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = WORKFLOW_SCHEMA_VERSION
     BUSY_TIMEOUT_MS = 10_000
     MAX_JSON_BYTES = 256 * 1024
 
@@ -98,277 +117,35 @@ class WorkflowStore:
 
     @classmethod
     def _json(cls, value: Any) -> str:
-        raw = json.dumps(
-            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
-        if len(raw.encode("utf-8")) > cls.MAX_JSON_BYTES:
-            raise ValueError(
-                f"workflow JSON payload exceeds {cls.MAX_JSON_BYTES} bytes"
-            )
-        return raw
+        return encode_json(value, max_bytes=cls.MAX_JSON_BYTES)
 
     @classmethod
     def _definition_json(cls, definition: WorkflowDefinition) -> str:
-        return cls._json(definition.model_dump(mode="json"))
+        return definition_json(definition, max_bytes=cls.MAX_JSON_BYTES)
 
     @classmethod
     def _definition_checksum(cls, definition: WorkflowDefinition) -> str:
-        return hashlib.sha256(
-            cls._definition_json(definition).encode("utf-8")
-        ).hexdigest()
+        return definition_checksum(definition, max_bytes=cls.MAX_JSON_BYTES)
 
     @staticmethod
     def _loads(raw: str | None, fallback: Any) -> Any:
-        if not raw:
-            return fallback
-        return json.loads(raw)
+        return decode_json(raw, fallback)
 
     def _migrate(self) -> None:
         with self._connection(write=True) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS workflow_schema_migrations (
-                    version INTEGER PRIMARY KEY,
-                    applied_at TEXT NOT NULL
-                )
-                """
+            migrate_workflow_schema(
+                conn,
+                self._now,
+                supported_version=self.SCHEMA_VERSION,
             )
-            row = conn.execute(
-                "SELECT COALESCE(MAX(version), 0) AS version "
-                "FROM workflow_schema_migrations"
-            ).fetchone()
-            current_version = int(row["version"])
-            if current_version > self.SCHEMA_VERSION:
-                raise RuntimeError(
-                    "Workflow database schema is newer than this application supports"
-                )
-            if current_version < 1:
-                conn.executescript(
-                    """
-                CREATE TABLE workflow_definitions (
-                    tenant_id TEXT NOT NULL DEFAULT 'local',
-                    workspace_id TEXT NOT NULL,
-                    profile_id TEXT NOT NULL,
-                    workflow_id TEXT NOT NULL,
-                    version INTEGER NOT NULL CHECK(version >= 1),
-                    source TEXT NOT NULL CHECK(source IN ('builtin', 'custom')),
-                    read_only INTEGER NOT NULL CHECK(read_only IN (0, 1)),
-                    definition_json TEXT NOT NULL,
-                    checksum TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY(workspace_id, profile_id, workflow_id, version)
-                );
-
-                CREATE TABLE workflow_overrides (
-                    tenant_id TEXT NOT NULL DEFAULT 'local',
-                    workspace_id TEXT NOT NULL,
-                    profile_id TEXT NOT NULL,
-                    workflow_id TEXT NOT NULL,
-                    workflow_version INTEGER NOT NULL,
-                    enabled INTEGER CHECK(enabled IN (0, 1)),
-                    priority INTEGER,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY(
-                        workspace_id, profile_id, workflow_id, workflow_version
-                    ),
-                    FOREIGN KEY(
-                        workspace_id, profile_id, workflow_id, workflow_version
-                    ) REFERENCES workflow_definitions(
-                        workspace_id, profile_id, workflow_id, version
-                    ) ON DELETE CASCADE
-                );
-
-                CREATE TABLE workflow_runs (
-                    id TEXT PRIMARY KEY,
-                    idempotency_key TEXT NOT NULL,
-                    workflow_id TEXT NOT NULL,
-                    workflow_version INTEGER NOT NULL,
-                    tenant_id TEXT NOT NULL DEFAULT 'local',
-                    workspace_id TEXT NOT NULL,
-                    profile_id TEXT NOT NULL,
-                    conversation_id TEXT NOT NULL,
-                    turn_id TEXT,
-                    status TEXT NOT NULL CHECK(status IN (
-                        'pending', 'awaiting_approval', 'running',
-                        'succeeded', 'failed', 'cancelled'
-                    )),
-                    state_version INTEGER NOT NULL DEFAULT 0,
-                    current_step INTEGER NOT NULL DEFAULT 0,
-                    definition_snapshot_json TEXT NOT NULL,
-                    input_json TEXT NOT NULL,
-                    context_json TEXT NOT NULL,
-                    outputs_json TEXT NOT NULL,
-                    error TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    started_at TEXT,
-                    completed_at TEXT,
-                    UNIQUE(workspace_id, profile_id, idempotency_key),
-                    FOREIGN KEY(conversation_id) REFERENCES conversations(id)
-                        ON DELETE CASCADE
-                );
-
-                CREATE TABLE workflow_steps (
-                    run_id TEXT NOT NULL,
-                    step_index INTEGER NOT NULL CHECK(step_index >= 0 AND step_index < 8),
-                    tenant_id TEXT NOT NULL DEFAULT 'local',
-                    step_id TEXT NOT NULL,
-                    skill_id TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK(status IN (
-                        'pending', 'awaiting_approval', 'running',
-                        'succeeded', 'failed', 'skipped'
-                    )),
-                    state_version INTEGER NOT NULL DEFAULT 0,
-                    attempt INTEGER NOT NULL DEFAULT 1 CHECK(attempt >= 1),
-                    input_json TEXT NOT NULL,
-                    output_json TEXT NOT NULL,
-                    error TEXT,
-                    error_class TEXT,
-                    next_retry_at TEXT,
-                    compensation_skill_id TEXT,
-                    started_at TEXT,
-                    completed_at TEXT,
-                    PRIMARY KEY(run_id, step_index),
-                    FOREIGN KEY(run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
-                );
-
-                CREATE TABLE workflow_approvals (
-                    id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL,
-                    step_index INTEGER NOT NULL,
-                    tenant_id TEXT NOT NULL DEFAULT 'local',
-                    requirement TEXT NOT NULL CHECK(requirement IN ('none', 'user', 'admin')),
-                    status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected')),
-                    actor TEXT,
-                    actor_level TEXT CHECK(actor_level IN ('none', 'user', 'admin')),
-                    note TEXT,
-                    created_at TEXT NOT NULL,
-                    decided_at TEXT,
-                    UNIQUE(run_id, step_index, requirement),
-                    FOREIGN KEY(run_id, step_index)
-                        REFERENCES workflow_steps(run_id, step_index) ON DELETE CASCADE
-                );
-
-                CREATE TABLE workflow_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    run_id TEXT NOT NULL,
-                    tenant_id TEXT NOT NULL DEFAULT 'local',
-                    event_type TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
-                );
-
-                CREATE INDEX idx_workflow_runs_conversation
-                    ON workflow_runs(conversation_id, created_at DESC);
-                CREATE INDEX idx_workflow_runs_status
-                    ON workflow_runs(status, updated_at);
-                CREATE INDEX idx_workflow_events_run
-                    ON workflow_events(run_id, id);
-                    """
-                )
-                conn.execute(
-                    "INSERT INTO workflow_schema_migrations(version, applied_at) VALUES (?, ?)",
-                    (1, self._now()),
-                )
-                current_version = 1
-
-            if current_version < 2:
-                self._migrate_tenant_columns(conn)
-                conn.execute(
-                    "INSERT INTO workflow_schema_migrations(version, applied_at) VALUES (?, ?)",
-                    (2, self._now()),
-                )
-                current_version = 2
-
-            if current_version < 3:
-                self._migrate_retry_columns(conn)
-                conn.execute(
-                    "INSERT INTO workflow_schema_migrations(version, applied_at) "
-                    "VALUES (?, ?)",
-                    (3, self._now()),
-                )
 
     @staticmethod
     def _migrate_tenant_columns(conn: sqlite3.Connection) -> None:
-        """Add tenant ownership to databases created by schema version 1."""
-
-        for table in (
-            "workflow_definitions",
-            "workflow_overrides",
-            "workflow_runs",
-            "workflow_steps",
-            "workflow_approvals",
-            "workflow_events",
-        ):
-            columns = {
-                str(item[1]) for item in conn.execute(f"PRAGMA table_info({table})")
-            }
-            if "tenant_id" not in columns:
-                conn.execute(
-                    f"ALTER TABLE {table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'local'"
-                )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_workflow_definitions_tenant "
-            "ON workflow_definitions(tenant_id, workspace_id, profile_id)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_workflow_runs_tenant "
-            "ON workflow_runs(tenant_id, workspace_id, profile_id, created_at DESC)"
-        )
-        has_workspaces = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspaces'"
-        ).fetchone()
-        if has_workspaces is None:
-            return
-        conn.execute(
-            "UPDATE workflow_definitions SET tenant_id = COALESCE(("
-            "SELECT tenant_id FROM workspaces WHERE workspaces.id = workflow_definitions.workspace_id"
-            "), 'local') WHERE tenant_id = 'local'"
-        )
-        conn.execute(
-            "UPDATE workflow_overrides SET tenant_id = COALESCE(("
-            "SELECT tenant_id FROM workspaces WHERE workspaces.id = workflow_overrides.workspace_id"
-            "), 'local') WHERE tenant_id = 'local'"
-        )
-        conn.execute(
-            "UPDATE workflow_runs SET tenant_id = COALESCE(("
-            "SELECT tenant_id FROM workspaces WHERE workspaces.id = workflow_runs.workspace_id"
-            "), 'local') WHERE tenant_id = 'local'"
-        )
-        conn.execute(
-            "UPDATE workflow_steps SET tenant_id = COALESCE(("
-            "SELECT tenant_id FROM workflow_runs WHERE workflow_runs.id = workflow_steps.run_id"
-            "), 'local') WHERE tenant_id = 'local'"
-        )
-        conn.execute(
-            "UPDATE workflow_approvals SET tenant_id = COALESCE(("
-            "SELECT tenant_id FROM workflow_runs WHERE workflow_runs.id = workflow_approvals.run_id"
-            "), 'local') WHERE tenant_id = 'local'"
-        )
-        conn.execute(
-            "UPDATE workflow_events SET tenant_id = COALESCE(("
-            "SELECT tenant_id FROM workflow_runs WHERE workflow_runs.id = workflow_events.run_id"
-            "), 'local') WHERE tenant_id = 'local'"
-        )
+        migrate_tenant_columns(conn)
 
     @staticmethod
     def _migrate_retry_columns(conn: sqlite3.Connection) -> None:
-        """Add retry and recovery bookkeeping to existing workflow steps."""
-
-        columns = {
-            str(item[1]) for item in conn.execute("PRAGMA table_info(workflow_steps)")
-        }
-        for name, definition in (
-            ("error_class", "TEXT"),
-            ("next_retry_at", "TEXT"),
-            ("compensation_skill_id", "TEXT"),
-        ):
-            if name not in columns:
-                conn.execute(
-                    f"ALTER TABLE workflow_steps ADD COLUMN {name} {definition}"
-                )
+        migrate_retry_columns(conn)
 
     @staticmethod
     def _scope_values(
@@ -790,24 +567,7 @@ class WorkflowStore:
 
     @staticmethod
     def _resolved_definition(row: sqlite3.Row) -> WorkflowDefinition:
-        definition = WorkflowDefinition.model_validate_json(row["definition_json"])
-        definition = definition.model_copy(
-            update={
-                "tenant_id": row["tenant_id"],
-                "workspace_id": row["workspace_id"],
-                "profile_id": row["profile_id"],
-            }
-        )
-        updates: dict[str, Any] = {}
-        if row["override_enabled"] is not None:
-            updates["enabled"] = bool(row["override_enabled"])
-        if row["override_priority"] is not None:
-            updates["priority"] = int(row["override_priority"])
-        if not updates:
-            return definition
-        return WorkflowDefinition.model_validate(
-            {**definition.model_dump(mode="python"), **updates}
-        )
+        return resolved_definition_from_row(row)
 
     def get_definition(
         self,
@@ -1048,68 +808,15 @@ class WorkflowStore:
 
     @classmethod
     def _run_from_row(cls, row: sqlite3.Row) -> WorkflowRun:
-        return WorkflowRun(
-            id=row["id"],
-            idempotency_key=row["idempotency_key"],
-            workflow_id=row["workflow_id"],
-            workflow_version=int(row["workflow_version"]),
-            workspace_id=row["workspace_id"],
-            profile_id=row["profile_id"],
-            tenant_id=row["tenant_id"],
-            conversation_id=row["conversation_id"],
-            turn_id=row["turn_id"],
-            status=row["status"],
-            state_version=int(row["state_version"]),
-            current_step=int(row["current_step"]),
-            definition_snapshot=WorkflowDefinition.model_validate_json(
-                row["definition_snapshot_json"]
-            ),
-            input_data=cls._loads(row["input_json"], {}),
-            context_data=cls._loads(row["context_json"], {}),
-            outputs=cls._loads(row["outputs_json"], {}),
-            error=row["error"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            started_at=row["started_at"],
-            completed_at=row["completed_at"],
-        )
+        return run_from_row(row)
 
     @classmethod
     def _step_from_row(cls, row: sqlite3.Row) -> WorkflowStepRun:
-        return WorkflowStepRun(
-            run_id=row["run_id"],
-            tenant_id=row["tenant_id"],
-            step_index=int(row["step_index"]),
-            step_id=row["step_id"],
-            skill_id=row["skill_id"],
-            status=row["status"],
-            state_version=int(row["state_version"]),
-            attempt=int(row["attempt"]),
-            input_data=cls._loads(row["input_json"], {}),
-            output_data=cls._loads(row["output_json"], {}),
-            error=row["error"],
-            error_class=row["error_class"],
-            next_retry_at=row["next_retry_at"],
-            compensation_skill_id=row["compensation_skill_id"],
-            started_at=row["started_at"],
-            completed_at=row["completed_at"],
-        )
+        return step_from_row(row)
 
     @staticmethod
     def _approval_from_row(row: sqlite3.Row) -> WorkflowApproval:
-        return WorkflowApproval(
-            id=row["id"],
-            run_id=row["run_id"],
-            tenant_id=row["tenant_id"],
-            step_index=int(row["step_index"]),
-            requirement=row["requirement"],
-            status=row["status"],
-            actor=row["actor"],
-            actor_level=row["actor_level"],
-            note=row["note"],
-            created_at=row["created_at"],
-            decided_at=row["decided_at"],
-        )
+        return approval_from_row(row)
 
     def get_run(
         self,
@@ -1307,17 +1014,7 @@ class WorkflowStore:
                 "WHERE e.run_id = ?" + tenant_clause + workspace_clause + " ORDER BY e.id",
                 parameters,
             ).fetchall()
-        return [
-            WorkflowEvent(
-                id=int(row["id"]),
-                run_id=row["run_id"],
-                tenant_id=row["tenant_id"],
-                event_type=row["event_type"],
-                payload=self._loads(row["payload_json"], {}),
-                created_at=row["created_at"],
-            )
-            for row in rows
-        ]
+        return [event_from_row(row) for row in rows]
 
     def transition_run(
         self,

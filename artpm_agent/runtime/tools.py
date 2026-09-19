@@ -34,31 +34,120 @@ ToolArgumentPreparer = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _JSON_PATH_IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+_SCHEMA_REFERENCE_KEYWORDS = frozenset({"$ref", "$dynamicRef", "$recursiveRef"})
 _MODEL_APPROVAL_REQUIRED_TOOLS = frozenset(
     {"file_reader", "file_search", "data_analyzer", "trend_analyzer"}
 )
+
+
+def _strict_metadata_flag(value: Any, *, default: bool) -> bool:
+    """Accept only actual booleans for security-relevant tool metadata."""
+
+    return value if isinstance(value, bool) else default
 
 
 def _frozen_mapping(value: Optional[Mapping[str, Any]]) -> Mapping[str, Any]:
     return MappingProxyType(dict(value or {}))
 
 
-def _copy_json_value(value: Any, *, path: str = "$") -> Any:
-    """Copy a schema into provider-safe JSON data."""
-    if isinstance(value, Mapping):
-        copied: dict[str, Any] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise ToolDefinitionError(
-                    f"invalid JSON Schema at {path}: object keys must be strings"
+def _copy_tool_argument_value(
+    value: Any,
+    *,
+    tool_name: str,
+    path: str = "$",
+    _seen: Optional[set[int]] = None,
+) -> Any:
+    """Copy model arguments while enforcing the JSON value contract."""
+    if isinstance(value, (Mapping, list, tuple)):
+        seen = _seen if _seen is not None else set()
+        identity = id(value)
+        if identity in seen:
+            raise ValueError(
+                f"Invalid arguments for tool '{tool_name}' at {path}: "
+                "recursive values are not JSON-compatible"
+            )
+        seen.add(identity)
+        try:
+            if isinstance(value, Mapping):
+                copied: dict[str, Any] = {}
+                for key, item in value.items():
+                    if not isinstance(key, str):
+                        raise ValueError(
+                            f"Invalid arguments for tool '{tool_name}' at {path}: "
+                            "object keys must be strings"
+                        )
+                    copied[key] = _copy_tool_argument_value(
+                        item,
+                        tool_name=tool_name,
+                        path=f"{path}.{key}",
+                        _seen=seen,
+                    )
+                return copied
+            return [
+                _copy_tool_argument_value(
+                    item,
+                    tool_name=tool_name,
+                    path=f"{path}[{index}]",
+                    _seen=seen,
                 )
-            copied[key] = _copy_json_value(item, path=f"{path}.{key}")
-        return copied
-    if isinstance(value, (list, tuple)):
-        return [
-            _copy_json_value(item, path=f"{path}[{index}]")
-            for index, item in enumerate(value)
-        ]
+                for index, item in enumerate(value)
+            ]
+        finally:
+            seen.remove(identity)
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        raise ValueError(
+            f"Invalid arguments for tool '{tool_name}' at {path}: "
+            "numbers must be finite"
+        )
+    raise ValueError(
+        f"Invalid arguments for tool '{tool_name}' at {path}: "
+        "value must be JSON-compatible"
+    )
+
+
+def _copy_json_value(
+    value: Any,
+    *,
+    path: str = "$",
+    _seen: Optional[set[int]] = None,
+) -> Any:
+    """Copy a schema into provider-safe JSON data."""
+    if isinstance(value, (Mapping, list, tuple)):
+        seen = _seen if _seen is not None else set()
+        identity = id(value)
+        if identity in seen:
+            raise ToolDefinitionError(
+                f"invalid JSON Schema at {path}: recursive values are not allowed"
+            )
+        seen.add(identity)
+        try:
+            if isinstance(value, Mapping):
+                copied: dict[str, Any] = {}
+                for key, item in value.items():
+                    if not isinstance(key, str):
+                        raise ToolDefinitionError(
+                            f"invalid JSON Schema at {path}: object keys must be strings"
+                        )
+                    copied[key] = _copy_json_value(
+                        item,
+                        path=f"{path}.{key}",
+                        _seen=seen,
+                    )
+                return copied
+            return [
+                _copy_json_value(
+                    item,
+                    path=f"{path}[{index}]",
+                    _seen=seen,
+                )
+                for index, item in enumerate(value)
+            ]
+        finally:
+            seen.remove(identity)
     if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, float) and math.isfinite(value):
@@ -106,12 +195,48 @@ def _safe_schema_literal(value: Any, *, limit: int = 160) -> str:
     return rendered
 
 
+def _reject_external_schema_references(
+    value: Any,
+    *,
+    tool_name: str,
+    path: Optional[list[Any]] = None,
+) -> None:
+    """Keep untrusted tool schemas from performing network or file retrieval."""
+
+    current_path = path if path is not None else []
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            item_path = [*current_path, key]
+            if (
+                key in _SCHEMA_REFERENCE_KEYWORDS
+                and isinstance(item, str)
+                and not item.startswith("#")
+            ):
+                raise ToolDefinitionError(
+                    f"external JSON Schema references are not allowed for tool "
+                    f"'{tool_name}' at {_format_json_path(item_path)}"
+                )
+            _reject_external_schema_references(
+                item,
+                tool_name=tool_name,
+                path=item_path,
+            )
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _reject_external_schema_references(
+                item,
+                tool_name=tool_name,
+                path=[*current_path, index],
+            )
+
+
 def _normalize_tool_schema(
     schema: Mapping[str, Any],
     *,
     tool_name: str,
 ) -> tuple[dict[str, Any], Any]:
     normalized = _copy_json_value(schema)
+    _reject_external_schema_references(normalized, tool_name=tool_name)
     if not normalized:
         normalized = {"type": "object", "properties": {}}
     elif "type" not in normalized:
@@ -295,8 +420,12 @@ class ToolCall:
             raise ToolDefinitionError("tool call id must be a non-empty string")
         if not isinstance(self.arguments, Mapping):
             raise TypeError("tool call arguments must be a mapping")
+        arguments = _copy_tool_argument_value(
+            self.arguments,
+            tool_name=self.name,
+        )
         object.__setattr__(self, "id", self.id.strip())
-        object.__setattr__(self, "arguments", _frozen_mapping(self.arguments))
+        object.__setattr__(self, "arguments", _frozen_mapping(arguments))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -411,7 +540,10 @@ class AgentTool:
     def prepare(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
         if not isinstance(arguments, Mapping):
             raise TypeError("tool arguments must be a mapping")
-        model_arguments = dict(arguments)
+        model_arguments = _copy_tool_argument_value(
+            arguments,
+            tool_name=self.name,
+        )
         try:
             errors = sorted(
                 self._parameter_validator.iter_errors(model_arguments),
@@ -545,12 +677,18 @@ def registry_from_skill_router(router: Any) -> ToolRegistry:
         if not isinstance(parameters, Mapping):
             parameters = {}
         description = str(item.get("description") or name).strip()
-        read_only = bool(item.get("read_only", False))
+        read_only = _strict_metadata_flag(
+            item.get("read_only", False),
+            default=False,
+        )
         # Model-driven selection has a larger blast radius than deterministic
         # routing. Any capability that may write must fail closed even if
         # legacy metadata forgot to raise the explicit approval flag.
         requires_approval = (
-            bool(item.get("requires_approval", True))
+            _strict_metadata_flag(
+                item.get("requires_approval", True),
+                default=True,
+            )
             or not read_only
             or name in _MODEL_APPROVAL_REQUIRED_TOOLS
         )
@@ -610,8 +748,15 @@ def registry_from_skill_router(router: Any) -> ToolRegistry:
                 requires_approval=requires_approval,
                 risk=str(item.get("risk") or "untrusted"),
                 read_only=read_only,
-                auto_approval_allowed=not bool(
-                    item.get("is_plugin_skill") or item.get("is_mcp_skill")
+                auto_approval_allowed=not (
+                    _strict_metadata_flag(
+                        item.get("is_plugin_skill", False),
+                        default=True,
+                    )
+                    or _strict_metadata_flag(
+                        item.get("is_mcp_skill", False),
+                        default=True,
+                    )
                 ),
             )
         )

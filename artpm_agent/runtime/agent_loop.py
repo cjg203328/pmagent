@@ -7,18 +7,28 @@ vendors, databases, or ArtPM business rules.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+import inspect
+import math
+from collections import deque
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-import inspect
-from queue import Queue
+from queue import Empty, Queue
 from threading import Event, RLock
+from time import monotonic
 from types import MappingProxyType
 from typing import Any, Optional
 from uuid import uuid4
 
 from .events import AgentEvent, AgentEventType, AgentMessage
-from .pipeline import ToolExecutionPipeline
+from .pipeline import (
+    DEFAULT_DETAILS_MAX_CHARS,
+    DEFAULT_SPILL_MAX_CHARS,
+    DEFAULT_SPILL_TTL_SECONDS,
+    ToolExecutionPipeline,
+    spill_scope_values,
+    spill_tool_result,
+)
 from .tools import (
     AgentTool,
     BeforeToolCallDecision,
@@ -28,7 +38,6 @@ from .tools import (
     ToolResult,
     normalize_tool_result,
 )
-
 
 TurnProvider = Callable[
     [tuple[AgentMessage, ...], tuple[dict[str, Any], ...], Mapping[str, Any]],
@@ -111,9 +120,9 @@ class ToolBatchResult:
 
     @property
     def terminate(self) -> bool:
-        return bool(self.records) and all(
-            record.result.terminate for record in self.records
-        )
+        return bool(self.records) and not any(
+            record.result.is_error for record in self.records
+        ) and any(record.result.terminate for record in self.records)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -143,6 +152,12 @@ class ToolExecutor:
         execution_mode: ToolExecutionMode = "parallel",
         before_tool_call: Optional[BeforeToolCallHook] = None,
         after_tool_call: Optional[AfterToolCallHook] = None,
+        max_workers: int = 8,
+        tool_timeout_seconds: Optional[float] = 120.0,
+        result_max_chars: int = DEFAULT_SPILL_MAX_CHARS,
+        result_details_max_chars: int = DEFAULT_DETAILS_MAX_CHARS,
+        spill_dir: Any = None,
+        spill_ttl_seconds: Optional[float] = DEFAULT_SPILL_TTL_SECONDS,
     ) -> None:
         if not isinstance(registry, ToolRegistry):
             raise TypeError("registry must be a ToolRegistry")
@@ -152,10 +167,59 @@ class ToolExecutor:
             raise TypeError("before_tool_call must be callable")
         if after_tool_call is not None and not callable(after_tool_call):
             raise TypeError("after_tool_call must be callable")
+        if isinstance(max_workers, bool) or not isinstance(max_workers, int):
+            raise TypeError("max_workers must be an integer")
+        if not 1 <= max_workers <= 64:
+            raise ValueError("max_workers must be between 1 and 64")
+        if tool_timeout_seconds is not None:
+            if isinstance(tool_timeout_seconds, bool) or not isinstance(
+                tool_timeout_seconds,
+                (int, float),
+            ):
+                raise TypeError("tool_timeout_seconds must be a number or None")
+            if not math.isfinite(float(tool_timeout_seconds)) or tool_timeout_seconds <= 0:
+                raise ValueError(
+                    "tool_timeout_seconds must be finite and greater than zero"
+                )
+        if isinstance(result_max_chars, bool) or not isinstance(result_max_chars, int):
+            raise TypeError("result_max_chars must be an integer")
+        if result_max_chars < 512:
+            raise ValueError("result_max_chars must be at least 512")
+        if isinstance(result_details_max_chars, bool) or not isinstance(
+            result_details_max_chars,
+            int,
+        ):
+            raise TypeError("result_details_max_chars must be an integer")
+        if result_details_max_chars < 512:
+            raise ValueError("result_details_max_chars must be at least 512")
+        if spill_ttl_seconds is not None:
+            if isinstance(spill_ttl_seconds, bool) or not isinstance(
+                spill_ttl_seconds,
+                (int, float),
+            ):
+                raise TypeError("spill_ttl_seconds must be a number or None")
+            if not math.isfinite(float(spill_ttl_seconds)) or spill_ttl_seconds < 0:
+                raise ValueError(
+                    "spill_ttl_seconds must be finite and non-negative"
+                )
         self.registry = registry
         self.execution_mode = execution_mode
         self.before_tool_call = before_tool_call
         self.after_tool_call = after_tool_call
+        self.max_workers = max_workers
+        self.tool_timeout_seconds = (
+            float(tool_timeout_seconds)
+            if tool_timeout_seconds is not None
+            else None
+        )
+        self.result_max_chars = result_max_chars
+        self.result_details_max_chars = result_details_max_chars
+        self.spill_dir = spill_dir
+        self.spill_ttl_seconds = (
+            float(spill_ttl_seconds)
+            if spill_ttl_seconds is not None
+            else None
+        )
 
     def execute_batch(
         self,
@@ -165,18 +229,29 @@ class ToolExecutor:
         turn_id: str,
         context: Mapping[str, Any],
         abort_event: Event,
-    ) -> Iterator[AgentEvent]:
+        allow_side_effects: bool = True,
+    ) -> Generator[AgentEvent, None, ToolBatchResult]:
         prepared: list[_PreparedToolCall] = []
         finalized: list[Optional[ToolResult]] = [None] * len(calls)
 
         for index, call in enumerate(calls):
+            if abort_event.is_set():
+                raise AgentLoopAbortedError("agent loop aborted")
             yield self._event(
                 AgentEventType.TOOL_EXECUTION_START,
                 call,
                 run_id,
                 turn_id,
             )
-            item = self._prepare(index, call, context, abort_event)
+            if abort_event.is_set():
+                raise AgentLoopAbortedError("agent loop aborted")
+            item = self._prepare(
+                index,
+                call,
+                context,
+                abort_event,
+                allow_side_effects=allow_side_effects,
+            )
             prepared.append(item)
             if item.immediate_result is not None:
                 finalized[index] = item.immediate_result
@@ -193,67 +268,212 @@ class ToolExecutor:
             item.tool is not None and item.tool.execution_mode == "sequential"
             for item in executable
         )
-        worker_count = 1 if force_sequential else max(1, len(executable))
+        worker_count = (
+            1
+            if force_sequential
+            else min(self.max_workers, max(1, len(executable)))
+        )
         if executable:
             updates: Queue[tuple[str, int, ToolResult]] = Queue()
-            with ThreadPoolExecutor(
+            pending = deque(executable)
+            active: dict[int, tuple[Any, Event, Event, Optional[float]]] = {}
+            timed_out = False
+            pool = ThreadPoolExecutor(
                 max_workers=worker_count,
                 thread_name_prefix="artpm-tool",
-            ) as pool:
-                if force_sequential:
-                    for item in executable:
-                        pool.submit(
-                            self._execute_worker,
-                            item,
-                            context,
-                            abort_event,
-                            updates,
+            )
+
+            def submit_available() -> None:
+                while pending and len(active) < worker_count and not timed_out:
+                    item = pending.popleft()
+                    tool_abort = Event()
+                    delivery_gate = Event()
+                    delivery_gate.set()
+                    if abort_event.is_set():
+                        tool_abort.set()
+                    future = pool.submit(
+                        self._execute_worker,
+                        item,
+                        context,
+                        tool_abort,
+                        delivery_gate,
+                        updates,
+                    )
+
+                    def publish_worker_exit(
+                        _future: Any,
+                        *,
+                        index: int = item.index,
+                    ) -> None:
+                        updates.put(
+                            ("worker_exit", index, ToolResult.error("unused"))
                         )
-                        yield from self._drain_one(
-                            item,
-                            updates,
-                            finalized,
-                            run_id,
-                            turn_id,
+
+                    future.add_done_callback(publish_worker_exit)
+                    deadline = (
+                        monotonic() + self.tool_timeout_seconds
+                        if self.tool_timeout_seconds is not None
+                        else None
+                    )
+                    active[item.index] = (
+                        future,
+                        tool_abort,
+                        delivery_gate,
+                        deadline,
+                    )
+
+            try:
+                submit_available()
+                while active or pending:
+                    if abort_event.is_set():
+                        for (
+                            _future,
+                            tool_abort,
+                            delivery_gate,
+                            _deadline,
+                        ) in active.values():
+                            delivery_gate.clear()
+                            tool_abort.set()
+                        raise AgentLoopAbortedError("agent loop aborted")
+
+                    deadlines = [
+                        deadline
+                        for _future, _tool_abort, _delivery_gate, deadline in active.values()
+                        if deadline is not None
+                    ]
+                    wait_timeout = 0.05
+                    if deadlines:
+                        wait_timeout = min(
+                            wait_timeout,
+                            max(0.0, min(deadlines) - monotonic()),
                         )
-                else:
-                    for item in executable:
-                        pool.submit(
-                            self._execute_worker,
-                            item,
-                            context,
-                            abort_event,
-                            updates,
+                    try:
+                        kind, index, result = updates.get(timeout=wait_timeout)
+                    except Empty:
+                        kind = ""
+                        index = -1
+                        result = ToolResult.error("unused")
+
+                    active_entry = active.get(index)
+                    event_before_deadline = (
+                        active_entry is not None
+                        and (
+                            active_entry[3] is None
+                            or active_entry[3] > monotonic()
                         )
-                    completed = 0
-                    while completed < len(executable):
-                        kind, index, result = updates.get()
+                    )
+                    if index in active and event_before_deadline:
                         item = prepared[index]
                         if kind == "update":
+                            tool = item.tool
+                            if tool is None:
+                                raise RuntimeError("tool update has no registered tool")
                             yield self._event(
                                 AgentEventType.TOOL_EXECUTION_UPDATE,
                                 item.call,
                                 run_id,
                                 turn_id,
-                                result=result,
+                                result=self._bound_result(tool, result, context),
                             )
-                            continue
-                        finalized[index] = result
-                        completed += 1
+                        elif kind == "done":
+                            _future, _tool_abort, delivery_gate, _deadline = active.pop(
+                                index
+                            )
+                            delivery_gate.clear()
+                            tool = item.tool
+                            if tool is None:
+                                raise RuntimeError("tool completion has no registered tool")
+                            bounded_result = self._bound_result(tool, result, context)
+                            finalized[index] = bounded_result
+                            yield self._event(
+                                AgentEventType.TOOL_EXECUTION_END,
+                                item.call,
+                                run_id,
+                                turn_id,
+                                result=bounded_result,
+                            )
+                        elif kind == "worker_exit":
+                            _future, _tool_abort, delivery_gate, _deadline = active.pop(
+                                index
+                            )
+                            delivery_gate.clear()
+                            if finalized[index] is None:
+                                worker_error = ToolResult.error(
+                                    "Tool worker exited without returning a result"
+                                )
+                                finalized[index] = worker_error
+                                yield self._event(
+                                    AgentEventType.TOOL_EXECUTION_END,
+                                    item.call,
+                                    run_id,
+                                    turn_id,
+                                    result=worker_error,
+                                )
+
+                    now = monotonic()
+                    expired = [
+                        index
+                        for index, (
+                            _future,
+                            _tool_abort,
+                            _delivery_gate,
+                            deadline,
+                        ) in active.items()
+                        if (
+                            deadline is not None
+                            and deadline <= now
+                        )
+                    ]
+                    for index in expired:
+                        future, tool_abort, delivery_gate, _deadline = active.pop(index)
+                        delivery_gate.clear()
+                        tool_abort.set()
+                        future.cancel()
+                        timeout_result = ToolResult.error(
+                            "Tool execution timed out after "
+                            f"{self.tool_timeout_seconds:g} seconds"
+                        )
+                        finalized[index] = timeout_result
+                        timed_out = True
                         yield self._event(
                             AgentEventType.TOOL_EXECUTION_END,
-                            item.call,
+                            prepared[index].call,
                             run_id,
                             turn_id,
-                            result=result,
+                            result=timeout_result,
                         )
+
+                    if timed_out:
+                        while pending:
+                            item = pending.popleft()
+                            skipped = ToolResult.error(
+                                "Tool execution skipped because another tool "
+                                "timed out in the same batch"
+                            )
+                            finalized[item.index] = skipped
+                            yield self._event(
+                                AgentEventType.TOOL_EXECUTION_END,
+                                item.call,
+                                run_id,
+                                turn_id,
+                                result=skipped,
+                            )
+                    else:
+                        submit_available()
+            finally:
+                for _future, tool_abort, delivery_gate, _deadline in active.values():
+                    delivery_gate.clear()
+                    tool_abort.set()
+                pool.shutdown(wait=not timed_out and not active, cancel_futures=True)
 
         records: list[ToolExecutionRecord] = []
         for index, call in enumerate(calls):
-            result = finalized[index]
-            if result is None:
+            if abort_event.is_set():
+                raise AgentLoopAbortedError("agent loop aborted")
+            final_result = finalized[index]
+            if final_result is None:
                 raise RuntimeError(f"tool call did not finalize: {call.name}")
-            message = self._result_message(call, result)
+            message = self._result_message(call, final_result)
             yield AgentEvent(
                 type=AgentEventType.MESSAGE_START,
                 run_id=run_id,
@@ -266,7 +486,7 @@ class ToolExecutor:
                 turn_id=turn_id,
                 message=message,
             )
-            records.append(ToolExecutionRecord(call, result, message))
+            records.append(ToolExecutionRecord(call, final_result, message))
         return ToolBatchResult(tuple(records))
 
     def _prepare(
@@ -275,6 +495,8 @@ class ToolExecutor:
         call: ToolCall,
         context: Mapping[str, Any],
         abort_event: Event,
+        *,
+        allow_side_effects: bool,
     ) -> _PreparedToolCall:
         tool = self.registry.get(call.name)
         if tool is None:
@@ -290,6 +512,15 @@ class ToolExecutor:
                 if key not in self._HOST_APPROVAL_FIELDS
             }
             arguments = tool.prepare(model_arguments)
+            if not allow_side_effects and not tool.read_only:
+                return _PreparedToolCall(
+                    index=index,
+                    call=call,
+                    tool=tool,
+                    immediate_result=ToolResult.error(
+                        "Side-effecting tools cannot run on the final agent turn"
+                    ),
+                )
             decision = (
                 self.before_tool_call(call, tool, arguments, context)
                 if self.before_tool_call is not None
@@ -329,6 +560,8 @@ class ToolExecutor:
                 tool=tool,
                 arguments=MappingProxyType(trusted_arguments),
             )
+        except AgentLoopAbortedError:
+            raise
         except Exception as error:
             return _PreparedToolCall(
                 index=index,
@@ -344,6 +577,7 @@ class ToolExecutor:
         prepared: _PreparedToolCall,
         context: Mapping[str, Any],
         abort_event: Event,
+        delivery_gate: Event,
         updates: Queue[tuple[str, int, ToolResult]],
     ) -> None:
         tool = prepared.tool
@@ -351,12 +585,18 @@ class ToolExecutor:
             updates.put(("done", prepared.index, ToolResult.error("Tool not found")))
             return
 
-        accepting_updates = Event()
-        accepting_updates.set()
+        tool_running = Event()
+        tool_running.set()
 
         def on_update(partial: ToolResult) -> None:
-            if accepting_updates.is_set():
-                updates.put(("update", prepared.index, normalize_tool_result(partial)))
+            if (
+                delivery_gate.is_set()
+                and tool_running.is_set()
+                and not abort_event.is_set()
+            ):
+                normalized = normalize_tool_result(partial)
+                if delivery_gate.is_set() and not abort_event.is_set():
+                    updates.put(("update", prepared.index, normalized))
 
         try:
             if abort_event.is_set():
@@ -370,9 +610,12 @@ class ToolExecutor:
         except BaseException as error:  # noqa: BLE001 - worker must always finalize
             result = ToolResult.error(str(error) or error.__class__.__name__)
         finally:
-            accepting_updates.clear()
+            tool_running.clear()
 
-        if self.after_tool_call is not None:
+        if not delivery_gate.is_set():
+            return
+
+        if self.after_tool_call is not None and not abort_event.is_set():
             try:
                 replacement = self.after_tool_call(
                     prepared.call,
@@ -388,7 +631,34 @@ class ToolExecutor:
                     result = replacement
             except BaseException as error:  # noqa: BLE001 - worker must always finalize
                 result = ToolResult.error(str(error) or error.__class__.__name__)
-        updates.put(("done", prepared.index, result))
+        if not delivery_gate.is_set():
+            return
+        if delivery_gate.is_set():
+            updates.put(("done", prepared.index, result))
+
+    def _bound_result(
+        self,
+        tool: AgentTool,
+        result: ToolResult,
+        context: Mapping[str, Any],
+    ) -> ToolResult:
+        try:
+            tenant_id, workspace_id = spill_scope_values(context)
+            return spill_tool_result(
+                result,
+                max_chars=self.result_max_chars,
+                details_max_chars=self.result_details_max_chars,
+                spill_dir=self.spill_dir,
+                tool_name=tool.name,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                ttl_seconds=self.spill_ttl_seconds,
+            )
+        except Exception as error:
+            return ToolResult.error(
+                "Tool result could not be safely bounded: "
+                f"{str(error) or error.__class__.__name__}"
+            )
 
     def _drain_one(
         self,
@@ -466,6 +736,13 @@ class AgentLoop:
         *,
         max_turns: int = 8,
         max_tool_calls_per_turn: int = 16,
+        max_tool_calls_total: Optional[int] = None,
+        max_tool_workers: int = 8,
+        tool_timeout_seconds: Optional[float] = 120.0,
+        tool_result_max_chars: int = DEFAULT_SPILL_MAX_CHARS,
+        tool_result_details_max_chars: int = DEFAULT_DETAILS_MAX_CHARS,
+        tool_spill_dir: Any = None,
+        tool_spill_ttl_seconds: Optional[float] = DEFAULT_SPILL_TTL_SECONDS,
         tool_execution: ToolExecutionMode = "parallel",
         context_transform: Optional[ContextTransform] = None,
         before_tool_call: Optional[BeforeToolCallHook] = None,
@@ -483,6 +760,15 @@ class AgentLoop:
             raise TypeError("max_tool_calls_per_turn must be an integer")
         if max_tool_calls_per_turn < 1:
             raise ValueError("max_tool_calls_per_turn must be at least 1")
+        if max_tool_calls_total is None:
+            max_tool_calls_total = max_turns * max_tool_calls_per_turn
+        elif isinstance(max_tool_calls_total, bool) or not isinstance(
+            max_tool_calls_total,
+            int,
+        ):
+            raise TypeError("max_tool_calls_total must be an integer or None")
+        if max_tool_calls_total < 1:
+            raise ValueError("max_tool_calls_total must be at least 1")
         if context_transform is not None and not callable(context_transform):
             raise TypeError("context_transform must be callable")
         if should_stop_after_turn is not None and not callable(should_stop_after_turn):
@@ -493,6 +779,7 @@ class AgentLoop:
         self.registry = registry if registry is not None else ToolRegistry()
         self.max_turns = max_turns
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
+        self.max_tool_calls_total = max_tool_calls_total
         self.context_transform = context_transform
         self.should_stop_after_turn = should_stop_after_turn
         # An optional pipeline composes with legacy single hooks: pipeline
@@ -512,6 +799,12 @@ class AgentLoop:
             execution_mode=tool_execution,
             before_tool_call=combined_before,
             after_tool_call=combined_after,
+            max_workers=max_tool_workers,
+            tool_timeout_seconds=tool_timeout_seconds,
+            result_max_chars=tool_result_max_chars,
+            result_details_max_chars=tool_result_details_max_chars,
+            spill_dir=tool_spill_dir,
+            spill_ttl_seconds=tool_spill_ttl_seconds,
         )
         self._lock = RLock()
         self._active_abort: Optional[Event] = None
@@ -549,7 +842,11 @@ class AgentLoop:
         first_turn_id = self._identifier(turn_id)
         context_snapshot = MappingProxyType(dict(context or {}))
 
-        def event_stream() -> Iterator[AgentEvent]:
+        def event_stream() -> Generator[
+            AgentEvent,
+            None,
+            tuple[AgentMessage, ...],
+        ]:
             abort_event = self._start()
             # Freeze tool definitions for the whole run. Hot reloads apply to the
             # next run and cannot swap an implementation after the model has seen
@@ -560,6 +857,14 @@ class AgentLoop:
                 execution_mode=self.tool_executor.execution_mode,
                 before_tool_call=self.tool_executor.before_tool_call,
                 after_tool_call=self.tool_executor.after_tool_call,
+                max_workers=self.tool_executor.max_workers,
+                tool_timeout_seconds=self.tool_executor.tool_timeout_seconds,
+                result_max_chars=self.tool_executor.result_max_chars,
+                result_details_max_chars=(
+                    self.tool_executor.result_details_max_chars
+                ),
+                spill_dir=self.tool_executor.spill_dir,
+                spill_ttl_seconds=self.tool_executor.spill_ttl_seconds,
             )
             messages = list(history)
             new_messages: list[AgentMessage] = []
@@ -568,6 +873,7 @@ class AgentLoop:
             new_messages.append(user_message)
             current_turn_id = first_turn_id
             emitted_agent_end = False
+            tool_calls_used = 0
             try:
                 yield AgentEvent(
                     AgentEventType.AGENT_START,
@@ -606,11 +912,15 @@ class AgentLoop:
                         tuple(messages),
                         context_snapshot,
                     )
+                    if abort_event.is_set():
+                        raise AgentLoopAbortedError("agent loop aborted")
                     turn = provider(
                         provider_messages,
                         run_registry.specifications(),
                         context_snapshot,
                     )
+                    if abort_event.is_set():
+                        raise AgentLoopAbortedError("agent loop aborted")
                     if inspect.isawaitable(turn):
                         raise TypeError(
                             "synchronous turn provider returned an awaitable"
@@ -621,6 +931,15 @@ class AgentLoop:
                         raise ValueError(
                             "assistant requested too many tool calls in one turn"
                         )
+                    if (
+                        tool_calls_used + len(turn.tool_calls)
+                        > self.max_tool_calls_total
+                    ):
+                        raise AgentLoopLimitError(
+                            "agent loop exceeded the cumulative tool call budget "
+                            f"of {self.max_tool_calls_total}"
+                        )
+                    tool_calls_used += len(turn.tool_calls)
 
                     assistant_message = AgentMessage(
                         role="assistant",
@@ -652,6 +971,8 @@ class AgentLoop:
                         current_turn_id,
                         message=assistant_message,
                     )
+                    if abort_event.is_set():
+                        raise AgentLoopAbortedError("agent loop aborted")
 
                     batch = ToolBatchResult()
                     if turn.tool_calls:
@@ -661,10 +982,13 @@ class AgentLoop:
                             turn_id=current_turn_id,
                             context=context_snapshot,
                             abort_event=abort_event,
+                            allow_side_effects=turn_index < self.max_turns - 1,
                         )
                         for record in batch.records:
                             messages.append(record.message)
                             new_messages.append(record.message)
+                        if abort_event.is_set():
+                            raise AgentLoopAbortedError("agent loop aborted")
 
                     yield AgentEvent(
                         AgentEventType.TURN_END,
@@ -676,11 +1000,15 @@ class AgentLoop:
                             "tool_batch": batch.to_dict(),
                         },
                     )
+                    if abort_event.is_set():
+                        raise AgentLoopAbortedError("agent loop aborted")
                     should_stop = (
                         self.should_stop_after_turn(turn, batch, tuple(messages))
                         if self.should_stop_after_turn is not None
                         else False
                     )
+                    if abort_event.is_set():
+                        raise AgentLoopAbortedError("agent loop aborted")
                     if not isinstance(should_stop, bool):
                         raise TypeError("should_stop_after_turn must return a boolean")
                     if should_stop or not turn.tool_calls or batch.terminate:

@@ -18,10 +18,10 @@ from __future__ import annotations
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, overload
 from uuid import uuid4
 
-from .tools import AgentTool
+from .tools import AgentTool, ToolUpdateCallback
 
 #: Default guardrails mirroring a small local deployment.
 DEFAULT_MAX_CONCURRENCY = 4
@@ -186,18 +186,48 @@ def subagent_delegate_tool(
     if not isinstance(pool, SubagentPool):
         raise TypeError("pool must be a SubagentPool")
 
+    @overload
+    def execute(
+        call_id: str,
+        arguments: Mapping[str, Any],
+        abort_event: threading.Event,
+        on_update: Optional[ToolUpdateCallback] = None,
+    ) -> dict[str, Any]: ...
+
+    @overload
     def execute(
         *,
         task: str,
         context: Optional[dict[str, Any]] = None,
         depth: int = 0,
+    ) -> dict[str, Any]: ...
+
+    def execute(
+        call_id: str = "",
+        arguments: Optional[Mapping[str, Any]] = None,
+        abort_event: Optional[threading.Event] = None,
+        on_update: Optional[ToolUpdateCallback] = None,
+        *,
+        task: Optional[str] = None,
+        context: Optional[dict[str, Any]] = None,
+        depth: int = 0,
     ) -> dict[str, Any]:
-        if not isinstance(task, str) or not task.strip():
+        del call_id, on_update
+        resolved_task: Any = task
+        resolved_context: Any = context
+        resolved_depth: Any = depth
+        if arguments is not None:
+            resolved_task = arguments.get("task")
+            resolved_context = arguments.get("context")
+            resolved_depth = arguments.get("depth", 0)
+        if abort_event is not None and abort_event.is_set():
+            return {"error": "subagent delegation aborted"}
+        if not isinstance(resolved_task, str) or not resolved_task.strip():
             return {"error": "task must be a non-empty string"}
         request = SubagentRequest(
-            task=task,
-            context=dict(context or {}),
-            depth=int(depth or 0),
+            task=resolved_task,
+            context=dict(resolved_context or {}),
+            depth=int(resolved_depth or 0),
         )
         result = pool.run(request)
         payload: dict[str, Any] = {"output": result.output}

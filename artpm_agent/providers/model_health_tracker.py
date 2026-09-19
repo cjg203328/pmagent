@@ -220,7 +220,7 @@ class ModelHealthTracker:
 
         # Error distribution
         error_types = [r.error_type for r in records if not r.success and r.error_type]
-        error_distribution = {}
+        error_distribution: dict[str, int] = {}
         for error_type in error_types:
             error_distribution[error_type] = error_distribution.get(error_type, 0) + 1
 
@@ -364,7 +364,7 @@ class SmartRetryPolicy:
     """Differentiated retry policy based on error type."""
 
     # Error-specific retry limits
-    MAX_RETRIES = {
+    MAX_RETRIES: dict[str, int] = {
         "rate_limit": 2,
         "timeout": 3,
         "network": 3,
@@ -374,7 +374,7 @@ class SmartRetryPolicy:
     }
 
     # Error-specific cooldown times (seconds)
-    COOLDOWN_TIMES = {
+    COOLDOWN_TIMES: dict[str, float] = {
         "rate_limit": 120,
         "timeout": 30,
         "network": 10,

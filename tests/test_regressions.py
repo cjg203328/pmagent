@@ -19,6 +19,7 @@ from artpm_agent.database.models import DatabaseManager
 from artpm_agent.memory.sqlite_manager import SQLiteManager
 from artpm_agent.memory.memory_manager import MemoryManager as _MemoryManager
 from artpm_agent.parsers.excel_parser import ExcelQuoteParser
+from artpm_agent.security.document_paths import TrustedDocumentRoots
 from artpm_agent.skills.base_skill import BaseSkill
 from artpm_agent.skills.smart_progress_tracker import SmartProgressTracker
 from artpm_agent.skills.smart_task_allocator import SmartTaskAllocator
@@ -383,7 +384,9 @@ def test_incompatible_business_database_is_not_modified(tmp_path):
 def test_document_skill_parses_real_excel_instead_of_placeholder(tmp_path):
     path = tmp_path / "quote.xlsx"
     path.write_bytes(_quote_workbook().getvalue())
-    result = DocumentClassifierParser().run({"file_path": str(path)})
+    result = DocumentClassifierParser(
+        {"document_roots": TrustedDocumentRoots.from_paths(tmp_path)}
+    ).run({"file_path": str(path)})
     assert result["success"] is True
     assert result["extracted_data"]["total_amount"] == 2800
     assert result["confidence"] == 0.95

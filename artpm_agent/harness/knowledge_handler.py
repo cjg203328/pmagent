@@ -161,7 +161,8 @@ def _trusted_scope(ctx: "TurnContext") -> Any:
 def _trusted_workspace_id(ctx: "TurnContext") -> Optional[str]:
     """Resolve a host-authenticated workspace for compatibility callers."""
 
-    return _trusted_scope(ctx).workspace_id
+    workspace_id = getattr(_trusted_scope(ctx), "workspace_id", None)
+    return str(workspace_id) if workspace_id is not None else None
 
 
 def _supports_workspace_keyword(method: Any) -> bool:
@@ -180,7 +181,7 @@ def _propose_ingestion(
     knowledge_store: Any,
     conversation_id: str,
     turn_id: str,
-    resources: list[dict],
+    resources: list[dict[str, Any]],
     *,
     workspace_id: str,
     tenant_id: str,
@@ -225,7 +226,7 @@ def _build_knowledge_ingestion_resources(
     prompt: str,
     *,
     parsed_files: Optional[List[Any]] = None,
-) -> List[dict]:
+) -> List[dict[str, Any]]:
     """
     Parse conversation files into bounded, parser-neutral knowledge payloads.
 

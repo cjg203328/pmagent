@@ -3,38 +3,44 @@ Skill Router - Route user intents to appropriate skills
 
 Core skill implementations and adapters used by the synchronous agent router.
 """
-from copy import deepcopy
 import asyncio
-from hashlib import sha256
 import json
 import logging
+from copy import deepcopy
+from hashlib import sha256
 from pathlib import Path
-from threading import RLock
 from tempfile import TemporaryDirectory
-from typing import Dict, Any, List, Optional
+from threading import RLock
+from typing import Any, Dict, List, Optional
 
-from .base_skill import BaseSkill
-from .smart_progress_tracker import SmartProgressTracker
-from .smart_task_allocator import SmartTaskAllocator
-from .quality_control_skill import QualityControlSkill
-from .requirements_assessment_skill import RequirementsAssessmentSkill
-from .cost_control_skill import CostControlSkill
-from .quote_scheduling_skill import QuoteSchedulingSkill
-from .progress_management_skill import ProgressManagementSkill
-from .delivery_skill import DeliverySkill
-from .retrospective_skill import RetrospectiveSkill
-from .input_schemas import BUILTIN_SKILL_INPUT_SCHEMAS
-from artpm_agent.utils.image_validation import MAX_IMAGE_FILE_SIZE, load_validated_image
-from artpm_agent.utils.document_capabilities import MINERU_SUPPORTED_SUFFIXES
 from artpm_agent.plugins import PluginManager
+from artpm_agent.security.document_paths import (
+    DOCUMENT_NOT_FOUND,
+    DocumentPathError,
+    resolve_document_path,
+    scoped_document_roots,
+)
 from artpm_agent.tenancy import (
     TenantContext,
-    TenantContextManager,
     TenantContextError,
+    TenantContextManager,
     WorkspaceAccessDenied,
     tenant_context_from_host,
 )
+from artpm_agent.utils.document_capabilities import MINERU_SUPPORTED_SUFFIXES
+from artpm_agent.utils.image_validation import MAX_IMAGE_FILE_SIZE, load_validated_image
 
+from .base_skill import BaseSkill
+from .cost_control_skill import CostControlSkill
+from .delivery_skill import DeliverySkill
+from .input_schemas import BUILTIN_SKILL_INPUT_SCHEMAS
+from .progress_management_skill import ProgressManagementSkill
+from .quality_control_skill import QualityControlSkill
+from .quote_scheduling_skill import QuoteSchedulingSkill
+from .requirements_assessment_skill import RequirementsAssessmentSkill
+from .retrospective_skill import RetrospectiveSkill
+from .smart_progress_tracker import SmartProgressTracker
+from .smart_task_allocator import SmartTaskAllocator
 
 logger = logging.getLogger(__name__)
 _REMINDER_DISPATCH_RESULTS: Dict[str, Dict[str, Any]] = {}
@@ -87,9 +93,10 @@ class DocumentClassifierParser(BaseSkill):
         if not file_path:
             return {"success": False, "error": "file_path is required"}
 
-        path = Path(file_path).expanduser().resolve()
-        if not path.is_file():
-            return {"success": False, "error": f"文件不存在: {file_path}"}
+        try:
+            path = resolve_document_path(file_path, self.context)
+        except DocumentPathError as error:
+            return error.as_result()
 
         suffix = path.suffix.lower()
         if suffix not in _SUPPORTED_DOCUMENT_SUFFIXES:
@@ -97,7 +104,10 @@ class DocumentClassifierParser(BaseSkill):
                 "success": False,
                 "error": f"暂不支持的文档格式: {suffix or '无扩展名'}",
             }
-        file_size = path.stat().st_size
+        try:
+            file_size = path.stat().st_size
+        except OSError:
+            return DocumentPathError(DOCUMENT_NOT_FOUND).as_result()
         if file_size <= 0:
             return {"success": False, "error": "附件文件不能为空"}
         if file_size > MAX_DOCUMENT_FILE_SIZE:
@@ -150,7 +160,10 @@ class DocumentClassifierParser(BaseSkill):
         if suffix in {".xlsx", ".xls"}:
             from artpm_agent.parsers.excel_parser import ExcelQuoteParser
 
-            parsed = ExcelQuoteParser().parse(path, inputs.get("user_hint"))
+            parsed = ExcelQuoteParser().parse(
+                path,
+                str(inputs.get("user_hint") or ""),
+            )
             if not parsed.get("success"):
                 return parsed
             return {
@@ -184,7 +197,7 @@ class DocumentClassifierParser(BaseSkill):
                 index for index, text in enumerate(page_texts) if not text.strip()
             ]
             content = "\n".join(text for text in page_texts if text.strip())
-            extracted_data = {
+            extracted_data: Dict[str, Any] = {
                 "page_count": page_count,
                 "native_text_pages": page_count - len(blank_page_indices),
                 "pages_requiring_ocr": [index + 1 for index in blank_page_indices],
@@ -202,7 +215,7 @@ class DocumentClassifierParser(BaseSkill):
                             if hasattr(configured_ocr, "parse")
                             else UnlimitedOCRClient(configured_ocr)
                         )
-                if _ocr_client_ready(ocr_client):
+                if ocr_client is not None and _ocr_client_ready(ocr_client):
                     try:
                         import fitz
 
@@ -309,7 +322,7 @@ class DocumentClassifierParser(BaseSkill):
         if suffix == ".docx":
             from docx import Document
 
-            document = Document(path)
+            document = Document(str(path))
             blocks = [paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()]
             for table in document.tables:
                 for row in table.rows:
@@ -350,7 +363,7 @@ class DocumentClassifierParser(BaseSkill):
                         if hasattr(configured_ocr, "parse")
                         else UnlimitedOCRClient(configured_ocr)
                     )
-            if _ocr_client_ready(ocr_client):
+            if ocr_client is not None and _ocr_client_ready(ocr_client):
                 try:
                     ocr_prompt = inputs.get("ocr_prompt") or "document parsing."
                     ocr_image_mode = inputs.get("ocr_image_mode", "gundam")
@@ -715,7 +728,14 @@ class ReminderDispatch(BaseSkill):
                         "idempotent_replay": True,
                         "error": "相同外发请求正在处理中",
                     }
-                replay = deepcopy(existing_result)
+                if not isinstance(existing_result, dict):
+                    return {
+                        "success": False,
+                        "sent_status": "invalid_idempotency_state",
+                        "requires_review": True,
+                        "error": "外发幂等记录无效，请稍后重试",
+                    }
+                replay: Dict[str, Any] = deepcopy(existing_result)
                 replay["idempotent_replay"] = True
                 return replay
             store[idempotency_key] = {
@@ -966,12 +986,18 @@ class SkillRouter:
     """
 
     def __init__(self, context: Dict[str, Any]):
-        self.context = context
+        self.context = dict(context or {})
         self.skills: Dict[str, BaseSkill] = {}
         self.plugin_load_report = None
         self.plugin_errors: tuple[str, ...] = ()
         self._plugin_metadata: Dict[str, Dict[str, Any]] = {}
-        self.tenant_context = tenant_context_from_host(context)
+        self.tenant_context = tenant_context_from_host(self.context)
+        self._document_roots_explicit = "document_roots" in self.context
+        if not self._document_roots_explicit:
+            self.context["document_roots"] = scoped_document_roots(
+                self.tenant_context or TenantContext.local(),
+                include_legacy_local_uploads=self.tenant_context is None,
+            )
         self._load_skills()
 
     def _load_skills(self):
@@ -1143,6 +1169,10 @@ class SkillRouter:
             request_context["tenant_id"] = tenant_context.tenant_id
             request_context["workspace_id"] = tenant_context.workspace_id
             request_context["principal_id"] = tenant_context.principal_id
+            if not self._document_roots_explicit:
+                request_context["document_roots"] = scoped_document_roots(
+                    tenant_context
+                )
             try:
                 skill = type(skill)(request_context)
             except BaseException as error:

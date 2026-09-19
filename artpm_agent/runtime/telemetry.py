@@ -545,7 +545,7 @@ class AgentTelemetry:
         rows = self.recent_connections(window)
         if not rows:
             return []
-        buckets: Dict[tuple, Dict[str, Any]] = {}
+        buckets: dict[tuple[str, str, str], Dict[str, Any]] = {}
         for r in rows:
             key = (
                 r.get("provider") or "(unknown)",

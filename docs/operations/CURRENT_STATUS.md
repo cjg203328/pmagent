@@ -1,6 +1,6 @@
 # Current Project Status
 
-Validated on 2026-09-17 from branch
+Validated on 2026-09-18 from branch
 `chore/consolidate-uncommitted-work`.
 
 ## Runtime Shape
@@ -15,6 +15,12 @@ Validated on 2026-09-17 from branch
   `LegacyAgentRuntimeAdapter` is compatibility-only.
 - SQLite and FAISS are the offline defaults. PostgreSQL, Qdrant, Redis,
   telemetry, and Sentry are deployment-selected integrations.
+- RuntimeFactory scopes workflow/artifact runtimes by tenant, workspace and
+  profile with bounded TTL/LRU cleanup; UI session state is only a compatibility
+  alias.
+- Canonical tool calls run through the Harness AgentLoop with JSON-schema
+  validation, bounded turns/calls/workers, per-call timeout, cancellation,
+  side-effect gates, scoped result spill and durable SessionStore events.
 
 ## Quality Commands
 
@@ -24,6 +30,8 @@ powershell -ExecutionPolicy Bypass -File scripts/test_all.ps1
 powershell -ExecutionPolicy Bypass -File scripts/test_integration.ps1
 powershell -ExecutionPolicy Bypass -File scripts/test_benchmark.ps1
 powershell -ExecutionPolicy Bypass -File scripts/coverage_core.ps1
+python scripts/mypy_ratchet.py
+python scripts/build_graph.py --selftest
 # Full-repository blocking correctness rules
 ruff check artpm_agent tests --select E9,F63,F7,F82
 
@@ -56,6 +64,12 @@ always covers syntax errors, invalid constructs, and undefined names.
 - `VectorBackend` defines the shared local/remote vector-store contract.
 - Rule approval and rejection calls can be bound to an explicit workspace;
   older direct calls remain compatible when no workspace is supplied.
+- `/ready` probes all authoritative Store contracts through `StorageRegistry`;
+  optional model/OCR/MCP/vector capabilities are reported separately.
+- API permission/workflow routes live in dedicated router modules; gateway and
+  turn dependencies are expressed through Protocol ports. The remaining
+  workspace/chat/embed/voice extraction is intentionally the next compatibility
+  wave.
 
 ## Remaining External Verification
 
@@ -65,3 +79,9 @@ always covers syntax errors, invalid constructs, and undefined names.
   Skills Forge configuration.
 - Provider latency and failover need a controlled external model environment;
   offline tests must continue using fakes.
+- The full-tree mypy ratchet baseline is 451 reviewed legacy diagnostics,
+  measured with the pinned `mypy==2.3.1` command in `scripts/mypy_ratchet.py`.
+  The previous 363 baseline predates the later memory/UI/API commits; 47
+  diagnostics in this worktree's changed files were fixed before ratcheting.
+  The four P2 packages (`runtime`, `harness`, `api`, `tenancy`) remain the
+  strict zero-error gate, and the baseline only prevents further growth.

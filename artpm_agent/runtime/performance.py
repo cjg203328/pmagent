@@ -9,10 +9,10 @@ from __future__ import annotations
 import importlib
 import os
 import sys
-from threading import RLock
 import time
+from threading import RLock
+from types import ModuleType
 from typing import Any
-
 
 _PROCESS_STARTED_AT = time.perf_counter()
 
@@ -161,7 +161,7 @@ class PerformanceMetrics:
 performance_metrics = PerformanceMetrics()
 
 
-def import_module_timed(module_name: str):
+def import_module_timed(module_name: str) -> ModuleType:
     started = time.perf_counter()
     module = importlib.import_module(module_name)
     performance_metrics.record_import(

@@ -135,6 +135,17 @@ class HarnessRuntime(Protocol):
         context: Optional[Mapping[str, Any]] = None,
     ) -> Iterator[str]: ...
 
+    def run_model_tool_turn(
+        self,
+        prompt: str,
+        *,
+        conversation_id: str,
+        workspace_id: str,
+        history: Sequence[Mapping[str, Any]],
+        context: Mapping[str, Any],
+        session_store: Any = None,
+    ) -> tuple[str, Mapping[str, Any]] | None: ...
+
     def make_llm_callable(self) -> Any: ...
 
     def chat(self, user_input: str, *, context: Optional[Mapping[str, Any]] = None) -> Any: ...
@@ -182,6 +193,18 @@ class BaseHarnessRuntime:
     def for_tenant(self, _tenant_context: Any) -> "HarnessRuntime":
         """Return a request-scoped runtime; stateless runtimes can reuse self."""
         return self
+
+    def run_model_tool_turn(
+        self,
+        _prompt: str,
+        *,
+        conversation_id: str,
+        workspace_id: str,
+        history: Sequence[Mapping[str, Any]],
+        context: Mapping[str, Any],
+        session_store: Any = None,
+    ) -> tuple[str, Mapping[str, Any]] | None:
+        return None
 
     def build_skill_input(self, _user_input: str, _context: Mapping[str, Any]) -> str:
         raise RuntimeCapabilityError("skill input construction is unavailable")
@@ -234,6 +257,18 @@ class BaseHarnessRuntime:
         del image_paths
         raise RuntimeCapabilityError("model chat is unavailable")
 
+    def stream_with_failover(
+        self,
+        _prompt: str,
+        _system_prompt: str,
+        _history: Sequence[Mapping[str, Any]],
+        *,
+        image_paths: list[str],
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> Iterator[str]:
+        del image_paths, context
+        raise RuntimeCapabilityError("model streaming is unavailable")
+
     def make_llm_callable(self) -> Any:
         return None
 
@@ -259,10 +294,17 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
     )
     supports_response_cache_scope = True
 
-    def __init__(self, target: Any, *, router: Any = None):
+    def __init__(
+        self,
+        target: Any,
+        *,
+        router: Any = None,
+        tenant_context: Any = None,
+    ):
         if target is None:
             raise ValueError("target agent is required")
         self.target = target
+        self.tenant_context = tenant_context
         self._router = router if router is not None else getattr(target, "router", None)
         router = self._router
         skill_ready = bool(
@@ -337,7 +379,9 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
                 router = method()
                 gate = getattr(router, "execution_gate", None)
                 if callable(gate):
-                    return gate(decision, explicit=explicit)
+                    result = gate(decision, explicit=explicit)
+                    if isinstance(result, tuple) and len(result) == 2:
+                        return bool(result[0]), str(result[1])
             except Exception:
                 pass
         return super().intent_execution_gate(decision, explicit=explicit)
@@ -374,7 +418,48 @@ class LegacyAgentRuntimeAdapter(BaseHarnessRuntime):
         scoped_router = binder(tenant_context)
         if scoped_router is None:
             raise RuntimeCapabilityError("tenant-scoped router was not created")
-        return LegacyAgentRuntimeAdapter(self.target, router=scoped_router)
+        return LegacyAgentRuntimeAdapter(
+            self.target,
+            router=scoped_router,
+            tenant_context=tenant_context,
+        )
+
+    def run_model_tool_turn(
+        self,
+        prompt: str,
+        *,
+        conversation_id: str,
+        workspace_id: str,
+        history: Sequence[Mapping[str, Any]],
+        context: Mapping[str, Any],
+        session_store: Any = None,
+    ) -> tuple[str, Mapping[str, Any]] | None:
+        method = getattr(self.target, "run_model_tool_turn", None)
+        if not callable(method):
+            return None
+        scoped_context = dict(context)
+        if self.tenant_context is not None:
+            scoped_context.setdefault("tenant_context", self.tenant_context)
+            scoped_context.setdefault(
+                "tenant_id",
+                getattr(self.tenant_context, "tenant_id", None),
+            )
+            scoped_context.setdefault(
+                "workspace_id",
+                getattr(self.tenant_context, "workspace_id", None),
+            )
+        result = method(
+            prompt,
+            conversation_id=conversation_id,
+            workspace_id=workspace_id,
+            history=history,
+            context=scoped_context,
+            session_store=session_store,
+        )
+        if result is None:
+            return None
+        response, metadata = result
+        return str(response), dict(metadata)
 
     def build_skill_input(self, user_input: str, context: Mapping[str, Any]) -> str:
         method = getattr(self.target, "_skill_input_with_history", None)
@@ -621,7 +706,11 @@ class LocalHarnessRuntime(LegacyAgentRuntimeAdapter):
             from artpm_agent.agent import ArtPMAgent
 
             agent = ArtPMAgent(config)
-        super().__init__(agent, router=router)
+        super().__init__(
+            agent,
+            router=router,
+            tenant_context=tenant_context,
+        )
         self.services = services
         self.tenant_context = tenant_context
 

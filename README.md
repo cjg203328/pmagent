@@ -59,6 +59,12 @@ pmagent/
 ├── alembic/            PostgreSQL/业务数据库迁移
 ├── deploy/             Compose、PostgreSQL 和可观测部署资源
 ├── docs/               当前架构、运维、指南和归档文档
+├── doc/                项目级文档扩展目录
+├── prototype/          产品原型与交互规格
+├── project/frontend/   独立前端代码预留目录
+├── project/backend/    独立后端代码预留目录
+├── database/           数据库脚本与运维资产预留目录
+├── utils/              项目级工具预留目录
 ├── data/               运行时数据库、附件和向量索引（不提交）
 └── logs/               运行时日志（不提交）
 ```

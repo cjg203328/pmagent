@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
 from typing import Any, Optional
 
 from artpm_agent.memory.session_store import SessionStore
 from artpm_agent.runtime.agent_loop import AgentLoop, TurnProvider
+from artpm_agent.runtime.counters import increment_counter
 from artpm_agent.runtime.events import AgentEvent, AgentMessage
+
+
+logger = logging.getLogger(__name__)
 
 
 class ModelToolCallsDisabledError(RuntimeError):
@@ -63,28 +68,30 @@ class AgentSession:
         if not isinstance(conversation_id, str) or not conversation_id.strip():
             raise ValueError("conversation_id must be a non-empty string")
 
+        loop_context = dict(context or {})
+        if isinstance(workspace_id, str) and workspace_id.strip():
+            loop_context["workspace_id"] = workspace_id.strip()
         events = self.loop.run(
             prompt,
             self.provider,
             history=history,
-            context=context,
+            context=loop_context,
             run_id=run_id,
             turn_id=turn_id,
         )
-        event_bus = context.get("event_bus") if isinstance(context, Mapping) else None
+        event_bus = loop_context.get("event_bus")
 
         def persisted_events() -> Iterator[AgentEvent]:
             try:
                 for event in events:
                     scope_metadata = {
-                        key: str(context[key]).strip()
+                        key: str(loop_context[key]).strip()
                         for key in (
                             "tenant_id",
                             "workspace_id",
                             "actor_id",
                         )
-                        if isinstance(context, Mapping)
-                        and str(context.get(key) or "").strip()
+                        if str(loop_context.get(key) or "").strip()
                     }
                     if scope_metadata:
                         event = replace(
@@ -100,7 +107,27 @@ class AgentSession:
                         try:
                             event_bus.publish(event)
                         except Exception:
-                            pass
+                            increment_counter(
+                                "harness.agent_session.event_bus_publish_failures"
+                            )
+                            event_type = getattr(event.type, "value", event.type)
+                            # Alembic's ``fileConfig`` can disable loggers that
+                            # were imported before a readiness migration. The
+                            # durable session must remain observable after that
+                            # reconfiguration, so re-enable this logger at the
+                            # narrow failure boundary before emitting the warning.
+                            if logger.disabled:
+                                logger.disabled = False
+                            logger.warning(
+                                "agent session event bus publish failed",
+                                extra={
+                                    "conversation_id": conversation_id.strip(),
+                                    "event_type": str(event_type),
+                                    "run_id": event.run_id,
+                                    "turn_id": event.turn_id,
+                                },
+                                exc_info=True,
+                            )
                     yield event
             finally:
                 close = getattr(events, "close", None)

@@ -10,13 +10,14 @@ from __future__ import annotations
 import logging
 import json
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 from artpm_agent.security.access_mode import access_decision
 from artpm_agent.routing.service import IntentDecision, execution_gate_for_decision
 from .invocation_counts import increment_turn_invocation
 
 if TYPE_CHECKING:
+    from artpm_agent.security.permission_store import PermissionRequest
     from .turn_service import TurnContext, TurnResult
 
 logger = logging.getLogger(__name__)
@@ -157,7 +158,12 @@ def _bind_tenant_inputs(
     return tenant_context.bind_inputs(inputs), tenant_context
 
 
-def _permission_request(ctx: "TurnContext", intent: str, inputs: Mapping[str, Any], metadata: Mapping[str, Any]):
+def _permission_request(
+    ctx: "TurnContext",
+    intent: str,
+    inputs: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> "PermissionRequest | None":
     """Create one idempotent, server-owned request for a sensitive Skill."""
     service_bundle = getattr(ctx, "services", None)
     store = (
@@ -187,7 +193,7 @@ def _permission_request(ctx: "TurnContext", intent: str, inputs: Mapping[str, An
         "conversation_id": ctx.conversation_id,
         "target": safe_inputs,
     }
-    return store.create_request(
+    request = store.create_request(
         workspace_id=str(workspace_id),
         tenant_id=str(tenant_id),
         conversation_id=ctx.conversation_id or "unknown-conversation",
@@ -203,6 +209,7 @@ def _permission_request(ctx: "TurnContext", intent: str, inputs: Mapping[str, An
             f"skill:{ctx.conversation_id}:{ctx.turn_id}:{intent}"
         ),
     )
+    return cast("PermissionRequest | None", request)
 
 
 def try_skill_routing(
@@ -250,6 +257,7 @@ def try_skill_routing(
 
     # Try intent detection (three-tier: keyword -> embedding -> LLM) once per
     # turn. The cached value is also available to telemetry and UI adapters.
+    decision: IntentDecision
     if ctx.intent_checked:
         intent = ctx.intent
         decision = ctx.intent_decision or IntentDecision(intent=intent, confidence=1.0)
@@ -257,8 +265,10 @@ def try_skill_routing(
         try:
             increment_turn_invocation(ctx, "intent")
             detector = getattr(runtime, "detect_intent_decision", None)
-            decision = detector(ctx.user_input) if callable(detector) else None
-            if not isinstance(decision, IntentDecision):
+            detected_decision: Any = (
+                detector(ctx.user_input) if callable(detector) else None
+            )
+            if not isinstance(detected_decision, IntentDecision):
                 intent = runtime.detect_intent(ctx.user_input)
                 decision = IntentDecision(
                     intent=intent,
@@ -267,6 +277,7 @@ def try_skill_routing(
                     candidates=(intent,) if intent else (),
                 )
             else:
+                decision = detected_decision
                 intent = decision.intent
         except Exception as error:
             logger.warning(f"Intent detection failed: {error}")

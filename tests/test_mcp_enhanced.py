@@ -34,6 +34,40 @@ async def test_sensitive_files_are_never_exposed_and_output_is_bounded(tmp_path)
     assert ".env" not in listed["files"]
 
 
+async def test_search_files_ignores_generated_and_dependency_trees(tmp_path):
+    (tmp_path / "README.md").write_text("project", encoding="utf-8")
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("guide", encoding="utf-8")
+    for directory in (
+        ".ai-memory",
+        ".cache",
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "venv",
+    ):
+        nested = tmp_path / directory / "generated"
+        nested.mkdir(parents=True)
+        (nested / "noise.md").write_text("generated", encoding="utf-8")
+
+    client = EnhancedMCPClient(str(tmp_path))
+
+    result = await client.call_tool("search_files", {"pattern": "*.md"})
+
+    assert result["success"] is True
+    assert result["files"] == ["README.md", str(Path("docs") / "guide.md")]
+    assert result["count"] == 2
+
+    limited = await client.call_tool("search_files", {"pattern": "*.md", "limit": 1})
+
+    assert limited["files"] == ["README.md"]
+    assert limited["count"] == 1
+
+
 async def test_blocking_local_tools_are_offloaded_from_event_loop(
     tmp_path,
     monkeypatch,

@@ -40,12 +40,23 @@ class ComponentFactory:
     """Build all dependencies once and return them as a registry."""
 
     @staticmethod
-    def create(config: Any = None, *, orchestrator_class: type | None = None) -> ComponentRegistry:
+    def create(
+        config: Any = None,
+        *,
+        orchestrator_class: type | None = None,
+        business_store: Any = None,
+    ) -> ComponentRegistry:
         if orchestrator_class is None:
             from artpm_agent.request_orchestrator import RequestOrchestrator
 
             orchestrator_class = RequestOrchestrator
-        orchestrator = orchestrator_class(config)
+        if business_store is None:
+            orchestrator = orchestrator_class(config)
+        else:
+            orchestrator = orchestrator_class(
+                config,
+                business_store=business_store,
+            )
         return ComponentRegistry(dict(orchestrator.__dict__))
 
 

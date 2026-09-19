@@ -8,6 +8,15 @@ Risk governance and planned decomposition are tracked in
 [`OPTIMIZATION_STRATEGY.md`](./OPTIMIZATION_STRATEGY.md). It is a current
 engineering strategy; archived reports are not implementation contracts.
 
+## Scope and Construction
+
+Every request carries a server-authenticated `(tenant_id, workspace_id)` and
+an explicit `profile_id`. `RuntimeFactory` constructs workflow coordinators,
+artifact generators and artifact coordinators from that triple. These scoped
+runtimes use bounded LRU/TTL caches and are never taken from raw Streamlit
+session state. A profile supplied by a model or client cannot override the
+trusted host scope.
+
 ## Runtime
 
 `run_turn()` is the canonical turn boundary for Streamlit, REST and CLI.
@@ -34,6 +43,23 @@ factory. Coordinator cache keys include tenant, workspace and profile. API
 chat locking is workspace-scoped, so unrelated workspaces are not serialized.
 Health diagnostics expose RSS, uptime, timed imports and first model-call
 latency; each turn reports intent/parse/retrieval invocation counts.
+
+Tool execution is bounded at both loop and worker layers: maximum turns and
+calls, worker concurrency, per-call timeout, cancellation, schema validation,
+last-turn side-effect rejection and result-size limits are enforced before a
+tool result is returned. Oversized results spill only below the same tenant and
+workspace scope, with TTL cleanup and explicit deletion. EventBus publication
+is best-effort after durable SessionStore persistence; failures increment a
+counter and emit a structured warning without losing the session record.
+
+The API has a pure `serializers.py` boundary for JSON normalization, public
+stream event payloads and SSE framing, plus dedicated `routers/system.py`,
+`routers/capabilities.py`, `routers/permissions.py` and `routers/workflows.py`
+modules. Workspace/search, chat, voice and embed routes remain in `api/app.py`
+as the next extraction wave; the route contract is covered while the
+compatibility facade remains stable. `api/contracts.py` and
+`runtime/service_ports.py` define the typed cross-module ports used by the
+gateway and turn bundle.
 
 ## Workspace
 
@@ -77,6 +103,19 @@ The skill catalog remains separate from deployment readiness. Deployment
 capabilities report `enabled`, `configured`, `ready` and `reason`; the UI must
 not present an optional capability as usable until `ready` is true.
 
+`GET /ready` probes every configured authoritative Store (business,
+conversation, session and knowledge) through
+`StorageRegistry`. It does not initialize an LLM, OCR backend or vector
+provider. A failed authority returns HTTP 503 with per-store status so an
+operator can distinguish a dependency outage from an optional capability
+being disabled.
+
+The repository architecture graph is generated on demand with
+`python scripts/build_graph.py`. It performs a freshness check, writes only
+to `.ai-memory/knowledge-graph/`, bounds queried subgraphs to 80 nodes and
+reports cycles. Graph output accelerates investigation; independent `rg`
+evidence and executable tests remain the final authority.
+
 ## Embed Boundary
 
 Embed is optional and disabled by default. When enabled, the current minimal
@@ -96,6 +135,6 @@ JavaScript.
 
 ## Source Of Truth
 
-This file, `EXECUTION_MAP.md`, `PROJECT_STRUCTURE.md` and
-`STORAGE_CONTRACT.md` and `P2_MODULE_BOUNDARIES.md` define the current architecture. Documents under
+This file, `EXECUTION_MAP.md`, `PROJECT_STRUCTURE.md`, `STORAGE_CONTRACT.md`
+and `P2_MODULE_BOUNDARIES.md` define the current architecture. Documents under
 `docs/archive/` are historical references only and are not contracts.
