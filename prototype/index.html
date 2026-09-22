@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ArtPM 工作台 · 三栏原型</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip-link" href="#process">跳转到过程栏</a>
+
+<header class="appbar">
+  <div class="appbar__brand">
+    <span class="appbar__mark" aria-hidden="true">A</span>
+    <span class="appbar__name">ArtPM 工作台</span>
+    <span class="appbar__tag">原型 · M2 三栏骨架</span>
+  </div>
+
+  <div class="appbar__spacer"></div>
+
+  <button class="appbar__icon" id="rail-toggle" type="button"
+          aria-expanded="true" aria-controls="taskrail"
+          title="折叠任务栏">
+    <span aria-hidden="true">⇤</span>
+    <span class="sr-only">折叠或展开任务栏</span>
+  </button>
+  <button class="appbar__icon" id="theme-toggle" type="button" title="切换深色模式">
+    <span aria-hidden="true">◐</span>
+    <span class="sr-only">切换深色模式</span>
+  </button>
+  <button class="appbar__icon appbar__icon--dot" type="button" id="notify-toggle"
+          title="通知">
+    <span aria-hidden="true">🔔</span>
+    <span class="badge-dot" id="notify-dot" hidden>1</span>
+    <span class="sr-only">通知</span>
+  </button>
+</header>
+
+<main class="workbench" id="workbench">
+
+  <!-- ① 任务栏 -->
+  <aside class="rail" id="taskrail" aria-label="任务栏">
+    <div class="rail__head">
+      <div class="project-select">
+        <label class="sr-only" for="project-btn">选择项目</label>
+        <button class="project-select__btn" id="project-btn" type="button"
+                aria-haspopup="listbox" aria-expanded="false">
+          <span class="project-select__label" id="project-label">全部项目</span>
+          <span class="project-select__caret" aria-hidden="true">▾</span>
+        </button>
+        <ul class="project-select__menu" id="project-menu" role="listbox"
+            aria-label="项目列表" hidden></ul>
+      </div>
+
+      <button class="btn btn--primary btn--block" id="new-job-btn" type="button">
+        <span aria-hidden="true">＋</span> 新建任务
+      </button>
+    </div>
+
+    <nav class="rail__scroll" id="rail-scroll" aria-label="任务分组">
+      <!-- 由 JS 渲染 -->
+    </nav>
+
+    <div class="rail__foot">
+      <span class="rail__stat" id="rail-stat">—</span>
+    </div>
+  </aside>
+
+  <div class="rail-scrim" id="rail-scrim" hidden></div>
+
+  <!-- ② 过程栏 -->
+  <section class="process" id="process" aria-label="过程栏">
+    <header class="process__head">
+      <div class="process__title">
+        <h1 id="proc-title">未选择任务</h1>
+        <div class="process__meta" id="proc-meta"></div>
+      </div>
+      <div class="process__actions">
+        <button class="btn btn--ghost" id="btn-retry" type="button" hidden>
+          从失败处重试
+        </button>
+        <button class="btn btn--ghost" id="btn-save-job" type="button" hidden>
+          另存为任务
+        </button>
+      </div>
+    </header>
+
+    <div class="process__scroll" id="proc-scroll">
+      <div class="empty" id="proc-empty">
+        <div class="empty__art" aria-hidden="true">◍</div>
+        <h2 class="empty__title">还没有选择任务</h2>
+        <p class="empty__text">从左侧选一个任务查看执行过程，或新建一个任务。</p>
+      </div>
+
+      <ol class="steps" id="step-list" aria-label="执行步骤"></ol>
+
+      <div class="clarify-wrap" id="clarify-wrap" hidden></div>
+      <div class="approval-wrap" id="approval-wrap" hidden></div>
+    </div>
+
+    <footer class="composer">
+      <button class="composer__attach" id="composer-attach" type="button" title="添加附件">
+        <span aria-hidden="true">📎</span>
+        <span class="sr-only">添加附件</span>
+      </button>
+      <label class="sr-only" for="composer-input">输入业务请求</label>
+      <textarea class="composer__input" id="composer-input" rows="1"
+                placeholder="描述你要做的事，例如：导出 11 月人天汇总版"></textarea>
+      <button class="btn btn--primary composer__send" id="composer-send" type="button">
+        发送 <span aria-hidden="true">↑</span>
+      </button>
+    </footer>
+  </section>
+
+  <!-- ③ 成果栏 -->
+  <aside class="artifacts" id="artifact-rail" aria-label="成果栏">
+    <div class="artifacts__head">
+      <h2>成果</h2>
+      <span class="artifacts__count" id="artifact-count">0</span>
+    </div>
+
+    <div class="artifacts__scroll" id="artifact-scroll">
+      <div class="empty empty--slim" id="artifact-empty">
+        <div class="empty__art" aria-hidden="true">▢</div>
+        <h3 class="empty__title">本任务尚未产出文件</h3>
+        <p class="empty__text" id="artifact-empty-text">
+          任务跑完会自动生成交付物，通过核验后才可下载。
+        </p>
+      </div>
+
+      <div id="artifact-list"></div>
+
+      <section class="panel" id="version-panel" hidden>
+        <h3 class="panel__title">版本历史</h3>
+        <ul class="versions" id="version-list"></ul>
+      </section>
+
+      <section class="panel" id="edit-panel" hidden>
+        <h3 class="panel__title">定点改</h3>
+        <p class="panel__hint" id="edit-selection">在上方预览中选中区域或单元格</p>
+        <label class="sr-only" for="edit-opinion">修改意见</label>
+        <textarea class="edit-opinion" id="edit-opinion" rows="2"
+                  placeholder="例如：把这列改成万元"></textarea>
+        <button class="btn btn--primary btn--block" id="edit-run" type="button" disabled>
+          只重跑对应步骤
+        </button>
+        <p class="panel__foot">
+          附件解析计数：<b id="parse-count">0</b>（定点改不重新解析附件）
+        </p>
+      </section>
+    </div>
+  </aside>
+  <nav class="mobile-tabs" aria-label="移动端视图切换">
+    <button class="btn btn--ghost" type="button" data-mobile-target="rail">任务</button>
+    <button class="btn btn--ghost" type="button" data-mobile-target="artifact">成果</button>
+  </nav>
+</main>
+
+<!-- 新建任务弹窗 -->
+<div class="modal" id="new-job-modal" hidden>
+  <div class="modal__scrim" data-close="1"></div>
+  <div class="modal__panel" role="dialog" aria-modal="true" aria-labelledby="new-job-title">
+    <header class="modal__head">
+      <h2 id="new-job-title">新建任务</h2>
+      <button class="modal__close" type="button" data-close="1" title="关闭">✕</button>
+    </header>
+
+    <div class="modal__body">
+      <fieldset class="field">
+        <legend class="field__label">任务类型</legend>
+        <div class="chips" id="type-chips" role="radiogroup" aria-label="任务类型"></div>
+      </fieldset>
+
+      <div class="field">
+        <label class="field__label" for="job-name">任务名称</label>
+        <input class="input" id="job-name" type="text" placeholder="例如：11 月人天汇总">
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="job-project">所属项目</label>
+        <select class="input" id="job-project"></select>
+      </div>
+
+      <div class="field">
+        <span class="field__label">参数</span>
+        <div class="params" id="job-params"></div>
+      </div>
+
+      <div class="field">
+        <span class="field__label">附件</span>
+        <div class="drop" id="drop-zone" tabindex="0">
+          <span class="drop__icon" aria-hidden="true">⇪</span>
+          <span class="drop__text">拖入文件，或按回车选择</span>
+          <input type="file" id="file-input" multiple hidden>
+        </div>
+        <ul class="filelist" id="file-list"></ul>
+      </div>
+
+      <div class="field">
+        <label class="switch">
+          <input type="checkbox" id="job-scheduled">
+          <span class="switch__track" aria-hidden="true"></span>
+          <span class="switch__text">设为计划任务（每天 06:00）</span>
+        </label>
+      </div>
+    </div>
+
+    <footer class="modal__foot">
+      <button class="btn btn--ghost" type="button" data-close="1">取消</button>
+      <button class="btn btn--primary" id="job-create" type="button">创建任务</button>
+    </footer>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

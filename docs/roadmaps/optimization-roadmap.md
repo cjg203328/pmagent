@@ -3,6 +3,12 @@
 > not a current architecture, dependency, deployment, or configuration
 > contract. Use `docs/architecture/CURRENT.md` and `docs/INDEX.md` for the
 > current system.
+>
+> 2026-09-19 补充：本清单是**平台扩张向**的工程优化项，与
+> `docs/product/PRD.md` 的收缩定位不再一致。其中涉及缓存、限流、故障转移、
+> 可观测等横向能力的条目，多数服务于 PRD §5 已列入删除或冻结的能力，
+> **不要再按本文件排期**。当前一周动作见 `docs/roadmaps/NEXT_STEPS.md`。
+> 保留本文件仅因 `scripts/verify_optimization.py` 检查其存在性。
 
 
 **基于深度分析报告的缺点改进方案**  

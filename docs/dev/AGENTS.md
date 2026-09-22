@@ -14,17 +14,21 @@
    ```
 
 2. 阅读与任务直接相关的代码、测试和文档。跨模块任务至少核对：
-   `README.md`、`docs/operations/CURRENT_STATUS.md`、
-   `docs/operations/QUALITY_GATES.md`、`docs/operations/DEPENDENCY_PROFILES.md`，
-   以及 `.ai-memory/handoff.md`（存在时）。
+   `docs/product/PRD.md`（定位与范围权威）、`README.md`、
+   `docs/operations/CURRENT_STATUS.md`、`docs/operations/QUALITY_GATES.md`、
+   `docs/operations/DEPENDENCY_PROFILES.md`，以及 `.ai-memory/handoff.md`（存在时）。
 3. 明确变更边界、兼容性要求、外部依赖和验证命令；不因发现无关问题而扩大范围。
-4. 软件开发任务开始时，按仓库策略调用 Skills Forge 的 skill discovery：传入原始需求、
-   相关文件路径，并只加载实际需要的技能。当前环境没有该 MCP 服务时，使用仓库现有约定
-   和本地 `dev-expert` skill 继续工作，并在交付说明中注明降级。
+4. 任务开始时优先复用仓库现有约定和本地 skill。不要假设存在远程 MCP 技能发现服务：
+   Skills Forge 等远程 MCP 集成已在 `docs/product/PRD.md` §5 中列入删除清单，
+   不得作为开发流程的前置依赖。
 
 ## 2. 项目事实与架构边界
 
-- ArtPM Agent 面向游戏美术外包项目管理，业务技能和本地文件能力以离线可用为默认。
+- ArtPM Agent 定位为**企业级业务助手 · 美术项目经理**，界面形态是三栏工作台
+  （左任务 / 中过程 / 右成果），不是聊天窗口。范围与优先级以
+  `docs/product/PRD.md` 为准；业务技能和本地文件能力以离线可用为默认。
+- 当前阶段的主轴是**接上，而不是加满**：优先把已有管道接到真实业务闭环上，
+  不新增横向平台能力。新增通用能力前必须先确认它服务于 PRD §3 的 S0–S3 场景。
 - Streamlit 是主 UI，FastAPI 是 REST 网关，CLI 入口为 `python main.py` 或 `artpm-agent`。
 - `HarnessRuntime` 与 `run_turn()` 是 API/UI 请求处理的规范边界；`ArtPMAgent` 仍是兼容 facade，
   不要在新功能中继续扩大对旧 facade 私有实现的依赖。
@@ -41,8 +45,11 @@
 
 - 优先修复根因，沿用现有模块、依赖注入、错误码、日志和回退模式；不为一次性需求新增
   平行抽象或重复配置。
-- 保持公共 API、CLI、环境变量、持久化格式和插件契约兼容。需要破坏兼容时，先补迁移、
-  兼容适配和文档，并明确回滚方式。
+- 保持公共 API、CLI、环境变量和持久化格式兼容。需要破坏兼容时，先补迁移、
+  兼容适配和文档，并明确回滚方式。**例外**：`docs/product/PRD.md` §5「明确不做」
+  清单中的能力（语音、embed、插件系统、远程 MCP、Qdrant 远程向量、Redis）属于
+  计划内删除项，删除时不需要向后兼容垫片，但需要 `docs/operations/收缩迁移手册.md`
+  的有序回滚步骤。
 - 数据库 schema 变更必须有 Alembic migration、升级路径和回归测试；禁止通过启动时删表、
   重建表或隐式清空数据解决 schema 不匹配。
 - 外部服务调用必须可配置、可限时、可观测且可降级。单元测试不得依赖网络、真实模型、

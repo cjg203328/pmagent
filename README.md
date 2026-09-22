@@ -1,24 +1,43 @@
 # ArtPM Agent
 
-面向游戏美术外包项目管理的 AI 助手，采用离线优先设计。它覆盖报价测算、任务分配、
-进度预警、提醒投递、文档解析和本地文件分析；配置 LLM 后可启用通用对话、语义理解和
-模型工具调用。
+**企业级业务助手 · 美术项目经理**，离线优先。它接住游戏美术外包的报价测算、
+需求评估、排期派单、进度预警、质量控制、交付与复盘，以「任务」为单位交付可核验的
+文件成果（DOCX / XLSX / PPTX / PDF），而不是以「对话」为单位生成文本。
 
-核心业务技能和本地文件能力不依赖 API Key。项目提供三种主要入口：
+产品范围、场景优先级与收缩清单以
+[`docs/product/PRD.md`](docs/product/PRD.md) 为准；本文件的「应用场景」与
+「核心能力」是摘要，不定义边界。
 
-- **Streamlit UI**：主界面，提供对话、设置、可观测和工作流功能。
-- **FastAPI REST 网关**：供外部系统集成，默认监听 `127.0.0.1:8765`。
+核心业务能力和本地文件能力不依赖 API Key。项目提供三种入口：
+
+- **Streamlit 三栏工作台**：左任务 / 中过程 / 右成果（当前实现为两栏，三栏改造见
+  PRD §7 与里程碑 M2）。
+- **FastAPI REST 网关**：供内部系统集成，默认监听 `127.0.0.1:8765`。
 - **CLI**：使用 `python main.py` 或安装后的 `artpm-agent` 命令。
 
 ## 应用场景
 
-ArtPM Agent 面向游戏美术外包团队、制作人和项目管理者，适合把报价、资源资料、任务
-执行和交付复盘放在同一个工作区中管理。典型工作流包括：
+面向游戏美术外包团队的项目制作人与项目经理。**优先级：办公流任务 > 知识库问答**
+——agent 的第一职责是把事做完并交付文件，知识库是支撑层。五个核心场景
+（编号与 PRD §3 一致）：
 
-- 读取报价单、合同、需求文档和本地素材，生成结构化成本、风险和交付建议。
-- 按工作区检索项目规则、历史资料和复盘经验，再进入对话、任务分配或工作流审批。
-- 通过 Streamlit 处理人工操作，通过 REST/SSE 接入内部系统，通过嵌入端点接入受信任网站。
-- 在没有 LLM、Redis、Qdrant 或外部 MCP 时保持离线可用；启用外部服务后只增加增强能力。
+| 场景 | 做什么 | 交付物 |
+| --- | --- | --- |
+| **S0 表格清洗** | 上传人天/产能表，理解结构、按维度裁剪、汇总 | 保留表头格式的 `.xlsx` |
+| **S1 报价测算** | 甲方需求表 → 按资产类型拆工时 → 分层费率 + 管理费 + 税 + 改稿预算 | 可发送的《报价单.docx》，内嵌计算依据 |
+| **S2 排期与催办** | 生成任务图 → 按日费率与在手工时派单 → 每日定时巡检 → 催办投递 | 派单方案、催办清单、企业微信通知 |
+| **S3 验收复盘** | 按 `revision_count` 与实际工时对比估算 → 沉淀为知识规则 | 《复盘报告.docx》+ 下次报价自动引用 |
+| **S4 办公流**（优先族） | 周报、会议纪要、台账更新、待办分派、通知拟稿 | `.docx` / `.xlsx` + 企业微信摘要 |
+
+> **现状说明**：S4 办公流目前是**新建工作，不是接线**——办公流原语在代码中接近 0，
+> 仅 `views/chat_welcome.py:38` 有一个无实现的「生成周报」按钮；而知识/记忆栈已有
+> 14,219 行。冲突与工作量修正见 PRD §1.5，落地机制见 §4.5，排期见 M3.5。
+
+S3 → S1 的回写回路是产品核心价值。工作区同时承载报价单、合同、需求文档与本地素材，
+检索范围严格限定在当前 `(tenant, workspace)` 内。
+
+无 LLM、无外部向量库、无远程服务时，上述业务技能与文件能力保持离线可用；
+启用外部服务只增加语义理解与通用问答。
 
 ## 技术栈与职责
 
@@ -96,43 +115,46 @@ Redis 只是缓存加速层。所有 API、缓存和向量查询都必须带可�
 
 ## 核心能力
 
-### 离线可用
+下表状态列是 2026-09-19 的实测结论，不是路线图。「已验证」表示有端到端使用证据，
+「已实现未验证」表示管道通了但没有真实使用记录。收缩计划见 PRD §5。
 
-| 能力 | 说明 |
-| --- | --- |
-| 报价与成本 | 报价、成本、利润、管理费、税费和风险测算 |
-| 项目执行 | 任务分配、负载分析、进度追踪和截止日期预警 |
-| 交付流程 | 报价排期、需求评估、质量控制、交付和复盘 |
-| 文档处理 | 文档分类、结构化抽取、Excel/PDF/TXT/CSV/JSON 读取 |
-| 文件交付 | 对话生成并核验 DOCX、XLSX、PPTX、PDF，验证通过后提供下载 |
-| 本地分析 | 文件搜索、数据分析、趋势分析和项目健康度评估 |
-| 通知投递 | 生成提醒，可选企业微信 Webhook 投递 |
+### 业务技能（离线可用，不依赖 API Key）
+
+| 能力 | 说明 | 状态 |
+| --- | --- | --- |
+| 报价与成本 | 报价、成本、利润、管理费、税费和风险测算 | 已实现未验证：费率存在 4 处重复定义，公式缺改稿/账期/汇率（PRD R 系列） |
+| 项目执行 | 任务分配、负载分析、进度追踪、截止日期预警 | 已实现未验证：`tasks`/`task_assignments` 表 0 行 |
+| 交付流程 | 报价排期、需求评估、质量控制、交付、复盘 5 段技能 | 已实现未验证：5 段技能未被任何工作流串联，用户自建流程 0 条 |
+| 文档处理 | Excel/PDF/TXT/CSV/JSON 读取与结构化抽取 | 部分缺陷：Excel 附件被硬编码分类为「报价单」（PRD R-3） |
+| 文件交付 | 生成并核验 DOCX、XLSX、PPTX、PDF，通过后提供下载 | 已验证（简单请求）；复杂业务请求尚未接通（PRD R-4） |
+| 本地分析 | 文件搜索、数据分析、趋势分析、项目健康度 | 已验证 |
+| 通知投递 | 生成提醒，企业微信 Webhook 投递 | 已实现未验证：`reminders` 表 0 行 |
 
 ### 配置 LLM 后增强
 
 - 通用自然语言对话和语义理解。
-- 多 Provider 故障转移、请求限时和响应缓存。
+- Provider 故障转移（收缩后保留 1 主 1 备）、请求限时和响应缓存。
 - DeepSeek `deepseek-chat` / `deepseek-reasoner`，支持独立捕获 `reasoning_content` 和
   `DEEPSEEK_REASONING_EFFORT`。
 - 视觉模型搭配：主模型不支持图片时，将图片请求路由到独立视觉模型。
 - 模型工具调用：参数先通过 JSON Schema 校验，写入型工具仍需宿主审批。
 
-### 对话生成文件
+### 任务生成文件
 
-安装 `documents` profile 后，可以直接在聊天中提出文件交付要求，例如：
+安装 `documents` profile 后，可以在任务中提出文件交付要求，例如：
 
 ```text
-帮我做一个 Word 文档，里面就写一句话“你好”，文档名称随意
 生成一份 Excel 项目清单，列为任务、负责人、状态
-创建一份 PowerPoint 项目汇报，标题为“本周进展”，内容为“按计划交付”
-制作一个 PDF 简报，内容为“验收已经完成”
+制作一份 PDF 报价简报，内容为“验收已经完成”
+把这张人天表裁剪成仅含 11 月的汇总版
 ```
 
 明确内容的简单请求走本地确定性计划；复杂排版和多页内容先由模型生成严格 JSON 计划。
 显式文件请求一旦命中就不会回落到普通聊天。系统会重新打开生成物，核对页数、幻灯片、
 工作表或段落以及请求文本，并校验发布副本的大小和 SHA-256；只有 `verification.status=passed`
 的文件才会进入下载卡片。当前架构契约见
-[`docs/architecture/ARTIFACT_GENERATION.md`](docs/architecture/ARTIFACT_GENERATION.md)。
+[`docs/architecture/ARTIFACT_GENERATION.md`](docs/architecture/ARTIFACT_GENERATION.md)，
+模板与字段规格见 [`docs/product/交付物模板库.md`](docs/product/交付物模板库.md)。
 
 ## 快速开始
 
@@ -310,30 +332,34 @@ ARTPM_EMBED_ALLOWED_ORIGINS=https://app.example.com
 
 ### MinerU 多模态文档解析
 
-支持 PDF、图片、DOCX、PPTX、XLSX 转 Markdown 和结构化 JSON。按部署方式选择：
+支持 PDF、图片、DOCX、PPTX、XLSX 转 Markdown 和结构化 JSON。
 
 ```bash
-# 本地 pipeline，包含模型运行时
-python -m pip install -e ".[mineru]"
-
-# 远程 mineru-api 客户端，不下载本地 VLM/OCR 权重
+# 推荐：远程 mineru-api 客户端，不下载本地 VLM/OCR 权重
 python -m pip install -e ".[mineru-client]"
 ```
+
+本地 pipeline（`.[mineru]`，`utils/mineru_adapter.py` 1,368 行）已列入 PRD §5 收缩
+清单，只保留远程 API 客户端；在删除完成前不要依赖本地模式。
 
 MinerU 是增强后端；未部署、转换失败或超时都会回退到内置解析器。配置细节见
 [`docs/integrations/MINERU_INTEGRATION.md`](docs/integrations/MINERU_INTEGRATION.md)。
 
-### OCR、语音、MCP 与 Redis
+### OCR 与其他可选能力
 
-| 能力 | 启用方式 | 说明 |
+| 能力 | 启用方式 | 状态 |
 | --- | --- | --- |
-| OCR | `python -m pip install -e ".[ocr]"` | 适用于报价单和扫描件，重依赖，按需安装 |
-| 实时语音 | `python -m pip install -e ".[voice]"` | 配置 LiveKit 与 STT/TTS 后运行 `artpm-voice-worker start`，文本通道不依赖它 |
-| Skills Forge MCP | 安装 `.[mcp]`，设置 `MCP_ENABLED=true` + 有效 Key | 默认只读发现工具，命令执行仍需显式 `MCP_ALLOW_COMMANDS=true` |
-| Redis | 设置 `REDIS_URL` | 可选缓存加速层，不是 SQLite 权威源的替代品 |
+| OCR | `python -m pip install -e ".[ocr]"` | **保留**——报价单与扫描件是 S1 入口，重依赖按需安装 |
+| 实时语音（LiveKit） | — | **列入删除**（PRD §5，1,424 行） |
+| 远程 MCP（Skills Forge） | — | **列入删除**（PRD §5，约 2,400 行），业务工具本地化 |
+| Redis 缓存 | — | **不启用则删除适配层**（PRD §5） |
+| Qdrant 远程向量 | — | **删除**，保留本地 FAISS |
+| 插件系统 | — | **删除**（PRD §5，1,274 行） |
+| Embed 网页嵌入 | — | **冻结**，不修不测 |
 
-MCP 默认关闭。普通业务和本地文件工具不依赖远程 MCP；真实 MCP 验证必须显式设置集成开关。
-语音转录仍进入既有会话、记忆、检索和审批链路，不绕过文本通道的安全边界。
+MCP、语音、插件在删除完成前仍可通过配置关闭，但**不要在新功能中依赖它们**，也不要
+为它们补充文档或测试。完整清单与理由见
+[`docs/product/PRD.md`](docs/product/PRD.md) §5「明确不做」。
 
 ## 架构边界
 
@@ -391,6 +417,14 @@ powershell -ExecutionPolicy Bypass -File scripts/test_benchmark.ps1
 # 现代化边界核心覆盖率，门槛为 90%
 powershell -ExecutionPolicy Bypass -File scripts/coverage_core.ps1
 
+# 报价正确性：结构性 golden 断言（ST-1..ST-7），M1 起阻塞
+python scripts/quote_golden_check.py
+
+# 报价正确性：真值断言（V-1..V-3），需要 tests/golden/cases/ 的真实报价单
+# cases/ 为空时退出码 3 = 未验证。CI 会因此变红，这是有意的：
+# 在拿到业务真值前，「报价功能已验证」的结论不成立。
+python scripts/quote_golden_check.py --values
+
 # 静态与语法检查
 ruff check artpm_agent tests
 python -m compileall -q artpm_agent
@@ -408,6 +442,13 @@ python scripts/coverage_core.py
 
 ## 文档索引
 
+- [`docs/product/PRD.md`](docs/product/PRD.md)：**定位权威**——场景、收缩清单、
+  对象模型、界面规格、指标与里程碑。与本页冲突时以 PRD 为准。
+- [`docs/product/领域数据契约.md`](docs/product/领域数据契约.md)：费率、资产类型、
+  供应商分层与改稿系数的业务数据来源。
+- [`docs/product/交付物模板库.md`](docs/product/交付物模板库.md)：报价单、复盘报告、
+  催办通知的字段与版式规格。
+- [`docs/roadmaps/NEXT_STEPS.md`](docs/roadmaps/NEXT_STEPS.md)：当前一周动作。
 - [`docs/INDEX.md`](docs/INDEX.md)：完整文档索引。
 - [`docs/operations/CURRENT_STATUS.md`](docs/operations/CURRENT_STATUS.md)：当前架构、质量门禁和外部验证状态。
 - [`docs/operations/QUALITY_GATES.md`](docs/operations/QUALITY_GATES.md)：测试分层和质量命令。

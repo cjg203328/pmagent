@@ -3,6 +3,22 @@
 README 是入口文档；本页按读者角色和主题提供深入文档导航。新增文档时，按主题放入
 对应子目录，不要继续把临时报告堆到 `docs/` 根目录。
 
+## 产品与定位
+
+| 文档 | 用途 |
+| --- | --- |
+| [`product/PRD.md`](product/PRD.md) | **定位权威**：企业级业务助手·美术项目经理，收缩范围、场景、对象模型、界面规格、指标和里程碑 |
+| [`product/领域数据契约.md`](product/领域数据契约.md) | 费率、供应商分层、资产类型基线、改稿系数的单一权威与缺失行为（数值待业务方确认） |
+| [`product/交付物模板库.md`](product/交付物模板库.md) | 报价单、人天汇总表、复盘报告、催办通知的字段与版式规格 |
+| [`../prototype/交互规格.md`](../prototype/交互规格.md) | 三栏工作台信息架构、断点、状态机、关键流程与验收清单 |
+| [`../tests/golden/README.md`](../tests/golden/README.md) | 报价正确性评测集：结构断言（可做）与真值断言（阻塞中） |
+| [`../tests/golden/test_structure.py`](../tests/golden/test_structure.py) | ST-1..ST-7 结构性 golden 断言（不需要业务真值） |
+| [`roadmaps/NEXT_STEPS.md`](roadmaps/NEXT_STEPS.md) | 当前一周动作（范围一律以 PRD 为准） |
+
+README 的「应用场景」和「核心能力」章节在 PRD 重写前不作为定位依据。
+`roadmaps/ADVANCED_FEATURES_ROADMAP.md` 与 `roadmaps/optimization-roadmap.md`
+已标记 superseded，不作为排期依据。
+
 ## 快速开始
 
 | 文档 | 用途 |
@@ -36,6 +52,7 @@ README 是入口文档；本页按读者角色和主题提供深入文档导航�
 | 文档 | 用途 |
 | --- | --- |
 | [`operations/DEPLOY.md`](operations/DEPLOY.md) | Compose 快速部署和安全要求 |
+| [`operations/收缩迁移手册.md`](operations/收缩迁移手册.md) | PRD §5 收缩清单的有序迁移与回滚步骤（破坏性变更必读） |
 | [`operations/DEPLOYMENT_GUIDE.md`](operations/DEPLOYMENT_GUIDE.md) | 部署文档入口和当前文档分流 |
 | [`operations/API_GATEWAY.md`](operations/API_GATEWAY.md) | API 网关边界和身份头 |
 | [`operations/API_GATEWAY_DOCUMENTATION.md`](operations/API_GATEWAY_DOCUMENTATION.md) | API 请求、错误码和审批契约 |

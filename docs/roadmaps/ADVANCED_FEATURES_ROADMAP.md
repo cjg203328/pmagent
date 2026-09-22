@@ -1,5 +1,13 @@
 # 多租户、API 网关、插件系统实施总结
 
+> **Status: superseded（2026-09-19）** — 本文件的待实施部分已被
+> [`../product/PRD.md`](../product/PRD.md) §5「明确不做」取代：
+> **GraphQL API、通用 Webhook 平台、插件市场全部取消**；插件系统（1,274 行）
+> 与远程 MCP 列入删除清单。多租户与 API 网关部分已完成，其当前契约见
+> [`../architecture/CURRENT.md`](../architecture/CURRENT.md) 与
+> [`../architecture/MULTI_TENANT_ARCHITECTURE.md`](../architecture/MULTI_TENANT_ARCHITECTURE.md)。
+> 本文件仅作历史追溯使用，**不得作为实现依据**。
+
 **日期**: 2026-07-22  
 **状态**: 设计完成,代码框架就绪
 
