@@ -345,6 +345,38 @@ def _format_retrospective_result(_skill_name: str, result: SkillResult) -> str:
     )
 
 
+def _format_weekly_report(_skill_name: str, result: SkillResult) -> str:
+    sections = result.get("sections") or {}
+    lines = [str(result.get("summary") or "周报已生成。")]
+    for title, key in (
+        ("本周进展", "progress"),
+        ("风险与阻塞", "risks"),
+        ("下周计划", "next_week"),
+    ):
+        rows = sections.get(key) or []
+        lines.append(f"\n**{title}**")
+        if not rows:
+            lines.append("- 无")
+        for row in rows:
+            extra = ""
+            if row.get("overdue_days"):
+                extra = f"，已逾期 {row['overdue_days']} 天"
+            elif row.get("due"):
+                extra = f"，截止 {row['due']}"
+            lines.append(
+                f"- {row['name']}（{row['owner']}）：{row['status']}，"
+                f"进度 {row['progress']}%{extra}"
+                + (f"（{row['note']}）" if row.get("note") else "")
+            )
+    artifacts = result.get("artifacts") or []
+    if artifacts:
+        names = "、".join(str(item.get("name")) for item in artifacts if item.get("name"))
+        lines.append(f"\n交付文件：{names}")
+    else:
+        lines.append("\n注意：本次未产出交付文件（生成器不可用），以上为纯文本周报。")
+    return "\n".join(lines)
+
+
 _FORMATTERS: dict[str, ResultFormatter] = {
     "quote_calculator": _format_quote_result,
     "task_allocator": _format_team_operations,
@@ -358,6 +390,7 @@ _FORMATTERS: dict[str, ResultFormatter] = {
     "project_evaluator": _format_document_and_analysis,
     "requirements_assessment": _format_requirements_result,
     "cost_control": _format_cost_result,
+    "weekly_report": _format_weekly_report,
     "quote_scheduling": _format_schedule_and_progress,
     "progress_management": _format_schedule_and_progress,
     "delivery": _format_delivery_result,

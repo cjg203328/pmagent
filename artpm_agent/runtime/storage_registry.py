@@ -143,6 +143,16 @@ class StorageRegistry:
         return self._get("workflow", build)
 
     @property
+    def jobs(self) -> Any:
+        """Job 编排层（PRD §4）。复用 business 的 DatabaseManager，不另开连接。"""
+
+        def build() -> Any:
+            module = import_module_timed("artpm_agent.jobs.service")
+            return module.JobService(self.business)
+
+        return self._get("jobs", build)
+
+    @property
     def knowledge(self) -> Any:
         def build() -> Any:
             embeddings = import_module_timed("artpm_agent.memory.embeddings")

@@ -265,6 +265,12 @@ COST_CONTROL_INPUT_SCHEMA = _object(
     ),
 )
 
+WEEKLY_REPORT_INPUT_SCHEMA = _object(
+    {
+        "week_start": {"type": "string", "minLength": 1},
+    }
+)
+
 
 _SCHEDULE_ASSET = {
     "type": "object",
@@ -435,6 +441,7 @@ BUILTIN_SKILL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "quality_control": QUALITY_CONTROL_INPUT_SCHEMA,
     "requirements_assessment": REQUIREMENTS_ASSESSMENT_INPUT_SCHEMA,
     "cost_control": COST_CONTROL_INPUT_SCHEMA,
+    "weekly_report": WEEKLY_REPORT_INPUT_SCHEMA,
     "quote_scheduling": QUOTE_SCHEDULING_INPUT_SCHEMA,
     "progress_management": PROGRESS_MANAGEMENT_INPUT_SCHEMA,
     "delivery": DELIVERY_INPUT_SCHEMA,

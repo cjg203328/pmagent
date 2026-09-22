@@ -73,11 +73,12 @@ def test_chat_is_not_misrouted():
 
 
 def test_routing_tables_are_consistent():
-    # 关键词表 / 信号表 / 示例表必须覆盖同一组 17 个技能
+    # 关键词表 / 信号表 / 示例表必须覆盖同一组技能。
+    # 2026-09-20：加入办公流技能 weekly_report 后为 18 个。
     skills = set(ArtPMAgent.INTENT_KEYWORDS)
     assert skills == set(ArtPMAgent.SKILL_ROUTE_SIGNALS)
     assert skills == set(ArtPMAgent.INTENT_EXAMPLES)
-    assert len(skills) == 17
+    assert len(skills) == 18
 
 
 def test_llm_classifier_can_route_every_skill():

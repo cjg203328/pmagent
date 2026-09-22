@@ -28,6 +28,7 @@ INVALID_SKILL_ARGUMENTS = {
     "quality_control": {"action": "delete"},
     "requirements_assessment": {"asset_types": "character"},
     "cost_control": {"threshold": 2},
+    "weekly_report": {"week_start": 20260914},
     "quote_scheduling": {"complexity": "unknown"},
     "progress_management": {"today": 20260714},
     "delivery": {"project_id": 0},

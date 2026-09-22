@@ -32,6 +32,7 @@ from artpm_agent.utils.image_validation import MAX_IMAGE_FILE_SIZE, load_validat
 
 from .base_skill import BaseSkill
 from .cost_control_skill import CostControlSkill
+from .weekly_report_skill import WeeklyReportSkill
 from .delivery_skill import DeliverySkill
 from .input_schemas import BUILTIN_SKILL_INPUT_SCHEMAS
 from .progress_management_skill import ProgressManagementSkill
@@ -535,7 +536,9 @@ class TaskAllocator(BaseSkill):
         if not tasks:
             return {"success": False, "error": "任务列表为空"}
 
-        team_source = self.context.get("database") or self.context.get("memory")
+        # 负载与成员只认一个数据源。`or memory` 会让 MemoryManager 被注入，
+        # 而它没有 get_member_tasks，负载会静默变成 0（PRD §10 R-1）。
+        team_source = self.context.get("database")
         constraints = dict(constraints)
         constraints.setdefault("project_id", inputs.get("project_id"))
         result = SmartTaskAllocator(team_source).allocate(tasks, constraints)
@@ -825,6 +828,7 @@ SKILL_REGISTRY: Dict[str, type] = {
     "quality_control": QualityControlSkill,
     "requirements_assessment": RequirementsAssessmentSkill,
     "cost_control": CostControlSkill,
+    "weekly_report": WeeklyReportSkill,
     "quote_scheduling": QuoteSchedulingSkill,
     "progress_management": ProgressManagementSkill,
     "delivery": DeliverySkill,
@@ -903,6 +907,16 @@ SKILL_METADATA = {
         "risk": "medium",
         "read_only": False,
         "requires_approval": True,
+    },
+    # 办公流：只读业务数据并产出版本化交付物，不修改任何业务表，
+    # 因此与 artifact 管道同级——不需要审批（read_only 指"无受保护变更"）。
+    "weekly_report": {
+        "description": "办公流：按本周真实任务数据生成周报并交付 .docx",
+        "version": "1.0",
+        "requires_llm": False,
+        "risk": "low",
+        "read_only": True,
+        "requires_approval": False,
     },
     "quote_scheduling": {
         "description": "报价排期：人天估算引擎、排期时间线、里程碑计划",

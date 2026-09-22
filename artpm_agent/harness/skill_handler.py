@@ -22,6 +22,42 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# 办公流技能（PRD §4.5）可以在结果里交付文件。键白名单与 artifact_handler
+# 保持一致，避免技能把任意结构塞进 TurnResult.artifacts。
+_ARTIFACT_KEYS = (
+    "id",
+    "name",
+    "stored_path",
+    "format",
+    "mime_type",
+    "size",
+    "sha256",
+    "version",
+    "rows",
+    "columns",
+    "paragraphs",
+    "slides",
+    "pages",
+    "sheet_name",
+    "template_id",
+    "template_name",
+    "preview_markdown",
+    "export_formats",
+    "source_artifact",
+    "verification",
+)
+
+
+def _skill_artifacts(result: Any) -> list[dict[str, Any]]:
+    raw = result.get("artifacts") if isinstance(result, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [
+        {key: item[key] for key in _ARTIFACT_KEYS if key in item}
+        for item in raw
+        if isinstance(item, dict)
+    ]
+
 
 def _json_safe(value: Any, *, depth: int = 0) -> Any:
     """Keep the server-owned permission payload inside the JSON contract.
@@ -581,6 +617,7 @@ def try_skill_routing(
         return TurnResult(
             response=formatted,
             success=True,
+            artifacts=_skill_artifacts(result),
             handled_by=f"skill:{intent}",
             metadata={
                 "turn_id": ctx.turn_id,

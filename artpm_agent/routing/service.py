@@ -137,6 +137,10 @@ class IntentRouter:
             "成本分析", "预算还剩", "工时成本",
             "预算", "超支", "成本够", "花了多少",
         ],
+        "weekly_report": [
+            "周报", "周报告", "本周总结", "本周周报", "weekly report",
+            "周会材料", "这周进展",
+        ],
         "quote_scheduling": [
             "报价排期", "排期", "人天估算", "工期估算", "时间线",
             "里程碑计划", "交付时间", "排期表",
@@ -159,6 +163,10 @@ class IntentRouter:
     # Tools should only run for an explicit business action. Broad words such as
     # "状态", "搜索", or "文档" alone are ordinary language and belong to the LLM.
     SKILL_ROUTE_SIGNALS = {
+        "weekly_report": {
+            "actions": ("生成", "出一份", "做一份", "写一份", "汇总", "总结", "整理"),
+            "entities": ("周报", "周报告", "本周", "这周", "周报文档", "周总结"),
+        },
         "quote_calculator": {
             "actions": ("计算", "算一下", "帮我算", "测算", "核算", "评估", "分析", "赚"),
             "entities": ("报价", "成本", "利润", "利润率", "毛利", "净利", "收益", "盈利", "赚头", "回本", "盈亏"),
@@ -233,6 +241,11 @@ class IntentRouter:
     # Each skill has 15-20 realistic phrasings a PM would use.
     # These are embedded at init and matched via cosine similarity.
     INTENT_EXAMPLES: Dict[str, List[str]] = {
+        "weekly_report": [
+            "生成这周周报", "出一份本周周报", "帮我做一份周报",
+            "写一份周报告", "汇总一下本周进展成周报", "总结这周的工作出周报",
+            "整理本周周报", "weekly report", "给我本周的周报文档",
+        ],
         "quote_calculator": [
             "帮我算一下利润", "报价30万成本20万能赚多少", "这个项目利润率高吗",
             "计算一下成本和利润", "帮我看看这个报价合不合理", "毛利有多少",
@@ -641,6 +654,7 @@ class IntentRouter:
     def detect_via_llm(self, user_input: str) -> Optional[str]:
         """LLM classifier into one of the known skills or None."""
         skill_descriptions = {
+            "weekly_report": "生成周报、本周工作总结、周报告文档",
             "quote_calculator": "利润计算、成本分析、报价评估、盈利测算",
             "task_allocator": "任务分配、人员安排、分工派活",
             "progress_tracker": "进度检查、延期预警、状态查询、项目跟踪",

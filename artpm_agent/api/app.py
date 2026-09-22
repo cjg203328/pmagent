@@ -44,6 +44,7 @@ from .errors import GatewayError
 from .routers import (
     create_capabilities_router,
     create_chat_router,
+    create_jobs_router,
     create_permissions_router,
     create_search_router,
     create_system_router,
@@ -433,6 +434,14 @@ def create_app(
     )
     app.include_router(
         create_capabilities_router(
+            services=services,
+            principal_for_request=_principal,
+            require_workspace=_require_workspace,
+            normalize_json=_json_safe,
+        )
+    )
+    app.include_router(
+        create_jobs_router(
             services=services,
             principal_for_request=_principal,
             require_workspace=_require_workspace,
