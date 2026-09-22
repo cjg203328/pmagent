@@ -218,9 +218,7 @@ class WorkspaceArtifactGenerator:
         if size <= 0:
             raise RuntimeError("Generated artifact is empty")
         if size > self.max_file_size:
-            raise ValueError(
-                f"Generated artifact exceeds {self.max_file_size} bytes"
-            )
+            raise ValueError(f"Generated artifact exceeds {self.max_file_size} bytes")
         digest = sha256(temporary_path.read_bytes()).hexdigest()
         destination, version = self._publish_new(temporary_path, filename)
         published_digest = sha256(destination.read_bytes()).hexdigest()
@@ -250,9 +248,7 @@ class WorkspaceArtifactGenerator:
             "size": size,
             "sha256": digest,
             "version": version,
-            "created_at": datetime.now(timezone.utc).isoformat(
-                timespec="microseconds"
-            ),
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
             "preview_markdown": preview.get("preview_markdown", ""),
             "export_formats": self.available_export_formats(artifact_format),
             **detail_values,
@@ -294,8 +290,7 @@ class WorkspaceArtifactGenerator:
             ),
             "txt": "text/plain",
             "xlsx": (
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             ),
         }.get(target_format, "application/octet-stream")
 
@@ -501,8 +496,7 @@ class WorkspaceArtifactGenerator:
                         f"table.rows[{index - 1}] must contain {len(columns)} cells"
                     )
             yield [
-                self._cell_value(value, f"table.rows[{index - 1}]")
-                for value in values
+                self._cell_value(value, f"table.rows[{index - 1}]") for value in values
             ]
 
     def generate_xlsx(
@@ -531,17 +525,13 @@ class WorkspaceArtifactGenerator:
                 raise ValueError(f"table.columns[{index}] must be non-empty text")
             column = column.strip()
             columns.append(column)
-            header_values.append(
-                self._cell_value(column, f"table.columns[{index}]")
-            )
+            header_values.append(self._cell_value(column, f"table.columns[{index}]"))
         if len(columns) != len(set(columns)):
             raise ValueError("table.columns must be unique")
 
         safe_name = self._safe_filename(filename, "xlsx")
         sheet_name = self._sheet_name(table.get("sheet_name"))
-        normalized_rows = list(
-            self._table_rows(tuple(columns), table.get("rows", []))
-        )
+        normalized_rows = list(self._table_rows(tuple(columns), table.get("rows", [])))
         temporary_path = self._temporary_path("xlsx")
         try:
             workbook = Workbook(write_only=True)
@@ -577,15 +567,59 @@ class WorkspaceArtifactGenerator:
         finally:
             temporary_path.unlink(missing_ok=True)
 
+    def generate_xlsx_monthly(
+        self,
+        filename: str,
+        source_path: str | Path,
+        target_month: str,
+        *,
+        mode: str = "new_items",
+    ) -> dict[str, Any]:
+        """Create a versioned, preserve-format monthly workbook artifact."""
+        from .xlsx_monthly import transform_monthly_workbook
+
+        safe_name = self._safe_filename(filename, "xlsx")
+        temporary_path = self._temporary_path("xlsx")
+        try:
+            transformed = transform_monthly_workbook(
+                source_path,
+                temporary_path,
+                target_month,
+                mode=mode,
+            )
+            verification = verify_artifact(
+                temporary_path,
+                "xlsx_monthly",
+                {
+                    "target_month": transformed.target_month,
+                    "mode": transformed.mode,
+                    "source_sha256": transformed.source_sha256,
+                    "matched_rows": transformed.matched_rows,
+                    "sheet_name": transformed.sheets[0]["name"],
+                    "header_row": transformed.sheets[0]["header_row"],
+                },
+            )
+            return self._finalize(
+                temporary_path,
+                safe_name,
+                "xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                {
+                    "source_workbook": transformed.to_dict(),
+                    "rows": transformed.matched_rows,
+                    "verification": verification,
+                },
+            )
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
     def _normalized_columns(
         self,
         raw_columns: Sequence[Any],
         field: str,
     ) -> tuple[list[str], list[str]]:
         if not raw_columns or len(raw_columns) > self.max_columns:
-            raise ValueError(
-                f"{field} must contain 1 to {self.max_columns} columns"
-            )
+            raise ValueError(f"{field} must contain 1 to {self.max_columns} columns")
         columns: list[str] = []
         header_values: list[str] = []
         for index, column in enumerate(raw_columns):
@@ -815,8 +849,7 @@ class WorkspaceArtifactGenerator:
                 f"paragraphs must contain 1 to {self.max_paragraphs} items"
             )
         normalized = [
-            self._paragraph(value, index)
-            for index, value in enumerate(raw_paragraphs)
+            self._paragraph(value, index) for index, value in enumerate(raw_paragraphs)
         ]
         total_chars = sum(len(item["text"]) for item in normalized)
         if total_chars > self.max_total_text_chars:
@@ -907,8 +940,7 @@ class WorkspaceArtifactGenerator:
         if not raw_slides or len(raw_slides) > self.max_slides:
             raise ValueError(f"slides must contain 1 to {self.max_slides} items")
         normalized = [
-            self._slide(value, index)
-            for index, value in enumerate(raw_slides)
+            self._slide(value, index) for index, value in enumerate(raw_slides)
         ]
         safe_name = self._safe_filename(filename, "pptx")
         temporary_path = self._temporary_path("pptx")
@@ -988,8 +1020,7 @@ class WorkspaceArtifactGenerator:
                 f"paragraphs must contain 1 to {self.max_paragraphs} items"
             )
         normalized = [
-            self._paragraph(value, index)
-            for index, value in enumerate(raw_paragraphs)
+            self._paragraph(value, index) for index, value in enumerate(raw_paragraphs)
         ]
         total_chars = sum(len(item["text"]) for item in normalized)
         if total_chars > self.max_total_text_chars:

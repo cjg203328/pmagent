@@ -7,7 +7,7 @@ that other layers may use without importing SQLite row internals.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 MIGRATION_TABLE = "knowledge_schema_migrations"
 
 RESOURCE_TABLE = "knowledge_resources"

@@ -1,6 +1,7 @@
 """
 真实的Excel解析器 - 智能识别报价单格式
 """
+
 import openpyxl
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.worksheet.worksheet import Worksheet
@@ -11,9 +12,11 @@ from datetime import datetime
 
 try:
     from artpm_agent.utils.logger import get_logger
+
     logger = get_logger(__name__)
 except ImportError:
     import logging
+
     logger = logging.getLogger(__name__)
 
 
@@ -22,6 +25,29 @@ class ExcelQuoteParser:
 
     def __init__(self):
         self.client_templates = self._load_templates()
+
+    def _default_template(self) -> Dict:
+        """Use every known header alias when the client cannot be identified.
+
+        Unknown clients still need a usable column map, otherwise a valid quote
+        sheet degrades into ``unknown`` and reports a zero total.
+        """
+        columns: Dict[str, List[str]] = {}
+        for template in self.client_templates.values():
+            for field, keywords in template["columns"].items():
+                merged = columns.setdefault(field, [])
+                for keyword in keywords:
+                    if keyword not in merged:
+                        merged.append(keyword)
+        return {"keywords": [], "header_row": 1, "columns": columns}
+
+    def _quote_terms(self) -> set:
+        """Return every header alias that indicates a quote table."""
+        terms = set()
+        for template in self.client_templates.values():
+            for keywords in template["columns"].values():
+                terms.update(keyword.casefold() for keyword in keywords)
+        return terms
 
     def _load_templates(self) -> Dict:
         """加载客户模板规则"""
@@ -33,8 +59,8 @@ class ExcelQuoteParser:
                     "asset_name": ["资产名称", "项目名称", "内容"],
                     "quantity": ["数量", "个数"],
                     "unit_price": ["单价", "价格"],
-                    "total": ["总价", "小计", "合计"]
-                }
+                    "total": ["总价", "小计", "合计"],
+                },
             },
             "网易": {
                 "keywords": ["网易", "netease"],
@@ -43,8 +69,8 @@ class ExcelQuoteParser:
                     "asset_name": ["制作内容", "资产"],
                     "quantity": ["数量"],
                     "unit_price": ["单价"],
-                    "total": ["金额"]
-                }
+                    "total": ["金额"],
+                },
             },
             "米哈游": {
                 "keywords": ["米哈游", "mihoyo"],
@@ -53,9 +79,9 @@ class ExcelQuoteParser:
                     "asset_name": ["资产名称"],
                     "quantity": ["数量"],
                     "unit_price": ["报价"],
-                    "total": ["总计"]
-                }
-            }
+                    "total": ["总计"],
+                },
+            },
         }
 
     def parse(
@@ -75,45 +101,54 @@ class ExcelQuoteParser:
                 return {
                     "success": False,
                     "error": f"文件不存在: {file_path}",
-                    "error_type": "FileNotFoundError"
+                    "error_type": "FileNotFoundError",
                 }
 
             # 加载工作簿
             logger.debug("加载Excel工作簿...")
             workbook = self._load_workbook(file_path, source_name)
             sheet = workbook.active
-            logger.debug(f"工作表: {sheet.title}, 行数: {sheet.max_row}, 列数: {sheet.max_column}")
+            logger.debug(
+                f"工作表: {sheet.title}, 行数: {sheet.max_row}, 列数: {sheet.max_column}"
+            )
 
             # 识别客户和模板
             client = self._detect_client(sheet, client_hint)
             logger.info(f"识别客户: {client}")
-            template = self.client_templates.get(client, self.client_templates["腾讯"])
+            template = self.client_templates.get(client) or self._default_template()
+            document_type = self._detect_document_type(
+                sheet,
+                client_hint=client_hint,
+            )
 
             # 提取基本信息
             logger.debug("提取元数据...")
             metadata = self._extract_metadata(sheet, client)
             logger.debug(f"项目名称: {metadata.get('project_name')}")
 
-            # 找到表头行
-            header_row = self._find_header_row(sheet, template)
-            logger.debug(f"表头行: {header_row}")
+            assets: List[Dict[str, Any]] = []
+            total_amount = 0.0
+            if document_type == "报价单" and template is not None:
+                # 找到表头行
+                header_row = self._find_header_row(sheet, template)
+                logger.debug(f"表头行: {header_row}")
 
-            # 解析列映射
-            column_map = self._map_columns(sheet, header_row, template)
-            logger.debug(f"列映射: {column_map}")
+                # 解析列映射
+                column_map = self._map_columns(sheet, header_row, template)
+                logger.debug(f"列映射: {column_map}")
 
-            # 提取资产数据
-            logger.debug("提取资产数据...")
-            assets = self._extract_assets(sheet, header_row + 1, column_map)
-            logger.info(f"提取到 {len(assets)} 个资产")
+                # 提取资产数据
+                logger.debug("提取资产数据...")
+                assets = self._extract_assets(sheet, header_row + 1, column_map)
+                logger.info(f"提取到 {len(assets)} 个资产")
 
-            # 计算总金额
-            total_amount = self._calculate_total(assets, sheet)
+                # 计算总金额
+                total_amount = self._calculate_total(assets, sheet)
             logger.info(f"总金额: ¥{total_amount:,.2f}")
 
             result = {
                 "success": True,
-                "document_type": "报价单",
+                "document_type": document_type,
                 "client": client,
                 "project_name": metadata.get("project_name"),
                 "date": metadata.get("date"),
@@ -126,8 +161,9 @@ class ExcelQuoteParser:
                     "file_name": source_name,
                     "sheet_name": sheet.title,
                     "rows": sheet.max_row,
-                    "columns": sheet.max_column
-                }
+                    "columns": sheet.max_column,
+                },
+                "table": self._extract_table(sheet),
             }
             # Keep the flat API used by existing integrations and expose the
             # structured shape consumed by the Streamlit upload page.
@@ -149,13 +185,10 @@ class ExcelQuoteParser:
         except Exception as e:
             logger.error(f"Excel解析失败: {str(e)}")
             import traceback
+
             logger.error(f"堆栈跟踪:\n{traceback.format_exc()}")
 
-            return {
-                "success": False,
-                "error": str(e),
-                "error_type": type(e).__name__
-            }
+            return {"success": False, "error": str(e), "error_type": type(e).__name__}
         finally:
             if workbook is not None:
                 workbook.close()
@@ -203,6 +236,71 @@ class ExcelQuoteParser:
 
         return "未知客户"
 
+    def _detect_document_type(
+        self,
+        sheet: Worksheet,
+        *,
+        client_hint: str = None,
+    ) -> str:
+        """Classify an Excel workbook only when its headers support the claim.
+
+        Detection deliberately ignores which client was identified: a quote
+        sheet from an unknown client is still a quote sheet.
+        """
+        text = "\n".join(
+            str(sheet.cell(row, col).value or "")
+            for row in range(1, min(sheet.max_row, 30) + 1)
+            for col in range(1, min(sheet.max_column, 30) + 1)
+        ).casefold()
+        hint = str(client_hint or "").casefold()
+        headers = [
+            str(sheet.cell(row, col).value or "").strip().casefold()
+            for row in range(1, min(sheet.max_row, 30) + 1)
+            for col in range(1, sheet.max_column + 1)
+        ]
+        quote_terms = self._quote_terms()
+        quote_hits = sum(
+            1 for header in headers if any(term in header for term in quote_terms)
+        )
+        explicit_quote = any(
+            term in text or term in hint for term in ("报价", "单价", "总价", "quote")
+        )
+        if quote_hits >= 2 and (explicit_quote or quote_hits >= 3):
+            return "报价单"
+        if any(
+            term in text or term in hint
+            for term in ("人天", "工时", "产能", "分配表", "capacity")
+        ):
+            return (
+                "人天分配表"
+                if any(term in text for term in ("分配", "人天"))
+                else "产能表"
+            )
+        if any(
+            term in text or term in hint
+            for term in ("排期", "开始日期", "完成日期", "schedule")
+        ):
+            return "排期表"
+        return "unknown"
+
+    @staticmethod
+    def _extract_table(sheet: Worksheet) -> Dict[str, Any]:
+        """Expose bounded raw tabular data for deterministic transformations."""
+        rows = []
+        for row_index in range(1, min(sheet.max_row, 500) + 1):
+            values = [
+                sheet.cell(row_index, col).value
+                for col in range(1, min(sheet.max_column, 100) + 1)
+            ]
+            if any(value not in (None, "") for value in values):
+                rows.append({"row": row_index, "values": values})
+        return {
+            "sheet_name": sheet.title,
+            "rows": rows,
+            "max_row": sheet.max_row,
+            "max_column": sheet.max_column,
+        }
+
     def _extract_metadata(self, sheet: Worksheet, client: str) -> Dict:
         """提取元数据"""
         metadata = {
@@ -210,7 +308,7 @@ class ExcelQuoteParser:
             "date": None,
             "contact": None,
             "notes": None,
-            "currency": "CNY"
+            "currency": "CNY",
         }
 
         # 扫描前15行寻找关键信息
@@ -220,25 +318,25 @@ class ExcelQuoteParser:
                 value = str(cell.value or "")
 
                 # 项目名称
-                if re.search(r'项目名称|project', value, re.I):
+                if re.search(r"项目名称|project", value, re.I):
                     next_cell = sheet.cell(row, col + 1).value
                     if next_cell:
                         metadata["project_name"] = str(next_cell)
 
                 # 日期
-                if re.search(r'日期|date', value, re.I):
+                if re.search(r"日期|date", value, re.I):
                     next_cell = sheet.cell(row, col + 1).value
                     if next_cell:
                         metadata["date"] = self._parse_date(next_cell)
 
                 # 联系人
-                if re.search(r'联系人|contact|对接人', value, re.I):
+                if re.search(r"联系人|contact|对接人", value, re.I):
                     next_cell = sheet.cell(row, col + 1).value
                     if next_cell:
                         metadata["contact"] = str(next_cell)
 
                 # 备注
-                if re.search(r'备注|说明|note', value, re.I):
+                if re.search(r"备注|说明|note", value, re.I):
                     next_cell = sheet.cell(row, col + 1).value
                     if next_cell:
                         metadata["notes"] = str(next_cell)
@@ -278,7 +376,9 @@ class ExcelQuoteParser:
 
         return column_map
 
-    def _extract_assets(self, sheet: Worksheet, start_row: int, column_map: Dict) -> List[Dict]:
+    def _extract_assets(
+        self, sheet: Worksheet, start_row: int, column_map: Dict
+    ) -> List[Dict]:
         """提取资产数据"""
         assets = []
 
@@ -303,8 +403,10 @@ class ExcelQuoteParser:
             asset = {
                 "name": str(asset_name).strip(),
                 "quantity": self._get_number(sheet, row, column_map.get("quantity")),
-                "unit_price": self._get_number(sheet, row, column_map.get("unit_price")),
-                "total": self._get_number(sheet, row, column_map.get("total"))
+                "unit_price": self._get_number(
+                    sheet, row, column_map.get("unit_price")
+                ),
+                "total": self._get_number(sheet, row, column_map.get("total")),
             }
 
             # 计算缺失的值
@@ -315,7 +417,9 @@ class ExcelQuoteParser:
 
         return assets
 
-    def _get_number(self, sheet: Worksheet, row: int, col: Optional[int]) -> Optional[float]:
+    def _get_number(
+        self, sheet: Worksheet, row: int, col: Optional[int]
+    ) -> Optional[float]:
         """获取数字值"""
         if col is None:
             return None
@@ -330,7 +434,9 @@ class ExcelQuoteParser:
                 return float(value)
 
             # 移除货币符号和逗号
-            value_str = str(value).replace(",", "").replace("¥", "").replace("$", "").strip()
+            value_str = (
+                str(value).replace(",", "").replace("¥", "").replace("$", "").strip()
+            )
             return float(value_str)
         except (TypeError, ValueError):
             return None
@@ -342,12 +448,14 @@ class ExcelQuoteParser:
         for row in range(sheet.max_row, max(0, sheet.max_row - 10), -1):
             for col in range(1, sheet.max_column + 1):
                 cell_value = str(sheet.cell(row, col).value or "")
-                if re.search(r'合计|总计|总价|total', cell_value, re.I):
+                if re.search(r"合计|总计|总价|total", cell_value, re.I):
                     numeric_values = [
                         self._get_number(sheet, row, candidate)
                         for candidate in range(col + 1, sheet.max_column + 1)
                     ]
-                    numeric_values = [value for value in numeric_values if value is not None]
+                    numeric_values = [
+                        value for value in numeric_values if value is not None
+                    ]
                     if numeric_values:
                         return numeric_values[-1]
 
@@ -384,6 +492,8 @@ if __name__ == "__main__":
         print(f"总金额: {result['total_amount']}")
         print("\n资产列表:")
         for asset in result["assets"]:
-            print(f"  - {asset['name']}: {asset['quantity']}个 x ¥{asset['unit_price']} = ¥{asset['total']}")
+            print(
+                f"  - {asset['name']}: {asset['quantity']}个 x ¥{asset['unit_price']} = ¥{asset['total']}"
+            )
     else:
         print(f"解析失败: {result['error']}")

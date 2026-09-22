@@ -268,6 +268,58 @@ class KnowledgeMigrationService:
                     "VALUES (?, ?)",
                     (7, self._utc_now()),
                 )
+                current_version = 7
+
+            if current_version < 8:
+                self._ensure_knowledge_owner_columns(connection)
+                connection.execute(
+                    "INSERT INTO knowledge_schema_migrations(version, applied_at) "
+                    "VALUES (?, ?)",
+                    (8, self._utc_now()),
+                )
+
+    @staticmethod
+    def _ensure_knowledge_owner_columns(connection: sqlite3.Connection) -> None:
+        """Add the owner/visibility dimension (PRD §12.2, S-2b).
+
+        Personal notes and workspace wiki have different visibility, so the
+        dimension must exist *before* real knowledge lands: adding it later
+        would require re-deciding the visibility of every existing row, and a
+        wrong guess there is a disclosure, not a cosmetic bug.
+
+        `visibility` defaults to `workspace` so pre-existing rows keep their
+        current meaning (shared) and old code keeps behaving the same.
+        `owner_principal_id` stays NULL for those rows: NULL means "workspace
+        shared", which is exactly the pre-existing semantics.
+        """
+        for table in ("knowledge_resources", "knowledge_rules"):
+            columns = {
+                row["name"]
+                for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if "owner_principal_id" not in columns:
+                connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN owner_principal_id TEXT"
+                )
+            if "visibility" not in columns:
+                connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN visibility TEXT NOT NULL "
+                    "DEFAULT 'workspace' "
+                    "CHECK(visibility IN ('private', 'workspace'))"
+                )
+            connection.execute(
+                f"UPDATE {table} SET visibility = 'workspace' "
+                "WHERE visibility IS NULL OR visibility = ''"
+            )
+
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_knowledge_resources_visibility "
+            "ON knowledge_resources(tenant_id, workspace_id, visibility, owner_principal_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_knowledge_rules_visibility "
+            "ON knowledge_rules(tenant_id, workspace_id, visibility, owner_principal_id)"
+        )
 
     @staticmethod
     def _ensure_knowledge_consolidation_columns(

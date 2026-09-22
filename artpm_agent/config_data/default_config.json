@@ -116,7 +116,38 @@
     },
     "overhead_rate": 0.15,
     "tax_rate": 0.06,
-    "currency": "CNY"
+    "currency": "CNY",
+    "_staff_levels_note": "仅用于首次播种 team_members.daily_cost（cost_source=default）。运行时不再读取本段，唯一费率来源见 docs/product/领域数据契约.md §1。",
+    "supplier_coefficients": {
+      "_note": "供应商分层系数，待业务方标定；null 表示未标定，报价时返回 needs_input。",
+      "internal": 1.0,
+      "studio": null,
+      "freelance": null,
+      "overseas": null
+    },
+    "asset_baselines": {
+      "_note": "资产类型 × 复杂度 → 人天基线，待业务方标定；null 表示未标定。",
+      "角色-原画": {"simple": null, "medium": null, "complex": null},
+      "角色-3D建模": {"simple": null, "medium": null, "complex": null},
+      "场景-2D": {"simple": null, "medium": null, "complex": null},
+      "场景-3D": {"simple": null, "medium": null, "complex": null},
+      "UI": {"simple": null, "medium": null, "complex": null},
+      "特效": {"simple": null, "medium": null, "complex": null},
+      "动作-绑定": {"simple": null, "medium": null, "complex": null},
+      "图标-拆分件": {"simple": null, "medium": null, "complex": null}
+    },
+    "revision_policy": {
+      "_note": "改稿系数，待业务方标定；avg_actual_revisions 由 S3 复盘回写。",
+      "included_revisions": null,
+      "revision_cost_ratio": null,
+      "rework_trigger_ratio": null,
+      "avg_actual_revisions": null
+    },
+    "payment_terms": {
+      "_note": "账期资金成本，待业务方标定。",
+      "default_days": null,
+      "annual_capital_rate": null
+    }
   },
   "wecom": {
     "enabled": false,

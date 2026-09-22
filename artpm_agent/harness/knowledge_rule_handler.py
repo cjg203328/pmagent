@@ -65,14 +65,25 @@ def try_knowledge_rule_proposal(
         elif workspace_id != "local-default":
             raise TypeError("knowledge store must support workspace-scoped rules")
         supports_tenant = any(
-            parameter.name == "tenant_id"
-            or parameter.kind is Parameter.VAR_KEYWORD
+            parameter.name == "tenant_id" or parameter.kind is Parameter.VAR_KEYWORD
             for parameter in parameters
         )
         if supports_tenant:
             kwargs["tenant_id"] = tenant_id
         elif tenant_id != "local":
             raise TypeError("knowledge store must support tenant-scoped rules")
+        # 会话中沉淀的规则先归个人（PRD §12.2「前期个人、后续团队」，
+        # 收缩迁移手册 §2b 步骤 4）：默认私有，由用户在知识库面板显式共享。
+        # 归属取可信 scope 的身份，不用请求里传来的值。
+        principal_id = str(getattr(scope, "actor_id", "") or "").strip()
+        supports_visibility = any(
+            parameter.name == "visibility" or parameter.kind is Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+        if supports_visibility:
+            kwargs["visibility"] = "private" if principal_id else "workspace"
+            if principal_id:
+                kwargs["owner_principal_id"] = principal_id
         method(statement, **kwargs)
     except Exception as error:
         logger.exception("创建知识规则提案失败")

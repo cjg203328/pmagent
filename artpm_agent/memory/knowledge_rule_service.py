@@ -23,9 +23,20 @@ class KnowledgeRuleService:
         source_message_id: str | None = None,
         metadata: Mapping[str, Any] | None = None,
         rule_id: str | None = None,
+        visibility: str = "workspace",
+        owner_principal_id: str | None = None,
     ) -> dict[str, Any]:
+        """Propose a rule, carrying the owner dimension (S-2b).
+
+        Task-wrap-up proposals default to workspace-shared here so existing
+        behaviour is unchanged; the personal-note path opts into
+        `visibility="private"` explicitly.
+        """
         statement = self._required_text(statement, "statement")
         tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
+        visibility, owner_principal_id = self._resolve_visibility(
+            visibility, owner_principal_id
+        )
         scope = self._required_text(scope, "scope")
         proposed_by = self._required_text(proposed_by, "proposed_by")
         source_conversation_id = self._optional_text(
@@ -54,8 +65,8 @@ class KnowledgeRuleService:
                 INSERT INTO knowledge_rules(
                     id, tenant_id, workspace_id, statement, scope, status, proposed_by,
                     source_conversation_id, source_message_id, metadata_json,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, visibility, owner_principal_id
+                ) VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     rule_id,
@@ -69,6 +80,8 @@ class KnowledgeRuleService:
                     metadata_json,
                     now,
                     now,
+                    visibility,
+                    owner_principal_id,
                 ),
             )
             row = connection.execute(
@@ -452,6 +465,8 @@ class KnowledgeRuleService:
             "revoked_at": row["revoked_at"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            "visibility": row["visibility"],
+            "owner_principal_id": row["owner_principal_id"],
         }
 
 

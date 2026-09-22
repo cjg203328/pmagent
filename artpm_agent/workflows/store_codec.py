@@ -38,12 +38,38 @@ def definition_json(definition: WorkflowDefinition, *, max_bytes: int) -> str:
     return encode_json(definition.model_dump(mode="json"), max_bytes=max_bytes)
 
 
+# Fields that identify *where* and *which revision* a definition lives at, not
+# what it does. Including them in the checksum created a self-sustaining version
+# loop: publishing a changed builtin bumps `version`, the bumped version changes
+# the checksum, and the next startup concludes "builtin changed" again — one new
+# row per startup per builtin (PRD §10 R-0, 实测 111 → 123 行).
+#
+# Scope fields are already enforced as dedicated columns and appear in every
+# lookup's WHERE clause, so hashing them adds no isolation. `version` is
+# explicitly the thing that must not feed back into the identity of a revision.
+CHECKSUM_EXCLUDED_FIELDS = ("version", "tenant_id", "workspace_id", "profile_id")
+
+
+def definition_semantic_payload(definition: WorkflowDefinition) -> dict[str, Any]:
+    """The part of a definition that decides whether it is new content."""
+    payload = definition.model_dump(mode="json")
+    for field in CHECKSUM_EXCLUDED_FIELDS:
+        payload.pop(field, None)
+    return payload
+
+
 def definition_checksum(
     definition: WorkflowDefinition,
     *,
     max_bytes: int,
 ) -> str:
-    raw = definition_json(definition, max_bytes=max_bytes)
+    """Hash only the business content, so a version bump cannot change identity.
+
+    Size limits still apply to the stored form via `definition_json`; the hash is
+    computed over the semantic subset so that re-publishing an unchanged builtin
+    at any version is recognisable as the same content.
+    """
+    raw = encode_json(definition_semantic_payload(definition), max_bytes=max_bytes)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 

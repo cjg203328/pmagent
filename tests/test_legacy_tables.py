@@ -11,12 +11,30 @@ progress_updates/task_assignments）纳入 Alembic 管理：
 
 所有用例均使用临时库，绝不触碰真实 data/artpm.db。
 """
+
+from pathlib import Path
+
+from alembic.config import Config as AlembicConfig
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+from alembic.script import ScriptDirectory
 from sqlalchemy import Integer, String, create_engine, inspect, text
 
 from artpm_agent.database.migrate import upgrade_head
 from artpm_agent.database.models import Base, DatabaseManager
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _current_head() -> str:
+    """Read the head revision from the migration scripts instead of pinning it.
+
+    Hard-coding a revision here makes every new migration look like a
+    regression in this file; the assertion that matters is "upgraded to head".
+    """
+    config = AlembicConfig(str(_REPO_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(_REPO_ROOT / "alembic"))
+    return ScriptDirectory.from_config(config).get_current_head()
 
 
 def _table_names(engine):
@@ -35,8 +53,12 @@ def test_fresh_db_includes_all_14_tables(tmp_path):
     # 14 张表（8 ORM + 6 遗留）全部存在
     assert _model_table_names() <= names
     assert {
-        "staff", "quotes", "reminders",
-        "operation_logs", "progress_updates", "task_assignments",
+        "staff",
+        "quotes",
+        "reminders",
+        "operation_logs",
+        "progress_updates",
+        "task_assignments",
     } <= names
     assert "alembic_version" in names
 
@@ -55,9 +77,11 @@ def test_legacy_tables_migration_is_idempotent_on_existing_db(tmp_path):
     # 标记到 0001（模拟此前 stamp 到初始迁移）
     engine = create_engine(db_url)
     with engine.begin() as conn:
-        conn.execute(text(
-            "CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) PRIMARY KEY)"
-        ))
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) PRIMARY KEY)"
+            )
+        )
         conn.execute(text("INSERT INTO alembic_version VALUES ('a177eb93a550')"))
     engine.dispose()
 
@@ -70,12 +94,17 @@ def test_legacy_tables_migration_is_idempotent_on_existing_db(tmp_path):
         version = conn.execute(
             text("SELECT version_num FROM alembic_version")
         ).fetchone()[0]
-    # Head includes the tenant ownership, RLS, and legacy integer type migration.
-    assert version == "d4e5f6a7b8c9"
+    # Upgraded all the way to head, not just to the revision this file was
+    # written against.
+    assert version == _current_head()
     # 6 张遗留表仍在，未被重建
     assert {
-        "staff", "quotes", "reminders",
-        "operation_logs", "progress_updates", "task_assignments",
+        "staff",
+        "quotes",
+        "reminders",
+        "operation_logs",
+        "progress_updates",
+        "task_assignments",
     } <= names
 
 
@@ -102,9 +131,7 @@ def test_legacy_integer_foreign_keys_upgrade_from_previous_head(tmp_path):
         connection.execute(
             text("CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)")
         )
-        connection.execute(
-            text("INSERT INTO alembic_version VALUES ('c2d3e4f50617')")
-        )
+        connection.execute(text("INSERT INTO alembic_version VALUES ('c2d3e4f50617')"))
     engine.dispose()
 
     upgraded = create_engine(db_url)
@@ -122,8 +149,11 @@ def test_legacy_integer_foreign_keys_upgrade_from_previous_head(tmp_path):
         assert columns["progress_updates"]["task_id"] == "INTEGER"
         assert columns["task_assignments"]["task_id"] == "INTEGER"
         with upgraded.connect() as connection:
-            assert connection.execute(
-                text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == "d4e5f6a7b8c9"
+            assert (
+                connection.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one()
+                == _current_head()
+            )
     finally:
         upgraded.dispose()

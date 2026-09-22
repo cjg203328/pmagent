@@ -7,6 +7,8 @@ from collections.abc import Iterable, Iterator, Mapping
 from math import isfinite
 from typing import Any, cast
 
+from artpm_agent.tenancy import TenantContextManager, WorkspaceAccessDenied
+
 from .knowledge import (
     normalize_filter as _normalized_filter_contract,
 )
@@ -16,16 +18,59 @@ from .knowledge import (
 
 
 class KnowledgeSearchService:
+    #: Owner filter (PRD §12.2 / S-2b). `visibility='workspace'` is shared;
+    #: `visibility='private'` is visible only to its owner. Binding a NULL
+    #: principal yields shared rows only, because `owner_principal_id = NULL` is
+    #: never true in SQL — an unidentified caller must not read private notes.
+    VISIBILITY_CLAUSE_TEMPLATE = (
+        "({alias}.visibility = 'workspace' OR {alias}.owner_principal_id = ?)"
+    )
+
+    @classmethod
+    def _visibility_clause(cls, alias: str) -> str:
+        """Build the owner filter for a table alias.
+
+        The alias is part of the clause rather than prefixed onto a
+        parenthesised expression: `r.(a OR b)` is a syntax error in SQLite, so
+        the caller must not be able to introduce it by writing `r.{clause}`.
+        """
+        return cls.VISIBILITY_CLAUSE_TEMPLATE.format(alias=alias)
+
+    def _resolve_principal(self, principal_id: str | None = None) -> str | None:
+        """Resolve the acting principal, preferring the authenticated context.
+
+        Falls back to the tenant context's principal so callers that already run
+        inside a request scope are filtered without passing it explicitly. A
+        truly anonymous caller resolves to None and sees shared content only.
+        """
+        requested = str(principal_id or "").strip() or None
+        current = TenantContextManager.get_current()
+        if current is not None:
+            bound = str(getattr(current, "principal_id", "") or "").strip() or None
+            if requested and bound and requested != bound:
+                raise WorkspaceAccessDenied(
+                    "principal does not match the authenticated context"
+                )
+            return bound or requested
+        return requested
+
     def iter_active_resources(
         self,
         *,
         workspace_id: str | None = None,
         tenant_id: str | None = None,
         consolidation_status: str | None = None,
+        principal_id: str | None = None,
         limit: int = 5000,
     ) -> Iterator[dict[str, Any]]:
-        """Yield current versions of resources for consolidation scanning."""
+        """Yield current versions of resources for consolidation scanning.
+
+        Scoped by owner for the same reason search is: consolidation results are
+        surfaced to users, so scanning another principal's private rows would
+        route private content into a shared proposal.
+        """
         tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
+        principal = self._resolve_principal(principal_id)
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
         # Consolidation scans the whole base; allow a larger ceiling than the
@@ -35,8 +80,9 @@ class KnowledgeSearchService:
             "r.tenant_id = ?",
             "r.workspace_id = ?",
             "r.status = 'active'",
+            self._visibility_clause("r"),
         ]
-        params: list[Any] = [tenant_id, workspace_id]
+        params: list[Any] = [tenant_id, workspace_id, principal]
         if consolidation_status is not None:
             if consolidation_status not in self.CONSOLIDATION_STATUSES:
                 raise ValueError("unsupported consolidation_status")
@@ -392,6 +438,7 @@ class KnowledgeSearchService:
         *,
         workspace_id: str | None = None,
         tenant_id: str | None = None,
+        principal_id: str | None = None,
         limit: int = 10,
         resource_types: Iterable[str] | None = None,
         source_types: Iterable[str] | None = None,
@@ -400,11 +447,18 @@ class KnowledgeSearchService:
         use_confidence: bool = False,
         confidence_floor: float = 0.0,
     ) -> list[dict[str, Any]]:
-        """Search current active resource versions and accepted rules."""
+        """Search current active resource versions and accepted rules.
+
+        Results are owner-scoped: workspace-shared rows plus the acting
+        principal's own private rows. This must not be omitted — adding the
+        owner column without filtering here would make the isolation decorative
+        (收缩迁移手册 §2b 风险).
+        """
         query = self._required_text(query, "query")
         if len(query) > self.MAX_QUERY_CHARS:
             raise ValueError(f"query cannot exceed {self.MAX_QUERY_CHARS} characters")
         tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
+        principal = self._resolve_principal(principal_id)
         limit = self._validate_limit(limit)
         if (
             isinstance(max_text_chars, bool)
@@ -442,7 +496,8 @@ class KnowledgeSearchService:
                 AND r.status = 'active'
                 AND r.consolidation_status = 'active'
         """
-        resource_params: list[Any] = [tenant_id, workspace_id]
+        resource_sql += f" AND {self._visibility_clause('r')}"
+        resource_params: list[Any] = [tenant_id, workspace_id, principal]
         if resource_type_filter:
             placeholders = ", ".join("?" for _ in resource_type_filter)
             resource_sql += f" AND r.resource_type IN ({placeholders})"
@@ -458,8 +513,9 @@ class KnowledgeSearchService:
             rule_sql = (
                 "SELECT * FROM knowledge_rules "
                 "WHERE tenant_id = ? AND workspace_id = ? AND status = 'accepted'"
+                f" AND {self._visibility_clause('knowledge_rules')}"
             )
-            rule_params: list[Any] = [tenant_id, workspace_id]
+            rule_params: list[Any] = [tenant_id, workspace_id, principal]
             # Pre-filter accepted rules by a literal query match so the LIMIT
             # applies to already-relevant rows instead of silently dropping
             # older-but-matching rules (the Python scorer only keeps

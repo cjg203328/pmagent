@@ -1,7 +1,21 @@
 """
 数据库模型设计 - SQLAlchemy ORM
 """
-from sqlalchemy import create_engine, inspect, Column, Integer, String, Float, DateTime, Text, ForeignKey, Boolean, func
+
+from sqlalchemy import (
+    create_engine,
+    inspect,
+    Column,
+    Integer,
+    String,
+    Float,
+    DateTime,
+    Text,
+    ForeignKey,
+    Boolean,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, relationship, sessionmaker, selectinload
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -43,6 +57,7 @@ atexit.register(_dispose_all_engines)
 
 class Base(DeclarativeBase):
     """Shared declarative base for all ORM models."""
+
     pass
 
 
@@ -57,12 +72,15 @@ class TenantScopedMixin:
 
 class Project(TenantScopedMixin, Base):
     """项目表"""
-    __tablename__ = 'projects'
+
+    __tablename__ = "projects"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     project_name = Column(String(200), nullable=False, index=True)
     client = Column(String(100), nullable=False, index=True)
-    status = Column(String(50), default='待开始', index=True)  # 待开始, 进行中, 已完成, 已取消
+    status = Column(
+        String(50), default="待开始", index=True
+    )  # 待开始, 进行中, 已完成, 已取消
 
     # 金额信息
     quote_amount = Column(Float, nullable=False)
@@ -70,6 +88,9 @@ class Project(TenantScopedMixin, Base):
     gross_profit = Column(Float)
     net_profit = Column(Float)
     profit_rate = Column(Float)
+
+    # 账期（影响现金流成本，见领域数据契约 §8）
+    payment_terms_days = Column(Integer)
 
     # 时间信息
     start_date = Column(DateTime)
@@ -88,9 +109,13 @@ class Project(TenantScopedMixin, Base):
     risk_level = Column(String(20))  # low, medium, high
 
     # 关联
-    assets = relationship("Asset", back_populates="project", cascade="all, delete-orphan")
+    assets = relationship(
+        "Asset", back_populates="project", cascade="all, delete-orphan"
+    )
     tasks = relationship("Task", back_populates="project", cascade="all, delete-orphan")
-    documents = relationship("Document", back_populates="project", cascade="all, delete-orphan")
+    documents = relationship(
+        "Document", back_populates="project", cascade="all, delete-orphan"
+    )
 
     def to_dict(self) -> Dict:
         """转换为字典"""
@@ -106,16 +131,17 @@ class Project(TenantScopedMixin, Base):
             "deadline": self.deadline.isoformat() if self.deadline else None,
             "created_at": self.created_at.isoformat(),
             "contact_person": self.contact_person,
-            "risk_level": self.risk_level
+            "risk_level": self.risk_level,
         }
 
 
 class Asset(TenantScopedMixin, Base):
     """资产表"""
-    __tablename__ = 'assets'
+
+    __tablename__ = "assets"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey('projects.id'), nullable=False, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
 
     # 资产信息
     asset_name = Column(String(200), nullable=False)
@@ -125,7 +151,7 @@ class Asset(TenantScopedMixin, Base):
     total_price = Column(Float)
 
     # 制作信息
-    status = Column(String(50), default='未开始')  # 未开始, 制作中, 待审核, 已完成
+    status = Column(String(50), default="未开始")  # 未开始, 制作中, 待审核, 已完成
     progress = Column(Integer, default=0)  # 0-100
     complexity = Column(String(20))  # simple, medium, complex
 
@@ -152,13 +178,14 @@ class Asset(TenantScopedMixin, Base):
             "unit_price": self.unit_price,
             "total_price": self.total_price,
             "status": self.status,
-            "progress": self.progress
+            "progress": self.progress,
         }
 
 
 class TeamMember(TenantScopedMixin, Base):
     """团队成员表"""
-    __tablename__ = 'team_members'
+
+    __tablename__ = "team_members"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(100), nullable=False, index=True)
@@ -174,8 +201,16 @@ class TeamMember(TenantScopedMixin, Base):
     wechat = Column(String(100))
 
     # 工作信息
-    employment_type = Column(String(20))  # full-time, part-time, freelance
-    hourly_rate = Column(Float)
+    employment_type = Column(String(20))  # internal, studio, freelance, overseas
+    hourly_rate = Column(Float)  # 保留但**不参与计价**，见领域数据契约 §1
+    daily_cost = Column(Float)  # 唯一人天费率来源（元/人天）
+    # 费率来源必须由写入方显式声明；不给模型级默认值，否则没有费率的人
+    # 也会被标成 default，等于伪造来源（领域数据契约 §6）。
+    cost_source = Column(String(20))  # contract/quote_history/manual/default
+    cost_effective_at = Column(DateTime)  # 费率生效日期
+    capacity_days_per_month = Column(Float)  # 月可用产能（人天），派单用
+    max_concurrent_tasks = Column(Integer)  # 并行任务上限
+    contact_wecom = Column(String(100))  # 催办投递目标（自 staff 并入）
     is_active = Column(Boolean, default=True)
 
     # 统计
@@ -195,18 +230,19 @@ class TeamMember(TenantScopedMixin, Base):
             "role": self.role,
             "skills": json.loads(self.skills) if self.skills else [],
             "skill_level": self.skill_level,
-            "is_active": self.is_active
+            "is_active": self.is_active,
         }
 
 
 class Task(TenantScopedMixin, Base):
     """任务表"""
-    __tablename__ = 'tasks'
+
+    __tablename__ = "tasks"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey('projects.id'), nullable=False, index=True)
-    asset_id = Column(Integer, ForeignKey('assets.id'), index=True)
-    assignee_id = Column(Integer, ForeignKey('team_members.id'), index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    asset_id = Column(Integer, ForeignKey("assets.id"), index=True)
+    assignee_id = Column(Integer, ForeignKey("team_members.id"), index=True)
 
     # 任务信息
     task_name = Column(String(200), nullable=False)
@@ -214,8 +250,10 @@ class Task(TenantScopedMixin, Base):
     description = Column(Text)
 
     # 状态
-    status = Column(String(50), default='未开始', index=True)  # 未开始, 进行中, 待审核, 已完成, 已取消
-    priority = Column(String(20), default='medium')  # low, medium, high, urgent
+    status = Column(
+        String(50), default="未开始", index=True
+    )  # 未开始, 进行中, 待审核, 已完成, 已取消
+    priority = Column(String(20), default="medium")  # low, medium, high, urgent
     progress = Column(Integer, default=0)
 
     # 时间
@@ -242,16 +280,133 @@ class Task(TenantScopedMixin, Base):
             "status": self.status,
             "progress": self.progress,
             "assignee": self.assignee.name if self.assignee else None,
-            "due_date": self.due_date.isoformat() if self.due_date else None
+            "due_date": self.due_date.isoformat() if self.due_date else None,
+        }
+
+
+class Job(TenantScopedMixin, Base):
+    """任务（一等公民）：包装 WorkflowRun，成为 UI/API 的主导航对象。
+
+    设计约束见 PRD §4 与 `prototype/交互规格.md` §1：
+
+    - `workflow_run_id` 与 `conversation_id` **必须可空**。Job 要能在无人对话时
+      被创建、推进、完成（定时触发即可），把对话设成必填就退回「对话加侧栏」。
+    - `trigger` 显式声明来源，默认 `manual`。
+    - 状态机在 `artpm_agent/jobs/service.py`，不在这里；ORM 只存字段。
+    """
+
+    __tablename__ = "jobs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_name = Column(String(200), nullable=False, index=True)
+    project_id = Column(
+        Integer, ForeignKey("projects.id", ondelete="SET NULL"), index=True
+    )
+    job_type = Column(String(50), index=True)  # s0_monthly | s1_quote | ...
+    trigger = Column(String(20), nullable=False, default="manual", index=True)
+    status = Column(String(20), nullable=False, default="draft", index=True)
+
+    # 执行链接（均可空：Job 不依赖对话存在）
+    workflow_run_id = Column(String(64), index=True)
+    conversation_id = Column(String(64), index=True)
+
+    job_input_json = Column(Text)
+    job_output_json = Column(Text)
+    error = Column(Text)
+
+    # 定时任务的字段（F3）
+    schedule_id = Column(Integer, index=True)
+    next_run_at = Column(DateTime, index=True)
+
+    created_at = Column(DateTime, default=datetime.now, index=True)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+
+    artifacts = relationship(
+        "JobArtifact",
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="JobArtifact.id",
+    )
+
+    def to_dict(self) -> Dict:
+        return {
+            "id": self.id,
+            "job_name": self.job_name,
+            "project_id": self.project_id,
+            "job_type": self.job_type,
+            "trigger": self.trigger,
+            "status": self.status,
+            "workflow_run_id": self.workflow_run_id,
+            "conversation_id": self.conversation_id,
+            "error": self.error,
+            "next_run_at": (self.next_run_at.isoformat() if self.next_run_at else None),
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": (
+                self.completed_at.isoformat() if self.completed_at else None
+            ),
+        }
+
+
+class JobArtifact(TenantScopedMixin, Base):
+    """交付物：归属 Job，版本**追加**，同一 Job 重跑不得覆盖历史成果。
+
+    `verification_status` 沿用既有核验契约，只有 `passed` 才允许下载
+    （`prototype/交互规格.md` §3 ③栏）。
+    """
+
+    __tablename__ = "job_artifacts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(
+        Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    step_id = Column(String(64))  # 产出该成果的 step，供 F4 定点改定位
+    filename = Column(String(255), nullable=False)
+    artifact_type = Column(String(30))  # xlsx | docx | pdf | pptx
+    artifact_path = Column(String(500))
+    sha256 = Column(String(64))
+    size_bytes = Column(Integer)
+    version = Column(Integer, nullable=False, default=1)
+    verification_status = Column(String(20), default="pending")  # pending|passed|failed
+    verification_json = Column(Text)
+    created_at = Column(DateTime, default=datetime.now)
+
+    job = relationship("Job", back_populates="artifacts")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "job_id", "filename", "version", name="uq_job_artifact_version"
+        ),
+    )
+
+    def to_dict(self) -> Dict:
+        return {
+            "id": self.id,
+            "job_id": self.job_id,
+            "step_id": self.step_id,
+            "filename": self.filename,
+            "artifact_type": self.artifact_type,
+            "artifact_path": self.artifact_path,
+            "sha256": self.sha256,
+            "size_bytes": self.size_bytes,
+            "version": self.version,
+            "verification_status": self.verification_status,
+            "downloadable": self.verification_status == "passed",
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
 
 class Document(TenantScopedMixin, Base):
     """文档表"""
-    __tablename__ = 'documents'
+
+    __tablename__ = "documents"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey('projects.id'), nullable=False, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
 
     # 文档信息
     document_type = Column(String(50), nullable=False)  # 报价单, 合同, 验收单等
@@ -277,13 +432,14 @@ class Document(TenantScopedMixin, Base):
             "document_type": self.document_type,
             "file_name": self.file_name,
             "upload_date": self.upload_date.isoformat(),
-            "parsed_data": json.loads(self.parsed_data) if self.parsed_data else None
+            "parsed_data": json.loads(self.parsed_data) if self.parsed_data else None,
         }
 
 
 class KnowledgeBase(TenantScopedMixin, Base):
     """知识库表 - 用于RAG"""
-    __tablename__ = 'knowledge_base'
+
+    __tablename__ = "knowledge_base"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
 
@@ -310,20 +466,21 @@ class KnowledgeBase(TenantScopedMixin, Base):
             "title": self.title,
             "content": self.content,
             "category": self.category,
-            "source": self.source
+            "source": self.source,
         }
 
 
 class Delivery(TenantScopedMixin, Base):
     """交付记录表 - 产品交付阶段的每次交付包（草稿/已交付/已验收/已驳回）"""
-    __tablename__ = 'deliveries'
+
+    __tablename__ = "deliveries"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey('projects.id'), nullable=False, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
     delivery_no = Column(String(50), nullable=False, unique=True)
     title = Column(String(200))
-    status = Column(String(30), default='草稿')
-    items_json = Column(Text)            # JSON: [{asset_id, asset_name, version, status}]
+    status = Column(String(30), default="草稿")
+    items_json = Column(Text)  # JSON: [{asset_id, asset_name, version, status}]
     delivered_by = Column(String(100))
     delivered_at = Column(DateTime)
     accepted_at = Column(DateTime)
@@ -333,12 +490,13 @@ class Delivery(TenantScopedMixin, Base):
 
 class AssetVersion(TenantScopedMixin, Base):
     """资产版本表 - 单个资产的交付版本历史（待审核/已通过/已驳回）"""
-    __tablename__ = 'asset_versions'
+
+    __tablename__ = "asset_versions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    asset_id = Column(Integer, ForeignKey('assets.id'), nullable=False, index=True)
+    asset_id = Column(Integer, ForeignKey("assets.id"), nullable=False, index=True)
     version = Column(String(20), nullable=False)
-    status = Column(String(30), default='待审核')
+    status = Column(String(30), default="待审核")
     note = Column(Text)
     file_ref = Column(String(500))
     created_at = Column(DateTime, default=datetime.now)
@@ -353,7 +511,9 @@ class DatabaseManager:
 
             db_path = resolve_state_path("artpm.db", "DB_PATH")
             db_url = f"sqlite:///{db_path.as_posix()}"
-        engine_options = {"pool_pre_ping": True} if db_url.startswith("postgresql") else {}
+        engine_options = (
+            {"pool_pre_ping": True} if db_url.startswith("postgresql") else {}
+        )
         self.engine = create_engine(db_url, echo=False, **engine_options)
         self.SessionLocal = sessionmaker(bind=self.engine, expire_on_commit=False)
         from artpm_agent.database.tenant_session import install_tenant_session_hooks
@@ -436,7 +596,9 @@ class DatabaseManager:
         for table in Base.metadata.sorted_tables:
             if table.name not in existing_tables:
                 continue
-            existing_columns = {column["name"] for column in inspector.get_columns(table.name)}
+            existing_columns = {
+                column["name"] for column in inspector.get_columns(table.name)
+            }
             required_columns = {column.name for column in table.columns}
             missing = required_columns - existing_columns
             if allow_missing_tenant_scope:
@@ -465,11 +627,18 @@ class DatabaseManager:
         """获取项目"""
         session = self.get_session()
         try:
-            return session.query(Project).options(selectinload(Project.tasks)).filter(Project.id == project_id).first()
+            return (
+                session.query(Project)
+                .options(selectinload(Project.tasks))
+                .filter(Project.id == project_id)
+                .first()
+            )
         finally:
             session.close()
 
-    def list_projects(self, status: str = None, client: str = None, limit: int = 50) -> List[Project]:
+    def list_projects(
+        self, status: str = None, client: str = None, limit: int = 50
+    ) -> List[Project]:
         """列出项目"""
         session = self.get_session()
         try:
@@ -480,13 +649,21 @@ class DatabaseManager:
             if client:
                 query = query.filter(Project.client == client)
 
-            return query.options(selectinload(Project.tasks)).order_by(Project.created_at.desc()).limit(limit).all()
+            return (
+                query.options(selectinload(Project.tasks))
+                .order_by(Project.created_at.desc())
+                .limit(limit)
+                .all()
+            )
         finally:
             session.close()
 
     def update_project(self, project_id: int, update_data: Dict) -> Optional[Project]:
         """更新项目"""
-        allowed = {column.name for column in Project.__table__.columns} - {"id", "created_at"}
+        allowed = {column.name for column in Project.__table__.columns} - {
+            "id",
+            "created_at",
+        }
         invalid = set(update_data) - allowed
         if invalid:
             raise ValueError(f"Unknown project fields: {', '.join(sorted(invalid))}")
@@ -590,9 +767,17 @@ class DatabaseManager:
 
     # ===== Document persistence (需求评估 intake→落库) =====
 
-    def save_document(self, project_id, document_type, file_name, parsed_data=None,
-                      file_path=None, file_type=None, file_size=None,
-                      confidence_score=None) -> "Document":
+    def save_document(
+        self,
+        project_id,
+        document_type,
+        file_name,
+        parsed_data=None,
+        file_path=None,
+        file_type=None,
+        file_size=None,
+        confidence_score=None,
+    ) -> "Document":
         """持久化一份已解析的业务文档（如报价单），修复 intake→落库断层。"""
         session = self.get_session()
         try:
@@ -604,7 +789,8 @@ class DatabaseManager:
                 file_type=file_type,
                 file_size=file_size,
                 parsed_data=json.dumps(parsed_data, ensure_ascii=False)
-                if isinstance(parsed_data, (dict, list)) else parsed_data,
+                if isinstance(parsed_data, (dict, list))
+                else parsed_data,
                 confidence_score=confidence_score,
                 parsed_date=datetime.now() if parsed_data else None,
             )
@@ -630,8 +816,9 @@ class DatabaseManager:
 
     # ===== Knowledge base writes (复盘总结经验沉淀) =====
 
-    def add_knowledge(self, title, content, category="lessons", source=None,
-                      client=None, tags=None) -> "KnowledgeBase":
+    def add_knowledge(
+        self, title, content, category="lessons", source=None, client=None, tags=None
+    ) -> "KnowledgeBase":
         """写入一条知识库记录（如复盘经验教训），供后续 RAG 复用。"""
         session = self.get_session()
         try:
@@ -641,7 +828,9 @@ class DatabaseManager:
                 category=category,
                 source=source,
                 client=client,
-                tags=json.dumps(tags, ensure_ascii=False) if isinstance(tags, list) else tags,
+                tags=json.dumps(tags, ensure_ascii=False)
+                if isinstance(tags, list)
+                else tags,
             )
             session.add(kb)
             session.commit()
@@ -652,8 +841,15 @@ class DatabaseManager:
 
     # ===== Delivery & versions (产品交付) =====
 
-    def create_delivery(self, project_id, delivery_no, title=None, items=None,
-                        delivered_by=None, status="草稿") -> "Delivery":
+    def create_delivery(
+        self,
+        project_id,
+        delivery_no,
+        title=None,
+        items=None,
+        delivered_by=None,
+        status="草稿",
+    ) -> "Delivery":
         """创建一次交付记录。"""
         session = self.get_session()
         try:
@@ -675,20 +871,27 @@ class DatabaseManager:
     def get_project_deliveries(self, project_id) -> List["Delivery"]:
         session = self.get_session()
         try:
-            return session.query(Delivery).filter(
-                Delivery.project_id == project_id
-            ).order_by(Delivery.created_at.desc()).all()
+            return (
+                session.query(Delivery)
+                .filter(Delivery.project_id == project_id)
+                .order_by(Delivery.created_at.desc())
+                .all()
+            )
         finally:
             session.close()
 
-    def create_asset_version(self, asset_id, version, status="待审核",
-                             note=None, file_ref=None) -> "AssetVersion":
+    def create_asset_version(
+        self, asset_id, version, status="待审核", note=None, file_ref=None
+    ) -> "AssetVersion":
         """记录某个资产的一个交付版本。"""
         session = self.get_session()
         try:
             v = AssetVersion(
-                asset_id=asset_id, version=version, status=status,
-                note=note, file_ref=file_ref,
+                asset_id=asset_id,
+                version=version,
+                status=status,
+                note=note,
+                file_ref=file_ref,
             )
             session.add(v)
             session.commit()
@@ -700,9 +903,12 @@ class DatabaseManager:
     def get_asset_versions(self, asset_id) -> List["AssetVersion"]:
         session = self.get_session()
         try:
-            return session.query(AssetVersion).filter(
-                AssetVersion.asset_id == asset_id
-            ).order_by(AssetVersion.created_at.desc()).all()
+            return (
+                session.query(AssetVersion)
+                .filter(AssetVersion.asset_id == asset_id)
+                .order_by(AssetVersion.created_at.desc())
+                .all()
+            )
         finally:
             session.close()
 
@@ -712,7 +918,9 @@ class DatabaseManager:
         """创建团队成员"""
         member_data = dict(member_data)
         if isinstance(member_data.get("skills"), (list, tuple)):
-            member_data["skills"] = json.dumps(member_data["skills"], ensure_ascii=False)
+            member_data["skills"] = json.dumps(
+                member_data["skills"], ensure_ascii=False
+            )
         session = self.get_session()
         try:
             member = TeamMember(**member_data)
@@ -741,25 +949,35 @@ class DatabaseManager:
         session = self.get_session()
         try:
             total = session.query(Project).count()
-            in_progress = session.query(Project).filter(Project.status == '进行中').count()
-            completed = session.query(Project).filter(Project.status == '已完成').count()
+            in_progress = (
+                session.query(Project).filter(Project.status == "进行中").count()
+            )
+            completed = (
+                session.query(Project).filter(Project.status == "已完成").count()
+            )
 
             # 计算总收入
-            total_revenue = session.query(func.sum(Project.quote_amount)).filter(
-                Project.status == '已完成'
-            ).scalar() or 0
+            total_revenue = (
+                session.query(func.sum(Project.quote_amount))
+                .filter(Project.status == "已完成")
+                .scalar()
+                or 0
+            )
 
             # 平均利润率
-            avg_profit_rate = session.query(func.avg(Project.profit_rate)).filter(
-                Project.profit_rate.isnot(None)
-            ).scalar() or 0
+            avg_profit_rate = (
+                session.query(func.avg(Project.profit_rate))
+                .filter(Project.profit_rate.isnot(None))
+                .scalar()
+                or 0
+            )
 
             return {
                 "total_projects": total,
                 "in_progress": in_progress,
                 "completed": completed,
                 "total_revenue": float(total_revenue),
-                "avg_profit_rate": float(avg_profit_rate)
+                "avg_profit_rate": float(avg_profit_rate),
             }
         finally:
             session.close()
@@ -777,8 +995,10 @@ class DatabaseManager:
 # operation_logs 仍被 sqlite_manager.py 以原生 SQL 使用。
 # ============================================================================
 
+
 class Staff(TenantScopedMixin, Base):
     """遗留：人员表（历史残留，当前无业务代码读写）。"""
+
     __tablename__ = "staff"
 
     id = Column(String, primary_key=True)
@@ -793,6 +1013,7 @@ class Staff(TenantScopedMixin, Base):
 
 class Quote(TenantScopedMixin, Base):
     """遗留：报价单解析结果表（历史残留，当前无业务代码读写）。"""
+
     __tablename__ = "quotes"
 
     id = Column(String, primary_key=True)
@@ -811,6 +1032,7 @@ class Quote(TenantScopedMixin, Base):
 
 class Reminder(TenantScopedMixin, Base):
     """遗留：催办提醒表（历史残留，当前无业务代码读写）。"""
+
     __tablename__ = "reminders"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -826,6 +1048,7 @@ class Reminder(TenantScopedMixin, Base):
 
 class OperationLog(TenantScopedMixin, Base):
     """遗留：操作日志表（仍被 sqlite_manager.py 原生 SQL 使用）。"""
+
     __tablename__ = "operation_logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -840,6 +1063,7 @@ class OperationLog(TenantScopedMixin, Base):
 
 class ProgressUpdate(TenantScopedMixin, Base):
     """遗留：进度更新表（仍被 sqlite_manager.py 原生 SQL 使用）。"""
+
     __tablename__ = "progress_updates"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -852,6 +1076,7 @@ class ProgressUpdate(TenantScopedMixin, Base):
 
 class TaskAssignment(TenantScopedMixin, Base):
     """遗留：任务分派表（仍被 sqlite_manager.py 原生 SQL 使用）。"""
+
     __tablename__ = "task_assignments"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -869,25 +1094,29 @@ if __name__ == "__main__":
     db = DatabaseManager()
 
     # 创建项目
-    project = db.create_project({
-        "project_name": "角色模型制作",
-        "client": "腾讯",
-        "quote_amount": 30000,
-        "cost": 20000,
-        "status": "进行中",
-        "deadline": datetime(2026, 8, 15)
-    })
+    project = db.create_project(
+        {
+            "project_name": "角色模型制作",
+            "client": "腾讯",
+            "quote_amount": 30000,
+            "cost": 20000,
+            "status": "进行中",
+            "deadline": datetime(2026, 8, 15),
+        }
+    )
     print(f"创建项目: {project.id} - {project.project_name}")
 
     # 创建资产
-    asset = db.create_asset({
-        "project_id": project.id,
-        "asset_name": "主角色模型",
-        "asset_type": "角色",
-        "quantity": 1,
-        "unit_price": 8000,
-        "total_price": 8000
-    })
+    asset = db.create_asset(
+        {
+            "project_id": project.id,
+            "asset_name": "主角色模型",
+            "asset_type": "角色",
+            "quantity": 1,
+            "unit_price": 8000,
+            "total_price": 8000,
+        }
+    )
     print(f"创建资产: {asset.asset_name}")
 
     # 查询项目

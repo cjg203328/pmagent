@@ -12,6 +12,9 @@
 | 覆盖率 | `coverage_core.py` / `coverage_core.ps1` | 核心边界 90% 覆盖率门禁 |
 | 覆盖率 | `coverage_report.sh` | 生成 `artifacts/quality/` 报告，不承担 CI 门禁 |
 | 数据 | `backup_data.py` / `backup_data.sh` | 备份 `data/` 数据库 |
+| 数据 | `seed_member_rates.py` | 把配置档位费率播种进 `team_members.daily_cost`（默认 dry-run，`--apply` 才写入） |
+| 检查 | `quote_golden_check.py` | 报价正确性门禁：结构断言 ST-1..ST-7；`--values` 走真值断言（需 `tests/golden/cases/`，为空时退出码 3＝未验证） |
+| 数据 | `clean_phantom_workflows.py` | 清理内置工作流幻影版本（R-0），收敛到每内置一行；默认 dry-run，前置检查不过退出码 1 |
 | 数据库 | `migrate_postgres.py` | Compose PostgreSQL 迁移任务 |
 | 启动 | `prepare_streamlit_port.ps1` | 识别并处理本项目占用的 UI 端口 |
 | 检查 | `verify_optimization.py` | 启动、文档和优化契约检查 |

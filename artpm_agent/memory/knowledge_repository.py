@@ -108,6 +108,30 @@ class KnowledgeRepository:
         )
         return resolved_tenant, resolved_workspace
 
+    VISIBILITY_VALUES = ("private", "workspace")
+
+    def _resolve_visibility(
+        self,
+        visibility: str | None,
+        owner_principal_id: str | None,
+    ) -> tuple[str, str | None]:
+        """Validate the owner dimension and default it to workspace-shared.
+
+        A private row without an owner would be invisible to everyone,
+        including its author, so that combination is rejected rather than
+        silently accepted.
+        """
+        resolved = str(visibility or "workspace").strip().lower()
+        if resolved not in self.VISIBILITY_VALUES:
+            raise ValueError("visibility must be 'private' or 'workspace'")
+        owner = str(owner_principal_id or "").strip() or None
+        if resolved == "private" and owner is None:
+            raise ValueError("private knowledge requires an owner_principal_id")
+        if resolved == "workspace":
+            # 共享行的 owner 无意义；保留它会让人误以为存在个人归属。
+            owner = None
+        return resolved, owner
+
     def _claim_legacy_scope(self, tenant_id: str, workspace_id: str) -> bool:
         """Bind unowned pre-tenant rows only on a trusted first access.
 
@@ -236,10 +260,21 @@ class KnowledgeRepository:
         created_by: str | None = None,
         change_note: str | None = None,
         resource_id: str | None = None,
+        visibility: str = "workspace",
+        owner_principal_id: str | None = None,
     ) -> dict[str, Any]:
-        """Create or version a resource, resolving identity by ID or source ID."""
+        """Create or version a resource, resolving identity by ID or source ID.
+
+        `visibility`/`owner_principal_id` carry the owner dimension (PRD §12.2,
+        收缩迁移手册 §2b). Defaults stay workspace-shared so existing callers
+        keep the pre-S-2b semantics; personal notes opt in with
+        `visibility="private"`.
+        """
         title = self._required_text(title, "title")
         tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
+        visibility, owner_principal_id = self._resolve_visibility(
+            visibility, owner_principal_id
+        )
         resource_type = self._required_text(resource_type, "resource_type")
         source_type = self._required_text(source_type, "source_type")
         source_uri = self._optional_text(source_uri, "source_uri")
@@ -278,6 +313,8 @@ class KnowledgeRepository:
                 change_note=change_note,
                 resource_id=resource_id,
                 content_hash=content_hash,
+                visibility=visibility,
+                owner_principal_id=owner_principal_id,
                 now=self._utc_now(),
             )
         self._project_index_best_effort()
@@ -303,6 +340,8 @@ class KnowledgeRepository:
         change_note: str | None,
         resource_id: str | None,
         content_hash: str,
+        visibility: str,
+        owner_principal_id: str | None,
         now: str,
     ) -> dict[str, Any]:
         resource_row = None
@@ -329,8 +368,9 @@ class KnowledgeRepository:
                 INSERT INTO knowledge_resources(
                     id, tenant_id, workspace_id, title, resource_type, source_type,
                     source_uri, source_id, status, current_version,
-                    metadata_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?)
+                    metadata_json, created_at, updated_at,
+                    visibility, owner_principal_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?)
                 """,
                 (
                     resource_id,
@@ -344,6 +384,8 @@ class KnowledgeRepository:
                     metadata_json,
                     now,
                     now,
+                    visibility,
+                    owner_principal_id,
                 ),
             )
             current_version = 0
@@ -354,6 +396,16 @@ class KnowledgeRepository:
                 raise ValueError("resource_type cannot change across versions")
             if resource_row["source_type"] != source_type:
                 raise ValueError("source_type cannot change across versions")
+            # 版本追加不得改变可见性：悄悄把共享资料改成个人私有（或反之）
+            # 就是一次可见范围变更，必须走显式调用而不是随版本写入顺带发生。
+            if (
+                resource_row["visibility"] != visibility
+                or (resource_row["owner_principal_id"] or None) != owner_principal_id
+            ):
+                raise ValueError(
+                    "visibility and owner cannot change across versions; "
+                    "use an explicit visibility update"
+                )
             current_metadata = self._decode_json(resource_row["metadata_json"], {})
             current_metadata.update(self._decode_json(metadata_json, {}))
             metadata_json = self._json(current_metadata, "metadata", mapping=True)
@@ -600,14 +652,25 @@ class KnowledgeRepository:
         workspace_id: str | None = None,
         tenant_id: str | None = None,
         proposed_by: str = "agent",
+        visibility: str = "workspace",
+        owner_principal_id: str | None = None,
     ) -> dict[str, Any]:
-        """Persist an inert ingestion proposal without creating knowledge."""
+        """Persist an inert ingestion proposal without creating knowledge.
+
+        The owner dimension is decided at proposal time and carried inside
+        `resources_json`, so confirmation writes the same visibility the user
+        saw when approving (S-2b). Deciding it later would mean the approved
+        text and the stored visibility could disagree.
+        """
         conversation_id = self._required_text(conversation_id, "conversation_id")
         turn_id = self._required_text(turn_id, "turn_id")
         idempotency_key = self._required_text(idempotency_key, "idempotency_key")
         if len(idempotency_key) > 200:
             raise ValueError("idempotency_key cannot exceed 200 characters")
         tenant_id, workspace_id = self._resolve_scope(workspace_id, tenant_id)
+        visibility, owner_principal_id = self._resolve_visibility(
+            visibility, owner_principal_id
+        )
         proposed_by = self._required_text(proposed_by, "proposed_by")
         normalized_resources = self._normalize_ingestion_resources(resources)
         request_json = self._json(normalized_resources, "resources")
@@ -674,6 +737,10 @@ class KnowledgeRepository:
                     if existing_resource
                     else 0
                 )
+                # 可见性随提案冻结：确认时按此写入，避免「批准时看到的范围」与
+                # 「入库后的范围」不一致。
+                versioned["visibility"] = visibility
+                versioned["owner_principal_id"] = owner_principal_id
                 versioned_resources.append(versioned)
 
             resources_json = self._json(versioned_resources, "versioned_resources")
@@ -879,6 +946,8 @@ class KnowledgeRepository:
                         content_hash=self._content_hash(
                             searchable_text, structured_json, mime_type
                         ),
+                        visibility=resource.get("visibility") or "workspace",
+                        owner_principal_id=resource.get("owner_principal_id"),
                         now=now,
                     )
                     ingested.append(
@@ -1307,6 +1376,8 @@ class KnowledgeRepository:
             "consolidation_status": resource_row["consolidation_status"],
             "supersedes": resource_row["supersedes"],
             "last_hit": resource_row["last_hit"],
+            "visibility": resource_row["visibility"],
+            "owner_principal_id": resource_row["owner_principal_id"],
             "version": cls._version_record(version_row),
         }
 

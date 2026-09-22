@@ -53,6 +53,62 @@ def _verify_xlsx(path: Path, expected: Mapping[str, Any]) -> dict[str, Any]:
         workbook.close()
 
 
+def _verify_xlsx_monthly(path: Path, expected: Mapping[str, Any]) -> dict[str, Any]:
+    """Verify a preserve-format monthly workbook and its processing note."""
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(path, read_only=False, data_only=True)
+    try:
+        target_month = str(expected.get("target_month") or "")
+        mode = str(expected.get("mode") or "new_items")
+        note_sheet = workbook["处理说明"] if "处理说明" in workbook.sheetnames else None
+        if note_sheet is None:
+            raise ArtifactVerificationError(
+                "monthly workbook is missing processing notes"
+            )
+        notes = {
+            str(row[0].value): row[1].value
+            for row in note_sheet.iter_rows(min_row=1, values_only=False)
+            if row and row[0].value is not None and len(row) > 1
+        }
+        if str(notes.get("目标月份") or "") != target_month:
+            raise ArtifactVerificationError("monthly target month does not match")
+        expected_mode = "截至目标月累计" if mode == "cumulative" else "目标月新增"
+        if str(notes.get("处理口径") or "") != expected_mode:
+            raise ArtifactVerificationError("monthly processing mode does not match")
+        if expected.get("source_sha256") and str(
+            notes.get("源文件 SHA-256") or ""
+        ) != str(expected["source_sha256"]):
+            raise ArtifactVerificationError("source workbook hash does not match")
+        expected_rows = expected.get("matched_rows")
+        if expected_rows is not None and int(notes.get("保留行数") or -1) != int(
+            expected_rows
+        ):
+            raise ArtifactVerificationError("monthly matched row count does not match")
+        if expected.get("headers"):
+            sheet_name = str(expected.get("sheet_name") or "")
+            if not sheet_name or sheet_name not in workbook.sheetnames:
+                raise ArtifactVerificationError("monthly data sheet is missing")
+            actual_headers = [
+                cell.value
+                for cell in workbook[sheet_name][int(expected.get("header_row", 1))]
+            ]
+            if actual_headers[: len(expected["headers"])] != list(expected["headers"]):
+                raise ArtifactVerificationError("monthly headers do not match")
+        return {
+            "status": "passed",
+            "reopened": True,
+            "content_match": True,
+            "monthly_target": target_month,
+            "mode": mode,
+            "matched_rows": int(notes.get("保留行数") or 0),
+            "uncovered_rows": int(notes.get("未覆盖行数") or 0),
+            "source_sha256": str(notes.get("源文件 SHA-256") or ""),
+        }
+    finally:
+        workbook.close()
+
+
 def _verify_docx(path: Path, expected: Mapping[str, Any]) -> dict[str, Any]:
     from docx import Document
 
@@ -146,6 +202,7 @@ def verify_artifact(
     _require_file(artifact_path)
     verifiers = {
         "xlsx": _verify_xlsx,
+        "xlsx_monthly": _verify_xlsx_monthly,
         "docx": _verify_docx,
         "pptx": _verify_pptx,
         "pdf": _verify_pdf,
