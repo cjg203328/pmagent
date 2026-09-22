@@ -160,12 +160,7 @@ class SmartTaskAllocator:
         """获取团队成员"""
         if self.memory:
             try:
-                if hasattr(self.memory, "get_all_staff"):
-                    members = self.memory.get_all_staff()
-                elif hasattr(self.memory, "list_members"):
-                    members = [member.to_dict() for member in self.memory.list_members()]
-                else:
-                    members = []
+                members = [member.to_dict() for member in self.memory.list_members()]
                 if members:
                     logger.debug(f"从数据库获取到 {len(members)} 个成员")
                 return members
@@ -226,27 +221,27 @@ class SmartTaskAllocator:
         return default_team
 
     def _calculate_current_loads(self, team_members: List[Dict]) -> Dict[str, float]:
-        """计算成员当前负载"""
-        loads = {}
+        """计算成员当前负载。
 
-        if self.memory:
-            try:
-                for member in team_members:
-                    if hasattr(self.memory, "get_member_tasks"):
-                        tasks = self.memory.get_member_tasks(member["id"])
-                        active_tasks = [
-                            task for task in tasks
-                            if getattr(task, "status", "") not in {"已完成", "已取消", "completed", "cancelled"}
-                        ]
-                        loads[member["id"]] = sum(
-                            float(getattr(task, "estimated_hours", 0) or 0)
-                            for task in active_tasks
-                        )
-                    else:
-                        loads[member["id"]] = 0
-            except Exception as e:
-                logger.warning(f"计算成员负载失败: {e}")
+        读不出来时必须让异常传播出去：把「未知」当成 0 会把新任务派给已经
+        满负荷的人，而这正是负载分析存在的理由。
+        """
+        if not self.memory:
+            return {}
 
+        loads: Dict[str, float] = {}
+        for member in team_members:
+            tasks = self.memory.get_member_tasks(member["id"])
+            active_tasks = [
+                task
+                for task in tasks
+                if getattr(task, "status", "")
+                not in {"已完成", "已取消", "completed", "cancelled"}
+            ]
+            loads[member["id"]] = sum(
+                float(getattr(task, "estimated_hours", 0) or 0)
+                for task in active_tasks
+            )
         return loads
 
     def _find_best_match(
@@ -327,13 +322,10 @@ class SmartTaskAllocator:
             if consider_history and self.memory and project_id:
                 worked_together = False
                 try:
-                    if hasattr(self.memory, "has_worked_together"):
-                        worked_together = self.memory.has_worked_together(project_id, member["id"])
-                    elif hasattr(self.memory, "get_member_tasks"):
-                        worked_together = any(
-                            str(getattr(task, "project_id", "")) == str(project_id)
-                            for task in self.memory.get_member_tasks(member["id"])
-                        )
+                    worked_together = any(
+                        str(getattr(task, "project_id", "")) == str(project_id)
+                        for task in self.memory.get_member_tasks(member["id"])
+                    )
                 except Exception as error:
                     logger.debug(f"历史合作查询失败: {error}")
                 if worked_together:

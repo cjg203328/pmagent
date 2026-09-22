@@ -25,6 +25,12 @@ from pydantic import (
 )
 
 from .generator import WorkspaceArtifactGenerator
+from .xlsx_monthly import (
+    MonthlyXlsxError,
+    is_monthly_request,
+    mode_from_prompt,
+    resolve_target_month,
+)
 from .templates import (
     SUPPORTED_DOCUMENT_TEMPLATE_EXTENSIONS,
     SUPPORTED_TEMPLATE_EXTENSIONS,
@@ -1100,6 +1106,62 @@ class ArtifactCoordinator:
         artifact = self.generator.generate_docx(plan.filename, paragraphs)
         return artifact, f"{artifact['paragraphs']} 段", "Word"
 
+    def _generate_monthly(
+        self,
+        prompt: str,
+        source: Path,
+    ) -> ArtifactCoordinationResult:
+        """Filter an uploaded workbook down to one month, keeping its formatting."""
+        try:
+            target_month = resolve_target_month(prompt, source)
+        except MonthlyXlsxError as error:
+            return ArtifactCoordinationResult(
+                matched=True,
+                rejected=True,
+                requested_format="xlsx",
+                message=f"需要确认月份：{error}",
+                error_code="monthly_month_unresolved",
+            )
+        mode = mode_from_prompt(prompt)
+        scope = "累计" if mode == "cumulative" else "仅当月"
+        try:
+            artifact = self.generator.generate_xlsx_monthly(
+                source.stem,
+                source,
+                target_month,
+                mode=mode,
+            )
+        except MonthlyXlsxError as error:
+            return ArtifactCoordinationResult(
+                matched=True,
+                rejected=True,
+                requested_format="xlsx",
+                message=f"无法按月份裁剪这份表格：{error}",
+                error_code="monthly_transform_failed",
+            )
+        except OSError as error:
+            logging.getLogger(__name__).exception(
+                "Monthly workbook artifact generation failed"
+            )
+            return ArtifactCoordinationResult(
+                matched=True,
+                rejected=True,
+                requested_format="xlsx",
+                message=f"月度汇总文件生成失败：{error}",
+                error_code="monthly_generation_failed",
+            )
+        rows = int(artifact.get("rows") or 0)
+        return ArtifactCoordinationResult(
+            matched=True,
+            rejected=False,
+            requested_format="xlsx",
+            artifact=artifact,
+            message=(
+                f"已生成 {target_month}（{scope}）汇总版："
+                f"{artifact['name']}，保留 {rows} 行。"
+            ),
+        )
+
     def process(
         self,
         prompt: str,
@@ -1155,6 +1217,16 @@ class ArtifactCoordinator:
                 target_format=target_format,
                 attachment_context=attachment_context,
             )
+
+        # A month-scoped request against an uploaded workbook is answered by
+        # copying that workbook, not by planning a new table: rebuilding would
+        # drop the formatting, merged headers and column widths the user needs.
+        # An explicit non-spreadsheet format request still wins.
+        monthly_sources = self._spreadsheet_paths(file_paths)
+        if monthly_sources and is_monthly_request(prompt):
+            named_format, _ = self._detect_format(prompt)
+            if named_format in (None, "xlsx"):
+                return self._generate_monthly(prompt, monthly_sources[0])
 
         expected_format, detection_error = self._detect_format(prompt)
         if detection_error == "ambiguous_format":

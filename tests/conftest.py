@@ -1,7 +1,17 @@
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
+
+# ``artpm_agent/app.py`` calls setup_logging() at import time, which attaches a
+# rotating FileHandler to the root logger for the whole pytest session. Fault-
+# injection tests then write real tracebacks into the operator-facing
+# ``logs/artpm.log``. Redirect the log directory before any test module is
+# imported; the per-test monkeypatch below runs too late for this.
+os.environ.setdefault(
+    "ARTPM_LOG_DIR", tempfile.mkdtemp(prefix="artpm-pytest-logs-")
+)
 
 
 @pytest.fixture(autouse=True)

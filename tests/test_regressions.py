@@ -462,6 +462,26 @@ def test_task_allocator_applies_project_history_score(tmp_path):
     assert "已有项目协作经验" in result["allocations"][0]["match_reason"]
 
 
+def test_task_allocator_does_not_treat_unreadable_load_as_zero(tmp_path):
+    """PRD §10 R-1：负载读不出来时必须失败，不能静默当成 0 继续派单。
+
+    旧实现用 `hasattr` 探测能力并在缺失时写 0，于是把新任务派给已满负荷的人。
+    """
+    database = DatabaseManager(f"sqlite:///{(tmp_path / 'business.db').as_posix()}")
+    database.create_member({"name": "成员", "skills": ["建模"]})
+
+    class LoadBlind:
+        """只暴露成员列表、不暴露任务查询，等价于旧的 memory 注入路径。"""
+
+        def list_members(self):
+            return database.list_members()
+
+    with pytest.raises(AttributeError, match="get_member_tasks"):
+        SmartTaskAllocator(LoadBlind()).allocate(
+            [{"name": "新任务", "estimated_hours": 8}]
+        )
+
+
 def test_progress_tracker_separates_projects_without_deadlines(tmp_path):
     database = DatabaseManager(f"sqlite:///{(tmp_path / 'business.db').as_posix()}")
     database.create_project(

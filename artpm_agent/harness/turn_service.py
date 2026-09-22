@@ -14,6 +14,7 @@ This keeps agent.py and pages/chat.py thin by centralizing turn logic.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from threading import RLock
@@ -40,6 +41,15 @@ from artpm_agent.runtime.turn_events import recorder_for_turn
 from artpm_agent.utils.chat_intent import is_local_fast_intent
 from artpm_agent.routing.service import IntentDecision
 from artpm_agent.tenancy.scope import Scope
+
+# PRD §4.5 意图优先级：命中执行类动词时，知识捕获 handler 让位给执行族
+# （artifact → workflow → skill），保证「生成/导出/汇总」这类请求先产出交付物。
+# 捕获 handler 自身带有「请记住/加入知识库」动词门控，因此无执行动词时保持
+# 原有顺序不变——否则技能关键词会把「记住上次的报价要加管理费」这类捕获意图劫走。
+_EXECUTION_INTENT = re.compile(
+    r"(?:生成|创建|制作|导出|整理|汇总|裁剪|排期|派单|派给|催办|发送|投递|"
+    r"归档|对比|核算|测算|计算|周报|月报|纪要|台账)"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -435,11 +445,16 @@ def _run_turn_core(
             if isinstance(attachment, Mapping)
         ]
 
-    knowledge_result = try_knowledge_ingestion(
-        ctx, knowledge_store, request_conversation_id, attachments, file_paths
-    )
-    if knowledge_result is not None:
-        return knowledge_result
+    # PRD §4.5：执行类请求先交给执行族（artifact → workflow → skill），
+    # 捕获 handler 只在没有执行动词时先行。
+    execution_intent = bool(_EXECUTION_INTENT.search(ctx.user_input or ""))
+
+    if not execution_intent:
+        knowledge_result = try_knowledge_ingestion(
+            ctx, knowledge_store, request_conversation_id, attachments, file_paths
+        )
+        if knowledge_result is not None:
+            return knowledge_result
 
     # All later handlers consume this one parser snapshot. Knowledge ingestion
     # intentionally stays before it because ingestion has its own durable
@@ -447,14 +462,15 @@ def _run_turn_core(
     _prepare_turn_attachments(ctx)
 
     # Handler 3: Explicit Workspace knowledge-rule proposal
-    knowledge_rule_result = try_knowledge_rule_proposal(
-        ctx,
-        knowledge_store,
-        request_conversation_id,
-        knowledge_rule_extractor,
-    )
-    if knowledge_rule_result is not None:
-        return knowledge_rule_result
+    if not execution_intent:
+        knowledge_rule_result = try_knowledge_rule_proposal(
+            ctx,
+            knowledge_store,
+            request_conversation_id,
+            knowledge_rule_extractor,
+        )
+        if knowledge_rule_result is not None:
+            return knowledge_rule_result
 
     # Handler 4: Artifact generation
     artifact_result = try_artifact_generation(
