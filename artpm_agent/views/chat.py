@@ -3,10 +3,13 @@
 
 from collections.abc import Mapping
 from html import escape
+import logging
 import sys
 import re
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # 确保项目根目录在 Python 路径中（页面被 Streamlit 直接作为脚本运行时也能找到包）
 # 注意：必须先 resolve(__file__) 为绝对路径再取 parent，否则 __file__ 为相对路径时
@@ -59,7 +62,9 @@ from artpm_agent.views.chat_model_selector import (
     apply_model_override_to_agent,
 )
 from artpm_agent.views.chat_execution import HarnessTurnServices, execute_chat_turn
-from artpm_agent.views.chat_feedback import render_turn_feedback as render_feedback_control
+from artpm_agent.views.chat_feedback import (
+    render_turn_feedback as render_feedback_control,
+)
 from artpm_agent.views.chat_message_rendering import render_completed_message
 from artpm_agent.views.chat_turn import queue_suggested_prompt
 from artpm_agent.views.chat_welcome import (
@@ -943,9 +948,8 @@ def chat_page():
                                     consolidation_scheduler=get_consolidation_scheduler(),
                                 ),
                             )
-                            if (
-                                harness_result is not None
-                                and not getattr(harness_result, "success", True)
+                            if harness_result is not None and not getattr(
+                                harness_result, "success", True
                             ):
                                 error_kind = str(
                                     getattr(harness_result, "metadata", {}).get(
@@ -1432,6 +1436,29 @@ def _render_turn_feedback(msg: dict, index: int, active_id) -> None:
     )
 
 
+def _release_edit_temp_file() -> None:
+    """Delete the uploaded document's temp copy and drop its session key.
+
+    `_render_edit_mode` writes the upload to a `NamedTemporaryFile(delete=False)`
+    so `EditableDocument.load` can read it by path. `EditableDocument` keeps the
+    parsed content in memory (`_original_bytes` / `sheets` / `blocks`) and
+    `to_bytes()` never touches `self.path` again, so the file is dead weight
+    after load — and nothing else in the tree removes it, which leaks one file
+    per upload for the life of the OS temp dir.
+
+    Best effort by design: a failure here must not break leaving edit mode.
+    """
+    path = st.session_state.pop("edit_tmp_path", None)
+    if not path:
+        return
+    try:
+        Path(path).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        logger.warning("编辑模式临时文件未能删除: %s (%s)", path, error)
+
+
 def _render_edit_mode():
     from artpm_agent.editing import (
         EditableDocument,
@@ -1468,6 +1495,7 @@ def _render_edit_mode():
         if st.button(
             "退出", key="exit_edit_mode", icon=":material/close:", width="stretch"
         ):
+            _release_edit_temp_file()
             st.session_state.edit_mode = False
             st.rerun()
 
@@ -1482,6 +1510,8 @@ def _render_edit_mode():
             st.session_state.get("edit_doc") is None
             or st.session_state.get("edit_uploaded_name") != uploaded.name
         ):
+            # 换文件时先释放上一份临时副本：同一 session 反复上传会各留一个文件。
+            _release_edit_temp_file()
             suffix = Path(uploaded.name).suffix
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
             tmp.write(uploaded.getbuffer())
@@ -1749,8 +1779,10 @@ def _render_edit_mode():
 
 def _render_welcome_suggestions():
     """渲染欢迎页快捷建议芯片。"""
+
     def enter_edit_mode() -> None:
         st.session_state.edit_mode = True
+        _release_edit_temp_file()
         st.session_state.pop("edit_doc", None)
         st.session_state.pop("edit_last_result", None)
 

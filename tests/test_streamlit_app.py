@@ -199,11 +199,108 @@ def test_sidebar_restore_control_is_not_hidden_with_header():
     assert "background: transparent" in STYLE_CSS
 
 
+def test_workbench_renders_three_columns_without_exception():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+
+    app.pills(key="sidebar_nav_pills").set_value("工作台").run(timeout=30)
+
+    assert not app.exception
+    captions = [str(item.value) for item in app.caption]
+    assert "① 任务" in captions
+    assert "② 过程" in captions
+    assert "③ 成果" in captions
+
+
+def test_workbench_runs_weekly_skill_with_trusted_tenant_and_profile(monkeypatch):
+    from artpm_agent.artifacts.generator import WorkspaceArtifactGenerator
+    from artpm_agent.tenancy import TenantContext
+    from artpm_agent.views import workbench
+
+    tenant = TenantContext(
+        tenant_id="tenant-workbench",
+        workspace_id="workspace-workbench",
+        principal_id="user-workbench",
+    )
+    generator = WorkspaceArtifactGenerator("artifacts/workbench-profile")
+    captured = {}
+
+    class RecordingRouter:
+        def __init__(self, context):
+            captured["context"] = context
+
+        def for_tenant(self, context):
+            captured["tenant_context"] = context
+            return self
+
+        def execute_skill(self, skill_name, inputs):
+            captured["skill_name"] = skill_name
+            captured["inputs"] = inputs
+            return {"success": True, "summary": "周报已生成"}
+
+    class RuntimeFactory:
+        storage = SimpleNamespace(business=object())
+
+    monkeypatch.setattr(workbench, "Config", None)
+    monkeypatch.setattr(workbench, "get_ui_runtime_factory", RuntimeFactory)
+    monkeypatch.setattr(workbench, "_trusted_ui_tenant_context", lambda: tenant)
+    monkeypatch.setattr(
+        workbench, "_active_ui_profile_id", lambda _tenant: "profile-workbench"
+    )
+    monkeypatch.setattr(workbench, "get_artifact_generator", lambda: generator)
+    monkeypatch.setattr("artpm_agent.skills.skill_router.SkillRouter", RecordingRouter)
+
+    workbench._run_office_skill({"id": 12})
+
+    assert workbench.st.session_state[workbench._NOTICE_KEY] == {
+        "kind": "success",
+        "message": "周报已生成",
+    }
+    assert captured["context"]["tenant_context"] is tenant
+    assert captured["context"]["profile_id"] == "profile-workbench"
+    assert captured["context"]["artifact_generator"] is generator
+    assert captured["tenant_context"] is tenant
+    assert captured["skill_name"] == "weekly_report"
+    assert captured["inputs"] == {"trigger": "manual", "job_id": 12}
+
+
+def test_job_service_cache_rebinds_when_ui_scope_changes(monkeypatch):
+    import streamlit as st
+
+    from artpm_agent import ui_state
+    from artpm_agent.tenancy import TenantContext
+
+    tenant_a = TenantContext(tenant_id="tenant-a", workspace_id="workspace-a")
+    tenant_b = TenantContext(tenant_id="tenant-b", workspace_id="workspace-b")
+    created = []
+
+    class RecordingJobService:
+        def __init__(self, database, tenant_context):
+            created.append((database, tenant_context))
+
+    class RuntimeFactory:
+        storage = SimpleNamespace(business=object())
+
+    monkeypatch.setattr("artpm_agent.jobs.JobService", RecordingJobService)
+    monkeypatch.setattr(ui_state, "get_ui_runtime_factory", RuntimeFactory)
+    monkeypatch.setattr(ui_state, "_trusted_ui_tenant_context", lambda: tenant_a)
+    st.session_state.pop("job_service", None)
+    st.session_state.pop("job_service_scope", None)
+
+    first = ui_state.get_job_service()
+    second = ui_state.get_job_service()
+    monkeypatch.setattr(ui_state, "_trusted_ui_tenant_context", lambda: tenant_b)
+    third = ui_state.get_job_service()
+
+    assert first is second
+    assert third is not first
+    assert [context for _database, context in created] == [tenant_a, tenant_b]
+
+
 def test_sidebar_pills_expose_exactly_the_three_views():
     app = AppTest.from_file(APP_FILE).run(timeout=30)
 
     nav = app.pills(key="sidebar_nav_pills")
-    assert set(nav.options) == {"对话", "设置", "可观测"}
+    assert set(nav.options) == {"工作台", "对话", "设置", "可观测"}
 
     # legacy multi-section button nav must be gone
     legacy_keys = {button.key for button in app.button if button.key.startswith("nav_")}
@@ -464,9 +561,7 @@ def test_streamlit_wiki_publish_projects_into_workspace_rag():
     app.pills(key="sidebar_nav_pills").set_value("设置").run(timeout=30)
     token = f"wiki-rag-{uuid4().hex}"
 
-    app.text_input(key="wiki_title_new").set_value("项目 Wiki 规范").run(
-        timeout=30
-    )
+    app.text_input(key="wiki_title_new").set_value("项目 Wiki 规范").run(timeout=30)
     app.text_area(key="wiki_markdown_new").set_value(
         f"发布后必须能够检索到 {token}。"
     ).run(timeout=30)
@@ -478,8 +573,7 @@ def test_streamlit_wiki_publish_projects_into_workspace_rag():
     page = next(
         page
         for page in wiki_store.list_pages(workspace_id="local-default")
-        if page["title"] == "项目 Wiki 规范"
-        and page["sync"]["status"] == "synced"
+        if page["title"] == "项目 Wiki 规范" and page["sync"]["status"] == "synced"
     )
     assert knowledge_store.search(token, workspace_id="local-default")
 

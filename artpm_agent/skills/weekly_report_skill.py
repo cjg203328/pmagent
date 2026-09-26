@@ -11,7 +11,14 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-from artpm_agent.jobs import JobService
+from artpm_agent.jobs import (
+    DRAFT,
+    FAILED,
+    QUEUED,
+    RUNNING,
+    JobNotFoundError,
+    JobService,
+)
 
 from .base_skill import BaseSkill
 from .input_schemas import BUILTIN_SKILL_INPUT_SCHEMAS
@@ -68,7 +75,11 @@ def _build_sections(
         done = status in _DONE
         name = str(getattr(task, "task_name", "") or f"任务{getattr(task, 'id', '?')}")
         assignee = getattr(task, "assignee_id", None)
-        owner = member_names.get(assignee, "未分配") if isinstance(assignee, int) else "未分配"
+        owner = (
+            member_names.get(assignee, "未分配")
+            if isinstance(assignee, int)
+            else "未分配"
+        )
         row = {
             "name": name,
             "owner": owner,
@@ -84,42 +95,88 @@ def _build_sections(
             if due is not None and _in_window(due, today - timedelta(days=30), 30):
                 due_date = due.date() if isinstance(due, datetime) else due
                 if due_date < today:
-                    risks.append({**row, "due": due_date.isoformat(), "overdue_days": (today - due_date).days})
-                elif due_date <= today + timedelta(days=7) and (getattr(task, "progress", 0) or 0) < 60:
-                    risks.append({**row, "due": due_date.isoformat(), "overdue_days": 0})
+                    risks.append(
+                        {
+                            **row,
+                            "due": due_date.isoformat(),
+                            "overdue_days": (today - due_date).days,
+                        }
+                    )
+                elif (
+                    due_date <= today + timedelta(days=7)
+                    and (getattr(task, "progress", 0) or 0) < 60
+                ):
+                    risks.append(
+                        {**row, "due": due_date.isoformat(), "overdue_days": 0}
+                    )
             if _in_window(due, today + timedelta(days=7), 7):
                 next_week.append(row)
     return {"progress": progress, "risks": risks, "next_week": next_week}
 
 
-def _paragraphs(sections: dict[str, list[dict[str, Any]]], week_start: date) -> list[dict[str, Any]]:
+def _paragraphs(
+    sections: dict[str, list[dict[str, Any]]], week_start: date
+) -> list[dict[str, Any]]:
     def heading(text: str) -> dict[str, Any]:
-        return {"text": text, "kind": "heading", "level": 2, "bold": False, "italic": False}
+        return {
+            "text": text,
+            "kind": "heading",
+            "level": 2,
+            "bold": False,
+            "italic": False,
+        }
 
     def bullet(text: str) -> dict[str, Any]:
-        return {"text": text, "kind": "bullet", "level": 1, "bold": False, "italic": False}
+        return {
+            "text": text,
+            "kind": "bullet",
+            "level": 1,
+            "bold": False,
+            "italic": False,
+        }
 
     out: list[dict[str, Any]] = [
-        {"text": f"周报（{week_start.isoformat()} 起）", "kind": "heading", "level": 1,
-         "bold": False, "italic": False},
+        {
+            "text": f"周报（{week_start.isoformat()} 起）",
+            "kind": "heading",
+            "level": 1,
+            "bold": False,
+            "italic": False,
+        },
         heading("一、本周进展"),
     ]
     if sections["progress"]:
         for row in sections["progress"]:
-            out.append(bullet(f"{row['name']}（{row['owner']}）：{row['status']}，进度 {row['progress']}%"))
+            out.append(
+                bullet(
+                    f"{row['name']}（{row['owner']}）：{row['status']}，进度 {row['progress']}%"
+                )
+            )
     else:
         out.append(bullet("本周没有完成或推进中的任务记录。"))
     out.append(heading("二、风险与阻塞"))
     if sections["risks"]:
         for row in sections["risks"]:
-            extra = f"，已逾期 {row['overdue_days']} 天" if row["overdue_days"] else "，7 天内到期"
-            out.append(bullet(f"{row['name']}（{row['owner']}）：截止 {row['due']}{extra}，进度 {row['progress']}%"))
+            extra = (
+                f"，已逾期 {row['overdue_days']} 天"
+                if row["overdue_days"]
+                else "，7 天内到期"
+            )
+            out.append(
+                bullet(
+                    f"{row['name']}（{row['owner']}）：截止 {row['due']}{extra}，进度 {row['progress']}%"
+                )
+            )
     else:
         out.append(bullet("未发现逾期或临期低风险任务。"))
     out.append(heading("三、下周计划"))
     if sections["next_week"]:
         for row in sections["next_week"]:
-            out.append(bullet(f"{row['name']}（{row['owner']}）：当前 {row['status']}，进度 {row['progress']}%"))
+            out.append(
+                bullet(
+                    f"{row['name']}（{row['owner']}）：当前 {row['status']}，进度 {row['progress']}%"
+                )
+            )
     else:
         out.append(bullet("下周暂无到期任务。"))
     return out
@@ -133,6 +190,9 @@ def _resolve_generator(context: Optional[dict[str, Any]], inputs: dict[str, Any]
     """
     if not context:
         return None
+    generator = context.get("artifact_generator")
+    if generator is not None:
+        return generator
     config = context.get("config") or {}
     data_root = str(config.get("data_root") or "data")
     root = (
@@ -140,7 +200,7 @@ def _resolve_generator(context: Optional[dict[str, Any]], inputs: dict[str, Any]
         / "artifacts"
         / str(inputs.get("tenant_id") or "local")
         / str(inputs.get("workspace_id") or "local-default")
-        / str(inputs.get("profile_id") or "local-default")
+        / str(inputs.get("profile_id") or context.get("profile_id") or "local-default")
     )
     try:
         from artpm_agent.artifacts.generator import WorkspaceArtifactGenerator
@@ -148,6 +208,38 @@ def _resolve_generator(context: Optional[dict[str, Any]], inputs: dict[str, Any]
         return WorkspaceArtifactGenerator(root)
     except Exception:
         return None
+
+
+def _resolve_job(
+    jobs: JobService, inputs: dict[str, Any], *, job_name: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Resolve an optional existing workbench Job without silently misrouting output."""
+    raw_job_id = inputs.get("job_id")
+    if raw_job_id in (None, ""):
+        return jobs.create(
+            job_name,
+            job_type="office_weekly",
+            trigger=str(inputs.get("trigger") or "manual"),
+            inputs={"week_start": inputs.get("week_start")},
+            status=RUNNING,
+        ), None
+    if isinstance(raw_job_id, bool) or not (
+        isinstance(raw_job_id, int)
+        or (isinstance(raw_job_id, str) and raw_job_id.strip().isdigit())
+    ):
+        return None, "job_id 必须是正整数"
+    job_id = int(raw_job_id)
+    if job_id < 1:
+        return None, "job_id 必须是正整数"
+    try:
+        job = jobs.get(job_id)
+    except JobNotFoundError:
+        return None, f"Job {job_id} 不存在"
+    if job.get("job_type") != "office_weekly":
+        return None, f"Job {job_id} 不是周报任务，不能执行周报技能"
+    if job.get("status") not in {DRAFT, QUEUED, FAILED}:
+        return None, f"Job {job_id} 当前状态为 {job.get('status')}，不能重复执行"
+    return job, None
 
 
 class WeeklyReportSkill(BaseSkill):
@@ -190,16 +282,20 @@ class WeeklyReportSkill(BaseSkill):
             f"风险 {counts['risks']} 项、下周 {counts['next_week']} 项。"
         )
 
-        # Job 是导航对象（PRD §4）：先登记为 running，交付物挂在它名下，
-        # 成功后转 succeeded。生成失败则转 failed，不留"有文件无任务"的半状态。
+        # Job 是导航对象（PRD §4）：对话触发时新建 Job，工作台触发时复用选中的
+        # Job；交付物始终挂在同一 Job 名下，不留"有文件无任务"的半状态。
         jobs = JobService(database)
-        job = jobs.create(
-            f"周报-{week_start.isoformat()}",
-            job_type="office_weekly",
-            trigger=str(inputs.get("trigger") or "manual"),
-            inputs={"week_start": week_start.isoformat(), "counts": counts},
-            status="running",
+        job, job_error = _resolve_job(
+            jobs,
+            inputs,
+            job_name=f"周报-{week_start.isoformat()}",
         )
+        if job_error:
+            return {"success": False, "error": job_error}
+        assert job is not None
+        if job["status"] in {DRAFT, FAILED}:
+            jobs.transition(job["id"], QUEUED)
+        jobs.transition(job["id"], RUNNING)
         artifacts: list[dict[str, Any]] = []
         try:
             generator = _resolve_generator(self.context, inputs)

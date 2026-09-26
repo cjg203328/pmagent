@@ -22,6 +22,7 @@ from artpm_agent.ui_asset_recovery import install_frontend_recovery_guard
 from artpm_agent.views.chat import chat_page
 from artpm_agent.views.settings import settings_page
 from artpm_agent.views.observability import observability_page
+from artpm_agent.views.workbench import workbench_page
 # 向后兼容：拆分前 persist_settings 直接挂在 app 模块上，用户 WIP 代码/测试仍按 app.persist_settings 调用。
 from artpm_agent.views.settings import persist_settings  # noqa: F401
 
@@ -64,6 +65,8 @@ def main():
         settings_page()
     elif view == "可观测":
         observability_page()
+    elif view == "工作台":
+        workbench_page()
     else:
         chat_page()
 

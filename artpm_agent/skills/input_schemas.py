@@ -268,6 +268,8 @@ COST_CONTROL_INPUT_SCHEMA = _object(
 WEEKLY_REPORT_INPUT_SCHEMA = _object(
     {
         "week_start": {"type": "string", "minLength": 1},
+        "job_id": {"type": "integer", "minimum": 1},
+        "trigger": {"type": "string", "enum": ["manual", "scheduled", "from_message"]},
     }
 )
 

@@ -27,6 +27,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, cast
 from sqlalchemy import func
 
 from artpm_agent.database.models import DatabaseManager, Job, JobArtifact
+from artpm_agent.tenancy import TenantContext
 
 DRAFT = "draft"
 QUEUED = "queued"
@@ -118,14 +119,21 @@ class JobService:
     直接构造 ORM 对象并写库会绕过状态机与版本追加规则，因此不提供第二套写法。
     """
 
-    def __init__(self, database: DatabaseManager):
+    def __init__(
+        self,
+        database: DatabaseManager,
+        tenant_context: Optional[TenantContext] = None,
+    ):
         self.db = database
+        if tenant_context is not None and not isinstance(tenant_context, TenantContext):
+            raise JobError("tenant_context must be a server-created TenantContext")
+        self.tenant_context = tenant_context
 
     # ── 会话 ──
     def _session(self):
         if self.db is None:
             raise JobError("数据库不可用，无法操作 Job")
-        return self.db.get_session()
+        return self.db.get_session(self.tenant_context)
 
     # ── 建 ──
     def create(

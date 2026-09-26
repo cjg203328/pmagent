@@ -27,6 +27,7 @@ from artpm_agent.jobs import (
     WAITING,
     can_transition,
 )
+from artpm_agent.tenancy import TenantContext
 
 
 @pytest.fixture()
@@ -50,6 +51,26 @@ def test_job_can_be_created_without_conversation(service):
     assert job["workflow_run_id"] is None
     assert job["status"] == DRAFT
     assert job["trigger"] == "manual"
+
+
+def test_job_service_explicit_tenant_context_isolates_jobs(tmp_path: Path):
+    db = DatabaseManager(f"sqlite:///{tmp_path / 'scoped-jobs.db'}")
+    tenant_a = TenantContext(tenant_id="tenant-a", workspace_id="workspace-a")
+    tenant_b = TenantContext(tenant_id="tenant-b", workspace_id="workspace-b")
+    try:
+        service_a = JobService(db, tenant_a)
+        service_b = JobService(db, tenant_b)
+        job_a = service_a.create("租户 A 任务", job_type="office_weekly")
+        job_b = service_b.create("租户 B 任务", job_type="office_weekly")
+
+        assert [job["id"] for job in service_a.list()] == [job_a["id"]]
+        assert [job["id"] for job in service_b.list()] == [job_b["id"]]
+        with pytest.raises(JobNotFoundError):
+            service_a.get(job_b["id"])
+        with pytest.raises(JobNotFoundError):
+            service_b.get(job_a["id"])
+    finally:
+        db.close()
 
 
 def test_scheduled_job_runs_to_completion_without_any_dialogue(service):

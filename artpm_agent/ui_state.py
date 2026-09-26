@@ -8,6 +8,7 @@ UI 共享状态层 — 导入、常量、lazy getter、可用性标志。
 可用性标志在导入期就地确定：每个可选运行时各自 try/except，失败时把
 对应符号降级为 None 并留下日志，UI 侧据此进入离线降级路径。
 """
+
 import sys
 from importlib.util import find_spec
 from pathlib import Path
@@ -24,7 +25,7 @@ from artpm_agent.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # ── 导航常量 ──
-_NAV_OPTIONS = ("对话", "设置", "可观测")
+_NAV_OPTIONS = ("工作台", "对话", "设置", "可观测")
 _NAV_WIDGET_KEY = "sidebar_nav_pills"
 _NAV_EVENT_KEY = "_sidebar_nav_event"
 
@@ -190,6 +191,7 @@ EMPTY_STATS: dict = {
 def _queue_sidebar_navigation() -> None:
     """Capture only an explicit pills interaction for the next script run."""
     import streamlit as st
+
     selected = st.session_state.get(_NAV_WIDGET_KEY)
     if selected in _NAV_OPTIONS:
         st.session_state[_NAV_EVENT_KEY] = selected
@@ -198,6 +200,7 @@ def _queue_sidebar_navigation() -> None:
 # ── 懒加载 session state getter ──
 def get_conversation_store():
     import streamlit as st
+
     return st.session_state.get("conversation_store")
 
 
@@ -278,6 +281,7 @@ def get_consolidation_scheduler():
 
 def get_chat_attachment_store():
     import streamlit as st
+
     return st.session_state.get("chat_attachment_store")
 
 
@@ -358,28 +362,58 @@ class _UnavailableArtifactPlanner:
         raise RuntimeError("模型服务暂时不可用")
 
 
+def get_job_service():
+    """Job 编排层（PRD §4）。不可用时返回 None，由页面决定如何降级。"""
+
+    import streamlit as st
+    from artpm_agent.jobs import JobService
+
+    tenant_context = _trusted_ui_tenant_context()
+    if tenant_context is None:
+        return None
+    scope_key = (tenant_context.tenant_id, tenant_context.workspace_id)
+    cached = st.session_state.get("job_service")
+    if cached is None or st.session_state.get("job_service_scope") != scope_key:
+        try:
+            cached = JobService(
+                get_ui_runtime_factory().storage.business,
+                tenant_context,
+            )
+        except Exception as error:  # pragma: no cover - optional UI degradation
+            logger.warning("Job service unavailable: %s", error)
+            return None
+        st.session_state.job_service = cached
+        st.session_state.job_service_scope = scope_key
+    return cached
+
+
 def get_workflow_store():
     import streamlit as st
+
     return st.session_state.get("workflow_store")
 
 
 def get_profile_store():
     import streamlit as st
+
     return st.session_state.get("profile_store")
 
 
 def get_knowledge_store():
     import streamlit as st
+
     return st.session_state.get("knowledge_store")
 
 
 def get_wiki_store():
     import streamlit as st
+
     return st.session_state.get("wiki_store")
 
 
 def get_permission_store():
     import streamlit as st
+
     return st.session_state.get("permission_store")
 
 
@@ -417,7 +451,10 @@ _RUNTIME_COMPONENT_LABELS = {
 
 def record_runtime_init_failure(component: str, error: Exception) -> None:
     import streamlit as st
+
     failures = dict(st.session_state.get("runtime_init_errors", {}))
     failures[component] = _RUNTIME_COMPONENT_LABELS.get(component, component)
     st.session_state.runtime_init_errors = failures
-    logger.exception("Runtime component initialization failed: %s: %s", component, error)
+    logger.exception(
+        "Runtime component initialization failed: %s: %s", component, error
+    )

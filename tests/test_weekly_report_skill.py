@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any, Mapping
 
+import pytest
+
 from artpm_agent.database.models import DatabaseManager
 from artpm_agent.harness import (
     BaseHarnessRuntime,
@@ -106,7 +108,9 @@ class _WeeklyRuntime(BaseHarnessRuntime):
     ) -> Mapping[str, Any]:
         return {}
 
-    def execute_skill(self, intent: str, inputs: Mapping[str, Any]) -> Mapping[str, Any]:
+    def execute_skill(
+        self, intent: str, inputs: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
         return self._router.execute_skill(intent, dict(inputs))
 
     def format_skill_result(self, skill_name: str, result: Mapping[str, Any]) -> str:
@@ -134,18 +138,149 @@ def test_skill_builds_sections_from_real_tasks(tmp_path):
     assert "麦迪高模" in names
     risks = {row["name"] for row in result["sections"]["risks"]}
     assert "艾弗森贴图" in risks
-    assert next(row for row in result["sections"]["risks"] if row["name"] == "艾弗森贴图")[
-        "overdue_days"
-    ] == 2
+    assert (
+        next(row for row in result["sections"]["risks"] if row["name"] == "艾弗森贴图")[
+            "overdue_days"
+        ]
+        == 2
+    )
     assert {row["name"] for row in result["sections"]["next_week"]} == {"场景白模"}
+
+
+def test_skill_reuses_workbench_job_and_attaches_report_to_it(tmp_path):
+    from artpm_agent.jobs import JobService
+
+    database = _database_with_week(tmp_path)
+    jobs = JobService(database)
+    selected = jobs.create("选中的周报", job_type="office_weekly")
+    skill = WeeklyReportSkill(
+        {"database": database, "config": {"data_root": str(tmp_path)}}
+    )
+
+    result = skill.execute({"job_id": selected["id"]})
+
+    assert result["success"] is True
+    assert result["job_id"] == selected["id"]
+    assert len(jobs.list()) == 1
+    persisted = jobs.get(selected["id"])
+    assert persisted["status"] == "succeeded"
+    assert len(persisted["artifacts"]) == 1
+    assert persisted["artifacts"][0]["verification_status"] == "passed"
+
+
+def test_router_accepts_workbench_trigger_and_reuses_selected_job(tmp_path):
+    from artpm_agent.jobs import JobService
+
+    database = _database_with_week(tmp_path)
+    selected = JobService(database).create("路由周报", job_type="office_weekly")
+    router = SkillRouter({"database": database, "config": {"data_root": str(tmp_path)}})
+
+    result = router.execute_skill(
+        "weekly_report", {"trigger": "manual", "job_id": selected["id"]}
+    )
+
+    assert result["success"] is True
+    assert result["job_id"] == selected["id"]
+    assert len(JobService(database).list()) == 1
+
+
+def test_tenant_bound_router_uses_injected_profile_scoped_artifact_generator(tmp_path):
+    from artpm_agent.artifacts.generator import WorkspaceArtifactGenerator
+    from artpm_agent.jobs import JobService
+    from artpm_agent.tenancy import TenantContext
+
+    database = _database_with_week(tmp_path)
+    selected = JobService(database).create("租户周报", job_type="office_weekly")
+    tenant = TenantContext(
+        tenant_id="local",
+        workspace_id="local-default",
+        principal_id="local-user",
+    )
+    artifact_root = tmp_path / "tenant-artifacts" / "custom-profile"
+    generator = WorkspaceArtifactGenerator(artifact_root)
+    router = SkillRouter(
+        {
+            "database": database,
+            "config": {"data_root": str(tmp_path / "fallback")},
+            "tenant_context": tenant,
+            "profile_id": "custom-profile",
+            "artifact_generator": generator,
+        }
+    )
+
+    result = router.for_tenant(tenant).execute_skill(
+        "weekly_report", {"trigger": "manual", "job_id": selected["id"]}
+    )
+
+    assert result["success"] is True
+    assert len(result["artifacts"]) == 1
+    artifact = result["artifacts"][0]
+    assert (artifact_root / artifact["stored_path"]).is_file()
+    assert not (tmp_path / "fallback").exists()
+    assert JobService(database).get(selected["id"])["status"] == "succeeded"
+
+
+def test_skill_retries_failed_workbench_job_without_creating_another(tmp_path):
+    from artpm_agent.jobs import FAILED, JobService
+
+    database = _database_with_week(tmp_path)
+    jobs = JobService(database)
+    selected = jobs.create("重试周报", job_type="office_weekly", status=FAILED)
+    skill = WeeklyReportSkill(
+        {"database": database, "config": {"data_root": str(tmp_path)}}
+    )
+
+    result = skill.execute({"job_id": selected["id"]})
+
+    assert result["success"] is True
+    assert result["job_id"] == selected["id"]
+    assert jobs.get(selected["id"])["status"] == "succeeded"
+    assert len(jobs.list()) == 1
+
+
+@pytest.mark.parametrize(
+    ("job_type", "status", "expected_error"),
+    [
+        ("manual", "draft", "不是周报任务"),
+        ("office_weekly", "succeeded", "不能重复执行"),
+    ],
+)
+def test_skill_rejects_incompatible_workbench_job(
+    tmp_path, job_type, status, expected_error
+):
+    from artpm_agent.jobs import JobService
+
+    database = _database_with_week(tmp_path)
+    jobs = JobService(database)
+    selected = jobs.create("不可执行任务", job_type=job_type, status=status)
+    skill = WeeklyReportSkill({"database": database, "config": {}})
+
+    result = skill.execute({"job_id": selected["id"]})
+
+    assert result["success"] is False
+    assert expected_error in result["error"]
+    assert len(jobs.list()) == 1
+    assert jobs.get(selected["id"])["status"] == status
+
+
+@pytest.mark.parametrize("job_id", [True, 0, -1, 1.5, "1.5", "bad"])
+def test_skill_rejects_invalid_job_id_without_creating_job(tmp_path, job_id):
+    from artpm_agent.jobs import JobService
+
+    database = _database_with_week(tmp_path)
+    skill = WeeklyReportSkill({"database": database, "config": {}})
+
+    result = skill.execute({"job_id": job_id})
+
+    assert result["success"] is False
+    assert "job_id 必须是正整数" in result["error"]
+    assert JobService(database).list() == []
 
 
 def test_run_turn_delivers_a_verified_weekly_docx(tmp_path):
     """端到端：请求必须产出可下载且核验通过的 .docx，而不是聊天文本。"""
     database = _database_with_week(tmp_path)
-    router = SkillRouter(
-        {"database": database, "config": {"data_root": str(tmp_path)}}
-    )
+    router = SkillRouter({"database": database, "config": {"data_root": str(tmp_path)}})
     context = TurnContext(
         turn_id="turn-weekly",
         conversation_id="conv-weekly",
