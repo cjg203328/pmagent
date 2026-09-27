@@ -25,7 +25,8 @@ from artpm_agent.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # ── 导航常量 ──
-_NAV_OPTIONS = ("工作台", "对话", "设置", "可观测")
+# 工作台已从导航移除（保留 views/workbench.py 与 app.py 分支以便回退）。
+_NAV_OPTIONS = ("对话", "设置", "可观测")
 _NAV_WIDGET_KEY = "sidebar_nav_pills"
 _NAV_EVENT_KEY = "_sidebar_nav_event"
 
@@ -384,6 +385,23 @@ def get_job_service():
             return None
         st.session_state.job_service = cached
         st.session_state.job_service_scope = scope_key
+    return cached
+
+
+def get_plan_coordinator():
+    """计划模式协调器。不可用时返回 None，由页面决定如何降级。"""
+
+    import streamlit as st
+
+    cached = st.session_state.get("plan_coordinator")
+    if cached is not None:
+        return cached
+    try:
+        cached = get_ui_runtime_factory().storage.plans
+    except Exception as error:  # pragma: no cover - optional UI degradation
+        logger.warning("Plan coordinator unavailable: %s", error)
+        return None
+    st.session_state.plan_coordinator = cached
     return cached
 
 

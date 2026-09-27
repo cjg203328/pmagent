@@ -27,6 +27,23 @@ MAX_TITLE_CHARS = 200
 MAX_STEPS = 64
 
 
+def default_plan_store_path() -> Path:
+    """Resolve the shared plans file under the active data root.
+
+    Mirrors ``default_episode_db_path`` so plans relocate together with the
+    knowledge base and caches instead of landing next to the source tree.
+    """
+
+    import os
+
+    configured = os.environ.get("ARTPM_PLAN_STORE_PATH")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    from artpm_agent.config import resolve_data_root
+
+    return (resolve_data_root() / PLAN_FILENAME).resolve()
+
+
 class PlanStatus(str, Enum):
     DRAFT = "draft"
     PROPOSED = "proposed"
@@ -116,9 +133,7 @@ class Plan:
         if not isinstance(self.steps, tuple):
             object.__setattr__(self, "steps", tuple(self.steps))
         if not isinstance(self.confirmed_steps, tuple):
-            object.__setattr__(
-                self, "confirmed_steps", tuple(self.confirmed_steps)
-            )
+            object.__setattr__(self, "confirmed_steps", tuple(self.confirmed_steps))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -278,41 +293,47 @@ class PlanCoordinator:
 
     def propose(self, plan_id: str) -> Plan:
         plan = self._require(plan_id, PlanStatus.DRAFT)
-        return self._save(Plan(
-            plan_id=plan.plan_id,
-            title=plan.title,
-            objective=plan.objective,
-            status=PlanStatus.PROPOSED,
-            steps=plan.steps,
-            feedback="",
-            confirmed_steps=(),
-            created_at=plan.created_at,
-        ))
+        return self._save(
+            Plan(
+                plan_id=plan.plan_id,
+                title=plan.title,
+                objective=plan.objective,
+                status=PlanStatus.PROPOSED,
+                steps=plan.steps,
+                feedback="",
+                confirmed_steps=(),
+                created_at=plan.created_at,
+            )
+        )
 
     def approve(self, plan_id: str) -> Plan:
         plan = self._require(plan_id, PlanStatus.PROPOSED)
-        return self._save(Plan(
-            plan_id=plan.plan_id,
-            title=plan.title,
-            objective=plan.objective,
-            status=PlanStatus.APPROVED,
-            steps=plan.steps,
-            created_at=plan.created_at,
-        ))
+        return self._save(
+            Plan(
+                plan_id=plan.plan_id,
+                title=plan.title,
+                objective=plan.objective,
+                status=PlanStatus.APPROVED,
+                steps=plan.steps,
+                created_at=plan.created_at,
+            )
+        )
 
     def reject(self, plan_id: str, feedback: str) -> Plan:
         plan = self._require(plan_id, PlanStatus.PROPOSED)
         if not isinstance(feedback, str) or not feedback.strip():
             raise PlanError("rejection feedback must be a non-empty string")
-        return self._save(Plan(
-            plan_id=plan.plan_id,
-            title=plan.title,
-            objective=plan.objective,
-            status=PlanStatus.DRAFT,
-            steps=plan.steps,
-            feedback=feedback.strip(),
-            created_at=plan.created_at,
-        ))
+        return self._save(
+            Plan(
+                plan_id=plan.plan_id,
+                title=plan.title,
+                objective=plan.objective,
+                status=PlanStatus.DRAFT,
+                steps=plan.steps,
+                feedback=feedback.strip(),
+                created_at=plan.created_at,
+            )
+        )
 
     def revise(
         self,
@@ -334,33 +355,35 @@ class PlanCoordinator:
                 parsed.append(PlanStep.from_dict(item))
             else:
                 raise TypeError("steps must be strings or step dicts")
-        return self._save(Plan(
-            plan_id=plan.plan_id,
-            title=plan.title,
-            objective=plan.objective,
-            status=PlanStatus.DRAFT,
-            steps=tuple(parsed),
-            feedback=plan.feedback,
-            created_at=plan.created_at,
-        ))
+        return self._save(
+            Plan(
+                plan_id=plan.plan_id,
+                title=plan.title,
+                objective=plan.objective,
+                status=PlanStatus.DRAFT,
+                steps=tuple(parsed),
+                feedback=plan.feedback,
+                created_at=plan.created_at,
+            )
+        )
 
     def confirm_steps(self, plan_id: str, step_titles: Iterable[str]) -> Plan:
         """Host-confirm high-risk steps before execution."""
         plan = self._require(plan_id, PlanStatus.APPROVED)
         available = {step.title for step in plan.steps}
         titles = [title for title in step_titles if title in available]
-        return self._save(Plan(
-            plan_id=plan.plan_id,
-            title=plan.title,
-            objective=plan.objective,
-            status=plan.status,
-            steps=plan.steps,
-            feedback=plan.feedback,
-            confirmed_steps=tuple(
-                dict.fromkeys((*plan.confirmed_steps, *titles))
-            ),
-            created_at=plan.created_at,
-        ))
+        return self._save(
+            Plan(
+                plan_id=plan.plan_id,
+                title=plan.title,
+                objective=plan.objective,
+                status=plan.status,
+                steps=plan.steps,
+                feedback=plan.feedback,
+                confirmed_steps=tuple(dict.fromkeys((*plan.confirmed_steps, *titles))),
+                created_at=plan.created_at,
+            )
+        )
 
     # ── execution ──
 
@@ -385,13 +408,15 @@ class PlanCoordinator:
                 completed.append(step)
                 continue
             if step.requires_approval and step.title not in plan.confirmed_steps:
-                completed.append(PlanStep(
-                    title=step.title,
-                    description=step.description,
-                    status=PlanStepStatus.BLOCKED,
-                    requires_approval=True,
-                    result="需要宿主确认后才能执行",
-                ))
+                completed.append(
+                    PlanStep(
+                        title=step.title,
+                        description=step.description,
+                        status=PlanStepStatus.BLOCKED,
+                        requires_approval=True,
+                        result="需要宿主确认后才能执行",
+                    )
+                )
                 continue
             in_progress = PlanStep(
                 title=step.title,
@@ -401,34 +426,36 @@ class PlanCoordinator:
             )
             try:
                 result = runner(plan, in_progress)
-                completed.append(PlanStep(
-                    title=step.title,
-                    description=step.description,
-                    status=PlanStepStatus.COMPLETED,
-                    requires_approval=step.requires_approval,
-                    result=result or "",
-                ))
+                completed.append(
+                    PlanStep(
+                        title=step.title,
+                        description=step.description,
+                        status=PlanStepStatus.COMPLETED,
+                        requires_approval=step.requires_approval,
+                        result=result or "",
+                    )
+                )
             except Exception as error:
-                completed.append(PlanStep(
-                    title=step.title,
-                    description=step.description,
-                    status=PlanStepStatus.FAILED,
-                    requires_approval=step.requires_approval,
-                    result=f"{type(error).__name__}: {error}",
-                ))
+                completed.append(
+                    PlanStep(
+                        title=step.title,
+                        description=step.description,
+                        status=PlanStepStatus.FAILED,
+                        requires_approval=step.requires_approval,
+                        result=f"{type(error).__name__}: {error}",
+                    )
+                )
                 stopped = True
-        status = (
-            PlanStatus.EXECUTED
-            if not stopped
-            else PlanStatus.APPROVED
+        status = PlanStatus.EXECUTED if not stopped else PlanStatus.APPROVED
+        return self._save(
+            Plan(
+                plan_id=plan.plan_id,
+                title=plan.title,
+                objective=plan.objective,
+                status=status,
+                steps=tuple(completed),
+                feedback=plan.feedback,
+                confirmed_steps=plan.confirmed_steps,
+                created_at=plan.created_at,
+            )
         )
-        return self._save(Plan(
-            plan_id=plan.plan_id,
-            title=plan.title,
-            objective=plan.objective,
-            status=status,
-            steps=tuple(completed),
-            feedback=plan.feedback,
-            confirmed_steps=plan.confirmed_steps,
-            created_at=plan.created_at,
-        ))

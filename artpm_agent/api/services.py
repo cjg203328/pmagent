@@ -283,6 +283,9 @@ class GatewayServices:
     chat_stream_handler: Callable[[ChatCommand], object] | None = None
     # Job 编排层（PRD §4）。可选：未注入时 /v1/jobs 返回 503 而不是报错。
     jobs: Any | None = None
+    # 计划模式审查层。可选：未注入时 /v1/plans 返回 503 而不是报错。
+    # 追加在 jobs 之后，保持既有位置参数顺序不变。
+    plans: Any | None = None
 
     def get_workflow_engine(
         self,
@@ -401,6 +404,7 @@ class DefaultGatewayRuntime:
         self.permissions = storage.permission
         self.workflows = storage.workflow
         self.jobs = storage.jobs
+        self.plans = storage.plans
         self.profile_store = storage.profile
         self.knowledge_store: Any = None
         self.episode_store: Any = None
@@ -935,6 +939,7 @@ def build_default_services(db_path: str | Path | None = None) -> GatewayServices
         close_handler=runtime.close,
         event_bus=runtime.event_bus,
         jobs=runtime.jobs,
+        plans=runtime.plans,
     )
 
 

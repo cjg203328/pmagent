@@ -20,7 +20,8 @@ import unicodedata
 from uuid import uuid4
 
 from docx import Document
-from openpyxl import load_workbook
+
+from artpm_agent.utils.spreadsheet_io import safe_load_workbook
 
 
 MAX_TEMPLATE_NAME_CHARS = 80
@@ -160,7 +161,7 @@ def _detect_header(rows: Sequence[Sequence[Any]]) -> tuple[int, list[str]]:
 
 
 def _workbook_sheets(path: Path) -> list[dict[str, Any]]:
-    workbook = load_workbook(path, read_only=True, data_only=False)
+    workbook = safe_load_workbook(path, read_only=True, data_only=False)
     try:
         sheets: list[dict[str, Any]] = []
         for worksheet in workbook.worksheets[:MAX_TEMPLATE_SHEETS]:

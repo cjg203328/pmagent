@@ -59,7 +59,7 @@ class LocalMarkdownConverter:
         max_chars: int = 32768,
         max_table_rows: int = 200,
         max_table_columns: int = 80,
-        max_sheets: int = 8,
+        max_sheets: int = 50,
     ) -> None:
         self.max_chars = self._bounded_int(max_chars, "max_chars", 1024, 1_000_000)
         self.max_table_rows = self._bounded_int(
@@ -148,9 +148,10 @@ class LocalMarkdownConverter:
         requires_vision: bool = False,
         ocr_available: bool = False,
         ocr_status: str = "not_applicable",
+        dropped: bool = False,
     ) -> MarkdownConversionResult:
         text = str(markdown or "").strip()
-        truncated = False
+        truncated = bool(dropped)
         if len(text) > self.max_chars:
             text = text[: self.max_chars].rstrip() + "\n\n<!-- truncated -->"
             truncated = True
@@ -181,9 +182,43 @@ class LocalMarkdownConverter:
     def _non_empty(values: Sequence[Any]) -> int:
         return sum(1 for value in values if str(value or "").strip())
 
+    @staticmethod
+    def _trim_empty_columns(
+        rows: Sequence[Sequence[Any]],
+    ) -> list[list[Any]]:
+        """Drop columns that are empty in every row, header row included.
+
+        Exporters routinely declare a used range far wider than the real data,
+        and report sheets leave interior gaps between the left-hand fields and
+        the per-person allocation columns. Keeping either kind of empty column
+        pads every row with blanks and, once the header filler runs, replaces
+        them with ``Column 11``-style noise that crowds out real values. A
+        column whose header cell is also empty carries no information, so it is
+        safe to remove wherever it sits. A column that is empty for every data
+        row but still has a header is deliberately kept, because those headers
+        are exactly the person names a question may ask about.
+        """
+
+        if not rows:
+            return []
+        width = max(len(row) for row in rows)
+        keep = [
+            index
+            for index in range(width)
+            if any(index < len(row) and str(row[index] or "").strip() for row in rows)
+        ]
+        if not keep:
+            return []
+        return [
+            [row[index] if index < len(row) else "" for index in keep] for row in rows
+        ]
+
     def _table_markdown(self, rows: Sequence[Sequence[Any]]) -> str:
         bounded_rows = [list(row[: self.max_table_columns]) for row in rows]
         bounded_rows = [row for row in bounded_rows if self._non_empty(row)]
+        if not bounded_rows:
+            return ""
+        bounded_rows = self._trim_empty_columns(bounded_rows)
         if not bounded_rows:
             return ""
 
@@ -212,32 +247,125 @@ class LocalMarkdownConverter:
             )
         return "\n".join(lines)
 
-    def _convert_xlsx(self, path: Path) -> MarkdownConversionResult:
-        from openpyxl import load_workbook
+    def _sheet_summary(
+        self,
+        rows: Sequence[Sequence[Any]],
+    ) -> tuple[list[str], int]:
+        """Return (header cells, data row count) for one sheet.
 
-        workbook = load_workbook(path, read_only=True, data_only=True)
+        Mirroring the table builder keeps the workbook index and the rendered
+        table describing the same columns, so a name visible in the index is
+        never contradicted by the table below it.
+        """
+
+        bounded = [list(row[: self.max_table_columns]) for row in rows]
+        bounded = [row for row in bounded if self._non_empty(row)]
+        if not bounded:
+            return [], 0
+        bounded = self._trim_empty_columns(bounded)
+        if not bounded:
+            return [], 0
+        header_index = 0
+        for index, row in enumerate(bounded[:20]):
+            if self._non_empty(row) > self._non_empty(bounded[header_index]):
+                header_index = index
+        columns = [self._cell(value) for value in bounded[header_index]]
+        columns = [column for column in columns if column]
+        return columns, max(0, len(bounded) - header_index - 1)
+
+    def _sheet_index_markdown(
+        self,
+        entries: Sequence[tuple[str, list[str], int]],
+    ) -> str:
+        """Build a compact column index covering every sheet.
+
+        Attachment evidence is sliced by character budget downstream, and a
+        wide multi-sheet workbook is far larger than that budget. The slice
+        then lands in the first few sheets only, so a lookup for a value that
+        lives in a later sheet finds nothing and reads as "absent" instead of
+        "not read". Emitting the column roster first keeps every sheet's
+        columns inside the budget and makes such a lookup answerable.
+        """
+
+        if not entries:
+            return ""
+        lines = [
+            "## 工作簿结构索引",
+            f"共 {len(entries)} 张工作表。下列每行的括号内是已读取的数据行数，"
+            "其后是列名；正文若被截断，仍可用本索引确认某列是否存在。",
+        ]
+        roster: list[str] = []
+        for sheet_name, columns, data_rows in entries:
+            lines.append(f"- {sheet_name} ({data_rows} 行): " + "、".join(columns))
+            for column in columns:
+                if column not in roster:
+                    roster.append(column)
+        if roster:
+            lines.append("")
+            lines.append("全部列名（去重）: " + "、".join(roster))
+        return "\n".join(lines)
+
+    def _convert_xlsx(self, path: Path) -> MarkdownConversionResult:
+        from artpm_agent.utils.spreadsheet_io import safe_load_workbook
+
+        workbook = safe_load_workbook(path, read_only=True, data_only=True)
         try:
-            sections = [self._title(path)]
-            sheet_count = 0
-            for worksheet in workbook.worksheets[: self.max_sheets]:
+            index_entries: list[tuple[str, list[str], int]] = []
+            sheet_tables: list[tuple[str, str]] = []
+            dropped_sheets = 0
+            dropped_rows = 0
+            row_limit = self.max_table_rows + 20
+            for index, worksheet in enumerate(workbook.worksheets):
+                if index >= self.max_sheets:
+                    dropped_sheets = len(workbook.worksheets) - index
+                    break
+                # Some exporters declare a dimension covering only the first
+                # columns of a populated sheet (for example ``C201`` on a sheet
+                # whose people columns run to ``S``). Trusting that declaration
+                # silently hides real columns, so the declared range is reset
+                # and the true extent is discovered by reading.
+                reset = getattr(worksheet, "reset_dimensions", None)
+                if callable(reset):
+                    reset()
                 rows = [
                     tuple(row)
                     for row in worksheet.iter_rows(
                         min_row=1,
-                        max_row=self.max_table_rows + 20,
+                        max_row=row_limit + 1,
                         max_col=self.max_table_columns,
                         values_only=True,
                     )
                 ]
+                if len(rows) > row_limit:
+                    dropped_rows += 1
+                    rows = rows[:row_limit]
                 table = self._table_markdown(rows)
                 if not table:
                     continue
-                sheet_count += 1
-                sections.extend([f"## Sheet: {worksheet.title}", table])
+                columns, data_rows = self._sheet_summary(rows)
+                index_entries.append((str(worksheet.title), columns, data_rows))
+                sheet_tables.append((str(worksheet.title), table))
+
+            sections = [self._title(path)]
+            index_markdown = self._sheet_index_markdown(index_entries)
+            if index_markdown:
+                sections.append(index_markdown)
+            for sheet_name, table in sheet_tables:
+                sections.extend([f"## Sheet: {sheet_name}", table])
+
+            metadata: dict[str, Any] = {
+                "sheet_count": len(sheet_tables),
+                "total_sheets": len(workbook.worksheets),
+            }
+            if dropped_sheets:
+                metadata["dropped_sheets"] = dropped_sheets
+            if dropped_rows:
+                metadata["sheets_with_unread_rows"] = dropped_rows
             return self._finish(
                 "\n\n".join(sections),
                 source_format=path.suffix.lower(),
-                metadata={"sheet_count": sheet_count},
+                metadata=metadata,
+                dropped=bool(dropped_sheets or dropped_rows),
             )
         finally:
             workbook.close()
@@ -246,18 +374,43 @@ class LocalMarkdownConverter:
         import pandas as pd
 
         sheets = pd.read_excel(path, sheet_name=None, header=None)
-        sections = [self._title(path)]
+        index_entries: list[tuple[str, list[str], int]] = []
+        sheet_tables: list[tuple[str, str]] = []
+        dropped_rows = 0
         for sheet_index, (sheet_name, frame) in enumerate(sheets.items()):
             if sheet_index >= self.max_sheets:
                 break
-            rows = frame.fillna("").values.tolist()[: self.max_table_rows + 20]
-            table = self._table_markdown(rows)
-            if table:
-                sections.extend([f"## Sheet: {sheet_name}", table])
+            rows = frame.fillna("").values.tolist()
+            if len(rows) > self.max_table_rows + 20:
+                dropped_rows += 1
+            bounded = rows[: self.max_table_rows + 20]
+            table = self._table_markdown(bounded)
+            if not table:
+                continue
+            columns, data_rows = self._sheet_summary(bounded)
+            index_entries.append((str(sheet_name), columns, data_rows))
+            sheet_tables.append((str(sheet_name), table))
+
+        sections = [self._title(path)]
+        index_markdown = self._sheet_index_markdown(index_entries)
+        if index_markdown:
+            sections.append(index_markdown)
+        for sheet_name, table in sheet_tables:
+            sections.extend([f"## Sheet: {sheet_name}", table])
+
+        metadata: dict[str, Any] = {
+            "sheet_count": len(sheet_tables),
+            "total_sheets": len(sheets),
+        }
+        if len(sheets) > self.max_sheets:
+            metadata["dropped_sheets"] = len(sheets) - self.max_sheets
+        if dropped_rows:
+            metadata["sheets_with_unread_rows"] = dropped_rows
         return self._finish(
             "\n\n".join(sections),
             source_format=path.suffix.lower(),
-            metadata={"sheet_count": min(len(sheets), self.max_sheets)},
+            metadata=metadata,
+            dropped=bool(len(sheets) > self.max_sheets or dropped_rows),
         )
 
     def _convert_csv(self, path: Path) -> MarkdownConversionResult:

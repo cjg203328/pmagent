@@ -13,8 +13,8 @@ Review cadence: each release and every architecture-affecting change
 - 本文件第 3 节的依赖 profile 分层、第 6 节的能力取舍，凡与 PRD §5「明确不做」
   冲突的，以 PRD 为准（语音、embed、插件、远程 MCP、Qdrant 远程、Redis 已列入
   删除或冻结）。
-- 本文件的模块拆分工作（`ui_helpers.py`、`ui_style.py`、`views/chat.py`）在
-  PRD §7 三栏改版中会重做一遍，因此**只随改版顺带推进，不单独排期**。
+- 本文件的模块拆分工作（`ui_helpers.py`、`ui_style.py`、`views/chat.py`）随当前
+  EvoFlow 兼容对话控制平面推进；旧三栏工作台只作为兼容实现，不再作为主 UI 改版目标。
 
 这份文档是当前风险治理计划。`docs/archive/` 下的报告只用于追溯，不作为实现契约。
 

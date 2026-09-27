@@ -4,6 +4,7 @@ from .capabilities import create_capabilities_router
 from .chat import create_chat_router
 from .jobs import create_jobs_router
 from .permissions import create_permissions_router
+from .plans import create_plans_router
 from .search import create_search_router
 from .system import create_system_router
 from .voice import create_voice_router
@@ -15,6 +16,7 @@ __all__ = [
     "create_chat_router",
     "create_jobs_router",
     "create_permissions_router",
+    "create_plans_router",
     "create_search_router",
     "create_system_router",
     "create_voice_router",

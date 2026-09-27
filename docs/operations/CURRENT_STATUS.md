@@ -29,19 +29,21 @@ fast 套件实测（2026-09-20）：**1864 passed, 7 skipped, 0 failed**（91 de
 `POSTGRES_TEST_URL` 跳过，1 个是 `tests/golden/test_structure.py` 的 T1
 报价单生成器未实现。
 
-同时段内的实测口径：
+同时段内的实测口径（复测于 2026-09-27）：
 
 | 检查 | 结果 |
 | --- | --- |
-| 全量 fast 套件 | 1864 passed, 7 skipped, 0 failed |
+| 全量 fast 套件 | 1894 passed, 7 skipped, 0 failed（约 180 秒） |
 | 报价门禁 `scripts/quote_golden_check.py`（结构） | 13 passed, 1 skipped，退出码 0 |
 | 报价门禁 `--values`（真值） | 退出码 **3**：`cases/` 为空，未验证 |
 | `ruff check artpm_agent tests scripts` | All checks passed，退出码 0 |
+| `python scripts/mypy_ratchet.py` | 449 条诊断（基线 451，可下调），strict 包 4 passed |
 | `python -m compileall -q artpm_agent scripts` | 退出码 0 |
 | `alembic heads` | 单一 head `f6a7b8c9d0e1` |
 | 三栏原型（无头 Chrome，51 条断言） | 51 passed, 0 failed，无 JS 报错 |
+| **真实月度工作簿端到端（S0）** | 解析→月份解析→裁剪→发布→核验全通，38 行、核验 `passed`、文件名可辨识 |
 
-> **对最后一行的限定**：`prototype/app.js` 的 `fetch(` 出现次数为 **0**，也没有任何
+> **对原型那一行的限定**：`prototype/app.js` 的 `fetch(` 出现次数为 **0**，也没有任何
 > `/v1/*` 调用。那 51 条断言验证的是静态原型的 DOM 行为与视觉状态，
 > **不构成「三栏已可与后端集成」的证据**，也不回答 PRD §7.4 R-UI 的问题
 > （Streamlit 能否承载固定成果栏与独立滚动）。M1.5 spike 仍未完成。
@@ -61,7 +63,7 @@ S0 已接入请求路径：`ArtifactCoordinator._generate_monthly` 在检测到�
 | --- | --- | --- |
 | Excel 分类判别 | 已修 R-3：判别与客户识别解耦，未知客户的报价表不再降级为 `unknown` | `tests/test_s0_monthly_workbook.py` 分类 3 条 + `test_regressions.py` |
 | 按月份裁剪 | 已实现：保留表头格式与列宽，区分「本月新增」与「累计」 | `transform_monthly_workbook` 9 条断言 |
-| 宽表（月份在 sheet 名上） | 已修 R-5：真实附件 `角色组-任务及绩效分配.xlsx` 的 13 个月份 sheet 现可正确裁剪 | `sheet_target_month` + `_select_sheets_by_month` |
+| 宽表（月份在 sheet 名上） | 已修 R-5：`24年11月` 式表名可识别并按月取舍（合成夹具） | `sheet_target_month` + `_select_sheets_by_month` |
 | 请求路径接入 | 已修 R-4：`_generate_monthly` 接入 coordinator，走 `run_turn` 端到端 | `test_run_turn_delivers_a_monthly_workbook` |
 | XLSX 生成与核验 | 已实现：核验重新打开、口径说明、源文件 SHA-256、发布副本 SHA-256 | `generate_xlsx_monthly` + `verify_artifact("xlsx_monthly")` |
 | 结构性 golden 断言 | 已落地 ST-1..ST-7，13 passed / 1 skip | `tests/golden/test_structure.py` |
@@ -73,6 +75,100 @@ S0 已接入请求路径：`ArtifactCoordinator._generate_monthly` 在检测到�
 
 剩余的 1 条 golden 跳过项是 T1 报价单生成器未实现（交付物模板库 §4）。
 ST-3 与 ST-4 原为跳过占位，在费率单点化落地后已改为真断言（见下节）。
+
+## 真实月度工作簿复跑（2026-09-27）
+
+上表此前全部基于合成夹具。2026-09-27 用业务侧真实文件复跑一遍（325,240 字节、
+23 张 `24年11月`…`26年9月` 表、双行表头、**每月 16–166 行有内容但 `max_row` 达 200+**，
+因为月度表的格式会延伸到最后一行之下），抓出四个合成用例看不到的缺陷，均已修在产品
+展示层（PRD §10 R-7…R-10）：
+
+| 缺陷 | 现象 | 修法 |
+| --- | --- | --- |
+| R-7 WPS 空 `<fill/>` | `xl/styles.xml` 71 个 fill 中 4 个为空元素，`openpyxl.load_workbook` 抛 `TypeError: expected Fill`，**整份表读不进来**；月度裁剪、模板学习、xlsx→csv 预览三个入口同时失败 | 统一走 `utils/spreadsheet_io.safe_load_workbook`（内存内改写坏节点后重试一次，修不好就抛原错，不改用户文件、不落临时文件） |
+| R-8 两位年份被拒 | 表名写作 `25年11月`，用户照此提问却被回「11月 同时出现在 2024、2025 年，请指定年份」——年份其实已经给了 | `resolve_target_month()` 接住两位年份，用工作簿真实出现的年份锚定世纪；没有表可锚时仍要求四位年份，不猜 |
+| R-9 哈希文件名 | 界面交付物叫 `58af653edd43….xlsx`（沿用上传件的存储哈希名），且不同月份会写成同一交付物的 v1/v2 | `_generate_monthly` 取附件原始名并追加月份：`角色组-任务及绩效分配-2025-11.xlsx` |
+| R-10 行数虚报 | 宽表按 `max_row - header_row` 计数，把只有格式的空行算成交付行数：25年11月报「保留 210 行」，实有 38 行非空数据 | `_select_sheets_by_month` 改用与长表分支一致的「非空行」口径；`test_wide_row_count_ignores_formatting_only_tail_rows` |
+
+复跑口径（修复后）：`只保留25年11月的行` → `2025-11`，裁剪出 `['25年11月','处理说明']`、
+**38 行**、未覆盖 0 行；合并单元格 7 处、列宽 29.19、字体等线 10、填充 `FF8CDDFA` 与源表
+一致；`verification.status=passed`，源文件与发布副本各有 SHA-256；`coordinator.process()`
+在不调用模型的前提下直接产出可下载 `.xlsx`。裸月份「只保留11月」仍**正确拒答**（跨年歧义）。
+累计模式 `2025-03` → 5 张表 94 行。
+
+两点限制：① 真实文件在仓库之外且含客户名称，不入库、不进 `tests/`，回归用合成夹具复现
+形状；② 跑通的是**结构与保真**，人天/费率/分配口径的数字仍未获领域专家确认。
+
+界面层复验（本地 8502 实例，真实文件从聊天输入框上传）：
+
+| 输入 | 界面结果 |
+| --- | --- |
+| 「只保留25年11月的行，导出 Excel」 | `已生成 2025-11（仅当月）汇总版…保留 210 行`，卡片显示「已核验：文件可打开，内容与生成计划一致」并给出下载/预览/另存 CSV·MD·TXT·DOCX |
+| 「把 2024年12月的行单独导出一份 Excel」 | 交付物名 `角色组-任务及绩效分配-2024-12.xlsx`（10.4 KB），修掉 R-9：此前文件名沿用上传件的哈希存储名 |
+
+> 第一行的「210 行」是 **R-10 修复前**的界面读数，如实保留。修后同一条请求经
+> `run_turn` 复跑输出「保留 38 行」，文件名 `角色组-任务及绩效分配-2025-11.xlsx`，
+> 核验仍 `passed`。
+>
+> 界面证据取自运行中实例的 DOM 文本，**没有截图**：本次嵌入浏览器视图无有效视口
+> （`viewport=0x0`，pointer/screenshot 动作被拒），仅 `take_snapshot` 与脚本读取可用。
+
+### 附件覆盖率回执（R-11，2026-09-27）
+
+真实表 32,788 字符的 Markdown 证据预算只有 `_MAX_EVIDENCE_CHARS = 6,000`，会话库里
+正存着因此产生的一轮错答（只读到 8/23 张表 → 回答「程榆婷不在表内」）。两处修复：
+
+- 工作簿结构索引（另一路已实现）把 23 张表的列名全部压进预算前端——实测「程榆婷」
+  **确实出现在模型可见证据里**，该轮假阴性的成因已消除。
+- 覆盖率回执此前**永远不触发**：管道读 `result["truncated"]`，编排器却写在
+  `result["preprocessor"]["truncated"]`。现在两处都读，并输出实际计数：
+  `解析阶段已按上限截断（9 张表的数据行超过读取上限，尾部未读）。表内数据可能未读全，
+  未出现不等于不存在。`；回归 `test_parse_context_attachments_reports_parser_truncation`。
+
+> 尚未成立的下限是 ①「读得进」的**统一错误面**：解析失败仍以 `success:false` 载荷流到
+> 模型侧，由模型代为道歉。以及行级数据（某任务某月的具体数值）仍只有预算内的前几张表
+> 可见——回执会如实说明，但查找本身做不到。
+
+运维提醒：同机并行跑两个 pytest 会话会让收集阶段报大量假错误（实测一次收集到 125 项 /
+123 errors，串行复跑后 1894 passed 0 failed）。门禁复测请串行执行。
+
+## 业务数据播种（2026-09-27，M1）
+
+业务表长期 0 行是"效果很差"的第一成因：8 个业务技能、周报和三栏工作台都在读空表。
+本轮把真实月度台账导入 live `data/artpm.db`（脚本 `scripts/seed_workbook_ledger.py`，
+默认 dry-run、`--apply` 才写、幂等可重跑；备份 `data/artpm.db.bak-20260927-185417`）：
+
+| 表 | 导入前 | 导入后 |
+| --- | --- | --- |
+| `projects` | 0 | **90**（按甲方工作室/项目列去重） |
+| `tasks` | 0 | **1,921**（23 个月 × 任务×环节，重复键合并） |
+| `task_assignments` | 0 | **1,490**（`workload_ratio` = 该人占本任务人天的比例） |
+| `team_members` | 1（空测试记录） | **38** |
+
+进度词全部映射（进行中 949 / 已完成 752 / 待开始 209 / 待审核 11），导入前后 diff 0 条
+未识别词。单位口径写在每行 `description` 里：`1 人天 = 8 小时`（`--hours-per-day` 可调），
+`quote_amount = Σ(商务人天×单价)`，全表合计 8,356,510 元。
+
+导入过程中撞出并修掉两处**口径错误**（都不是代码 bug，是数据语义）：
+
+1. `created_at` 若用导入时刻，周报会把 1,921 行全当成"本周新启动"（实测报"进展 1169 项"）。
+   改为所属月份首日。
+2. 历史月份若给 `due_date`，归档任务会变成假逾期（实测报"风险 140 项、已逾期 27 天"）。
+   改为**只有当月及以后**才落 `due_date`；现在带截止日的只有 2026-09 的 163 行。
+
+界面实测（播种后问「GR 项目现在进度怎么样？」）：`progress_management` 直接执行并返回
+真实进度检查报告——此前它被审批网关挡住（`read_only=False + requires_approval=True`，
+而实测该模块零持久化、零外发调用）。`cost_control` 同类，一并改为只读放行；
+`retrospective` 确有写入，保持需要审批。回归：`tests -k "skill or route or risk or permission"` 239 passed。
+
+### 播种后仍然不聪明的地方（下一步的真实瓶颈）
+
+- **源表是月粒度，没有日期列**：所以"本周进展/下周计划"结构性无法回答（周报现在诚实地
+  给出 0 项）；要么业务侧补日期，要么做**月粒度**的盘点技能，而不是继续喂周技能。
+- **问题里的实体没有绑定到参数**：问「GR 项目」，技能返回的是全部 90 个项目的视图，
+  答非所问。下一个该做的智能化不是换模型，而是「问题 → project_id / 月份 / 人名」的槽位绑定。
+- 历史台账导入后，`projects` 里出现「空转」「挪用部分」「诛仙（客户要回收）」这类
+  非正式项目名——来自表里的原话，等业务方确认要不要归并。
 
 ## 费率单点化（2026-09-19 实测）
 
@@ -388,3 +484,12 @@ mypy 棘轮 **451 = 基线**，strict 四包（runtime/harness/api/tenancy）通
 - `knowledge_migrations.py` 的 8 条 `_utc_now` attr-defined 是 **mypy 对 mixin 的误报**：
   运行时由 `WorkspaceKnowledgeStore` 的 MRO 提供该方法，全新库迁移实测通过。
 - 三栏 UI 骨架、S1 端到端、其余办公流技能未做（M2/M3.5 剩余部分）。
+
+### EvoFlow 兼容改造（2026-09-28）
+
+- 已从 EvoFlow 前端源码读取并映射：`#635bff` 主色、`#f7f7f8` 聊天画布、`#f6f7f9` 侧栏、240px 侧栏、760px 对话阅读宽度、助手无框正文、用户独立浅灰气泡、输入区上方计划确认条。
+- Streamlit 主导航保持「对话 / 设置 / 可观测」；旧 `views/workbench.py` 保留为兼容实现，不再作为主导航入口。
+- 新增「提问 / 执行 / 计划」模式药丸；计划模式先生成草稿，定稿后再授权，授权前不推进执行。
+- 计划确认条支持查看、定稿、授权和隐藏；草稿或已定稿计划继续输入时复用同一 `plan_id` 调整步骤，不新建孤立计划。
+- 文档同步：README、PRD、用户指南、开发规范、路线图、优化策略、设计系统和文档索引已改为当前对话控制平面口径；历史三栏规格保留为兼容/追溯记录。
+- 本轮门禁：全量测试 `1987 passed / 29 skipped`；Ruff、`compileall`、`git diff --check` 与 `start_with_checks.py --check-only` 通过。

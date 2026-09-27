@@ -1,5 +1,6 @@
 # ruff: noqa: E402,F405 - Streamlit may execute this page as a standalone script
 """设置页面（从 app.py 拆分）。"""
+
 import sys
 import json
 import os
@@ -43,7 +44,9 @@ def _toast(message: str) -> None:
         st.success(str(message))
 
 
-def _mcp_refresh_ready(*, enabled: bool, transport: str, api_key: str, url: str) -> bool:
+def _mcp_refresh_ready(
+    *, enabled: bool, transport: str, api_key: str, url: str
+) -> bool:
     """Return whether the connection probe has enough user input to run."""
 
     if not enabled or not api_key.strip():
@@ -95,8 +98,10 @@ def _workflow_capability_allowlist():
 
 def _dotenv_value(value):
     text = str(value)
-    if text == "" or any(ch.isspace() for ch in text) or any(
-        ch in text for ch in "#'\"\\"
+    if (
+        text == ""
+        or any(ch.isspace() for ch in text)
+        or any(ch in text for ch in "#'\"\\")
     ):
         return json.dumps(text, ensure_ascii=False)
     return text
@@ -148,6 +153,7 @@ def _persist_env_in_place(env_path, values, keys_to_unset):
     if updated_lines or trailing_newline:
         output += "\n"
     env_path.write_text(output, encoding="utf-8")
+
 
 def _replace_session_agent(refreshed_agent):
     """Install a ready Agent, then release the replaced instance."""
@@ -267,7 +273,9 @@ def _render_storage_settings():
             width="stretch",
             disabled=managed_data_root,
         ):
-            _apply_data_root(new_root if new_root else None, migrate=migrate, reset=False)
+            _apply_data_root(
+                new_root if new_root else None, migrate=migrate, reset=False
+            )
     with reset_col:
         if st.button(
             "恢复默认目录",
@@ -286,11 +294,15 @@ def _apply_mcp_env_preview(
     使「刷新连接状态」按钮无需先保存即可测试新配置。
     注意：这只影响当前进程内存，不写 .env 文件。"""
     os.environ["MCP_ENABLED"] = "true" if mcp_enabled else "false"
-    transport = str(
-        mcp_transport
-        or st.session_state.get("mcp_transport", "")
-        or os.getenv("MCP_TRANSPORT", "stdio")
-    ).strip().lower()
+    transport = (
+        str(
+            mcp_transport
+            or st.session_state.get("mcp_transport", "")
+            or os.getenv("MCP_TRANSPORT", "stdio")
+        )
+        .strip()
+        .lower()
+    )
     if transport not in {"stdio", "http"}:
         transport = "stdio"
     os.environ["MCP_TRANSPORT"] = transport
@@ -307,6 +319,7 @@ def _apply_mcp_env_preview(
         os.environ.pop("SKILLS_FORGE_URL", None)
     # 重置 unified mcp_client 单例，让下次 get 重建时读新 env
     from artpm_agent.core.mcp_client import reset_mcp_client
+
     reset_mcp_client()
     # 同时清除 agent 上缓存的 remote client，强制惰性重载
     if AVAILABLE and st.session_state.get("agent"):
@@ -428,11 +441,7 @@ def _apply_data_root(new_root, *, migrate, reset):
 
 def persist_settings(config, env_path=None):
     """只更新受管理的配置项，保留 .env 中的注释和其它设置。"""
-    env_path = (
-        Path(env_path)
-        if env_path
-        else PROJECT_ENV_PATH
-    )
+    env_path = Path(env_path) if env_path else PROJECT_ENV_PATH
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.touch(exist_ok=True)
     keys_to_unset = set()
@@ -521,6 +530,8 @@ def persist_settings(config, env_path=None):
         os.environ[key] = str(value)
     for key in keys_to_unset:
         os.environ.pop(key, None)
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_knowledge_snapshot(
     tenant_id: str = "local",
@@ -672,7 +683,9 @@ def settings_page():
                                         mcp_client.list_market_skills()
                                     )
                                 except Exception as e:
-                                    logger.warning("拉取市场技能失败: %s", e, exc_info=True)
+                                    logger.warning(
+                                        "拉取市场技能失败: %s", e, exc_info=True
+                                    )
                                     mcp_market = []
                         else:
                             mcp_error = msg
@@ -722,28 +735,28 @@ def settings_page():
             '<div class="settings-summary" role="status">'
             '<div class="settings-summary-item">'
             '<span class="settings-summary-label">当前模型</span>'
-            f'<strong>{escape(configured_model_summary)}</strong>'
-            f'<small>{escape(configured_provider.title())}</small>'
-            '</div>'
+            f"<strong>{escape(configured_model_summary)}</strong>"
+            f"<small>{escape(configured_provider.title())}</small>"
+            "</div>"
             '<div class="settings-summary-item">'
             '<span class="settings-summary-label">远程工具</span>'
-            f'<strong>{escape(mcp_summary)}</strong>'
-            '<small>Skills Forge</small>'
-            '</div>'
+            f"<strong>{escape(mcp_summary)}</strong>"
+            "<small>Skills Forge</small>"
+            "</div>"
             '<div class="settings-summary-item">'
             '<span class="settings-summary-label">数据目录</span>'
-            f'<strong>{escape(data_root_summary)}</strong>'
-            '<small>本地资料与运行记录</small>'
-            '</div>'
-            '</div>'
+            f"<strong>{escape(data_root_summary)}</strong>"
+            "<small>本地资料与运行记录</small>"
+            "</div>"
+            "</div>"
         ),
         unsafe_allow_html=True,
     )
 
     # Keep the six capability areas separate, but use short task-oriented labels
     # so the tab row reads as a simple checklist instead of a feature catalog.
-    model_tab, mcp_tab, workflow_tab, knowledge_tab, storage_tab, identity_tab = st.tabs(
-        ["模型", "连接", "自动化", "知识", "数据", "助手"]
+    model_tab, mcp_tab, workflow_tab, knowledge_tab, storage_tab, identity_tab = (
+        st.tabs(["模型", "连接", "自动化", "知识", "数据", "助手"])
     )
     with model_tab:
         st.markdown(
@@ -754,6 +767,11 @@ def settings_page():
         configured_framework = os.getenv("LLM_FRAMEWORK", "langchain").lower()
         if configured_framework not in framework_options:
             configured_framework = "langchain"
+        st.markdown(
+            '<div class="settings-group"><span>提供商与凭据</span>'
+            "<small>决定请求发往哪家服务，以及用哪个 Key 计费。</small></div>",
+            unsafe_allow_html=True,
+        )
         with st.expander("高级：模型框架", expanded=False, icon=":material/tune:"):
             framework = st.selectbox(
                 "模型框架",
@@ -826,11 +844,18 @@ def settings_page():
                 else ""
             )
 
-        supports_model_sync = (
-            MODEL_CATALOG_AVAILABLE
-            and llm_provider in {"openai", "custom", "zhipu", "deepseek"}
-        )
+        supports_model_sync = MODEL_CATALOG_AVAILABLE and llm_provider in {
+            "openai",
+            "custom",
+            "zhipu",
+            "deepseek",
+        }
         can_sync_models = supports_model_sync and bool(api_key.strip())
+        st.markdown(
+            '<div class="settings-group"><span>模型选择</span>'
+            "<small>可先同步供应商模型清单，再选具体模型；也可以手动填写模型 ID。</small></div>",
+            unsafe_allow_html=True,
+        )
         sync_feedback = None
         sync_col, sync_meta_col = st.columns([1.2, 3.8], vertical_alignment="bottom")
         with sync_col:
@@ -904,13 +929,10 @@ def settings_page():
         else:
             model = model_choice
 
-        # ── 视觉模型搭配（"眼睛模型"）──
-        # 主模型（如 DeepSeek）不支持图片时，图片请求自动路由到这个独立视觉
-        # 模型（例如智谱免费 GLM-4V-Flash），文本与视觉可来自不同供应商。
         st.divider()
         st.markdown(
-            '<div class="settings-tab-lead"><strong>视觉模型搭配（眼睛模型）</strong>'
-            '<span>可选：为不支持图片的主模型补上图片识别能力。</span></div>',
+            '<div class="settings-group"><span>视觉模型搭配（眼睛模型）</span>'
+            "<small>可选：为不支持图片的主模型补上图片识别能力。</small></div>",
             unsafe_allow_html=True,
         )
         vision_enabled = st.toggle(
@@ -969,6 +991,11 @@ def settings_page():
             '<div class="settings-tab-lead"><strong>连接</strong><span>需要远程工具时再打开；不开启也不影响本地报价、分析和项目管理。</span></div>',
             unsafe_allow_html=True,
         )
+        st.markdown(
+            '<div class="settings-group"><span>远程工具</span>'
+            "<small>决定是否连接 Skills Forge，以及使用哪种协议。</small></div>",
+            unsafe_allow_html=True,
+        )
         mcp_enabled = st.toggle(
             "启用远程 Skills Forge",
             value=os.getenv("MCP_ENABLED", "false").lower() == "true",
@@ -982,9 +1009,7 @@ def settings_page():
             options=transport_options,
             index=transport_options.index(configured_transport),
             key="mcp_transport",
-            format_func=lambda value: (
-                "MCP stdio" if value == "stdio" else "HTTP REST"
-            ),
+            format_func=lambda value: "MCP stdio" if value == "stdio" else "HTTP REST",
         )
         mcp_key = st.text_input(
             "Skills Forge API Key",
@@ -1003,6 +1028,11 @@ def settings_page():
             transport=mcp_transport,
             api_key=mcp_key,
             url=mcp_url,
+        )
+        st.markdown(
+            '<div class="settings-group"><span>连接状态</span>'
+            "<small>改动配置后先刷新，确认能连上再保存。</small></div>",
+            unsafe_allow_html=True,
         )
         mcp_config_changed = (
             mcp_enabled != configured_mcp_enabled
@@ -1067,9 +1097,7 @@ def settings_page():
             unsafe_allow_html=True,
         )
         workflow_store = get_workflow_store()
-        reset_widget_state = st.session_state.pop(
-            "reset_workflow_widget_state", False
-        )
+        reset_widget_state = st.session_state.pop("reset_workflow_widget_state", False)
         if reset_widget_state:
             for state_key in list(st.session_state):
                 if state_key.startswith(("workflow_enabled_", "workflow_priority_")):
@@ -1081,9 +1109,14 @@ def settings_page():
             tenant_context, workflow_profile_id = _trusted_workflow_scope()
             workflow_workspace_id = tenant_context.workspace_id
             workflow_capability_allowlist = _workflow_capability_allowlist()
+            st.markdown(
+                '<div class="wd-section"><span>可视化编排</span>'
+                "<small>自定义工作流的步骤与触发条件，保存后按新版本生效。</small></div>",
+                unsafe_allow_html=True,
+            )
             with st.expander(
-                "可视化编排",
-                expanded=True,
+                "打开编辑器",
+                expanded=False,
                 icon=":material/account_tree:",
             ):
                 render_workflow_designer(
@@ -1096,25 +1129,37 @@ def settings_page():
                 workspace_id=workflow_workspace_id,
                 profile_id=workflow_profile_id,
             )
+            st.markdown(
+                '<div class="wd-section"><span>已装工作流</span>'
+                "<small>逐个开关并调整匹配优先级，改完统一保存。</small></div>",
+                unsafe_allow_html=True,
+            )
             workflow_values = []
             for definition in workflow_definitions:
                 with st.expander(
-                    definition.name,
-                    expanded=True,
+                    f"{definition.name} · v{definition.version}",
+                    expanded=False,
                     icon=":material/account_tree:",
                 ):
-                    st.caption(definition.description)
-                    enabled_col, priority_col = st.columns([2, 1])
-                    with enabled_col:
+                    st.caption(
+                        definition.description or f"{len(definition.steps)} 个步骤"
+                    )
+                    detail_col, control_col = st.columns(
+                        [2.4, 1], vertical_alignment="bottom"
+                    )
+                    with detail_col:
+                        st.caption(
+                            f"{len(definition.steps)} 个步骤 · "
+                            f"关键词 {'、'.join(definition.trigger.keywords) or '无'}"
+                        )
                         enabled = st.toggle(
                             "启用",
                             value=definition.enabled,
                             key=(
-                                f"workflow_enabled_{definition.id}_"
-                                f"{definition.version}"
+                                f"workflow_enabled_{definition.id}_{definition.version}"
                             ),
                         )
-                    with priority_col:
+                    with control_col:
                         priority = st.number_input(
                             "优先级",
                             min_value=-1000,
@@ -1126,9 +1171,6 @@ def settings_page():
                                 f"{definition.version}"
                             ),
                         )
-                    st.caption(
-                        f"版本 {definition.version} · {len(definition.steps)} 个步骤"
-                    )
                     workflow_values.append((definition, enabled, int(priority)))
 
             save_flow_col, reset_flow_col = st.columns(2)
@@ -1274,6 +1316,11 @@ def settings_page():
             '<div class="settings-tab-lead"><strong>数据</strong><span>管理本地资料、缓存和运行记录的保存位置。</span></div>',
             unsafe_allow_html=True,
         )
+        st.markdown(
+            '<div class="settings-group"><span>存储位置</span>'
+            "<small>改动后需要重载运行时，旧目录会保留以便回退。</small></div>",
+            unsafe_allow_html=True,
+        )
         _render_storage_settings()
 
     with identity_tab:
@@ -1288,7 +1335,11 @@ def settings_page():
         else:
             identity_defaults = AgentIdentity() if AgentIdentity else None
 
-        render_section_heading("身份配置")
+        st.markdown(
+            '<div class="settings-group"><span>助手身份</span>'
+            "<small>名称、角色和业务领域会出现在回答与交付物说明里。</small></div>",
+            unsafe_allow_html=True,
+        )
         identity_name = st.text_input(
             "名称",
             value=getattr(identity_defaults, "display_name", "ArtPM 助手"),
@@ -1387,9 +1438,7 @@ def settings_page():
         if profile_patch is not None:
             try:
                 profile_store = get_profile_store()
-                active_conversation_id = st.session_state.get(
-                    "active_conversation_id"
-                )
+                active_conversation_id = st.session_state.get("active_conversation_id")
                 change_id = uuid4().hex
                 proposal = profile_store.propose_change(
                     active_conversation_id,
@@ -1436,7 +1485,4 @@ def settings_page():
             if applied_profile is not None
             else ""
         )
-        st.success(
-            f"配置已保存并应用，当前模型：{model.strip()}"
-            f"{profile_version}"
-        )
+        st.success(f"配置已保存并应用，当前模型：{model.strip()}{profile_version}")

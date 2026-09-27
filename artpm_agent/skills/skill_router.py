@@ -904,9 +904,11 @@ SKILL_METADATA = {
         "description": "成本管控：人天成本推导、预算跟踪、超支告警",
         "version": "1.0",
         "requires_llm": False,
-        "risk": "medium",
-        "read_only": False,
-        "requires_approval": True,
+        "risk": "low",
+        # 只读：estimate/budget/overrun 三个 action 都不写库、不外发（实测该模块
+        # 没有任何持久化或网络调用），所以审批门在这里只是把人挡在自己的数据外。
+        "read_only": True,
+        "requires_approval": False,
     },
     # 办公流：只读业务数据并产出版本化交付物，不修改任何业务表，
     # 因此与 artifact 管道同级——不需要审批（read_only 指"无受保护变更"）。
@@ -930,9 +932,10 @@ SKILL_METADATA = {
         "description": "进度管理：里程碑视图、阻塞卡点、每日站会摘要",
         "version": "1.0",
         "requires_llm": False,
-        "risk": "medium",
-        "read_only": False,
-        "requires_approval": True,
+        "risk": "low",
+        # 纯读视图，不写库也不外发；与 weekly_report 同级。
+        "read_only": True,
+        "requires_approval": False,
     },
     "delivery": {
         "description": "产品交付：交付清单、验收单、交付与版本记录",

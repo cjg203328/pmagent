@@ -13,6 +13,47 @@ from artpm_agent.runtime.plan import (
 )
 
 
+def test_chat_plan_mode_projects_draft_and_step_states():
+    from artpm_agent.views.chat_plan_mode import (
+        draft_plan_payload,
+        plan_bar_view,
+        plan_steps_view,
+    )
+
+    payload = draft_plan_payload("读取表格\n按月份汇总\n生成 Excel")
+    assert payload == {
+        "title": "读取表格",
+        "objective": "读取表格\n按月份汇总\n生成 Excel",
+        "steps": ["读取表格", "按月份汇总", "生成 Excel"],
+    }
+
+    view = plan_bar_view(
+        {
+            "plan_id": "plan-1",
+            "title": "读取表格",
+            "objective": "生成 Excel",
+            "status": "proposed",
+            "steps": [{"title": "读取表格", "status": "pending"}],
+        }
+    )
+    assert view["status_label"] == "待授权开始执行"
+    assert view["primary_label"] == "授权执行"
+    assert view["summary"] == "1 个步骤"
+
+    steps = plan_steps_view(
+        {
+            "steps": [
+                {"title": "读取表格", "status": "completed"},
+                {"title": "生成 Excel", "status": "blocked", "requires_approval": True},
+            ],
+            "confirmed_steps": [],
+        }
+    )
+    assert steps[0]["status_label"] == "已完成"
+    assert steps[1]["status_label"] == "待确认"
+    assert steps[1]["confirmed"] is False
+
+
 @pytest.fixture()
 def coordinator(tmp_path):
     store = PlanStore(tmp_path / "plans.json")

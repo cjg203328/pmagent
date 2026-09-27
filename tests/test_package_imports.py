@@ -64,9 +64,14 @@ def test_built_wheel_contains_and_imports_application_modules(tmp_path):
     assert uv, "uv is required to build the package in the managed test runtime"
     build = subprocess.run(
         [uv, "build", "--wheel", "--out-dir", str(wheel_dir), str(PROJECT_ROOT)],
-        cwd=tmp_path,
+        # setuptools renames a temp file inside the source tree's egg-info onto a
+        # path relative to the working directory, and Windows refuses a rename
+        # across volumes with ``[WinError 5]``. Build from the project volume.
+        cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
         check=False,
     )
@@ -97,6 +102,8 @@ def test_built_wheel_contains_and_imports_application_modules(tmp_path):
         env=environment,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=60,
         check=False,
     )

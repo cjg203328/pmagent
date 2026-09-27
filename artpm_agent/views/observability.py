@@ -6,6 +6,7 @@
 数据全部读取自 ``telemetry.db``，且复用 ``telemetry_dashboard.collect_dashboard``
 这一单一数据源，保证与独立看板口径一致。所有读取均为只读、best-effort。
 """
+
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -44,7 +45,9 @@ def _metric_rail(items: List[Dict[str, Any]]) -> None:
             '<div class="metric-item tone-{tone}">'
             '<div class="metric-label">{label}</div>'
             '<div class="metric-value">{value}</div>'
-            "{note}</div>".format(tone=tone, label=it["label"], value=it["value"], note=note_html)
+            "{note}</div>".format(
+                tone=tone, label=it["label"], value=it["value"], note=note_html
+            )
         )
     st.markdown(
         f'<div class="metric-rail">{"".join(cells)}</div>',
@@ -159,9 +162,7 @@ def _health_strip(
         )
     html = (
         '<div class="obs-health-strip">'
-        '<span class="obs-title">系统健康</span>'
-        + "".join(parts)
-        + "</div>"
+        '<span class="obs-title">系统健康</span>' + "".join(parts) + "</div>"
     )
     st.markdown(html, unsafe_allow_html=True)
 
@@ -321,6 +322,7 @@ def observability_page() -> None:
     # only surface that needs it.
     import plotly.express as px
 
+    st.markdown('<div class="observability-page-marker"></div>', unsafe_allow_html=True)
     render_page_header(
         "可观测系统",
         "Token 消耗与连接链路",
@@ -548,7 +550,10 @@ def observability_page() -> None:
             _section("错误类型分布", "按失败原因归类")
             if errors:
                 err_df = pd.DataFrame(
-                    [{"错误类型": k, "次数": v} for k, v in sorted(errors.items(), key=lambda kv: -kv[1])]
+                    [
+                        {"错误类型": k, "次数": v}
+                        for k, v in sorted(errors.items(), key=lambda kv: -kv[1])
+                    ]
                 )
                 fig = px.bar(
                     err_df,

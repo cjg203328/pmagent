@@ -171,3 +171,112 @@ def test_active_count_tracks_running_subtasks():
     thread.join(timeout=5)
     assert pool.active_count == 0
     assert not result_box[0].is_error
+
+
+def _recording_bus():
+    from artpm_agent.runtime.event_bus import EventBus
+
+    bus = EventBus()
+    seen = []
+    bus.subscribe(lambda event: seen.append(event))
+    return bus, seen
+
+
+def test_pool_publishes_started_and_completed_events():
+    bus, seen = _recording_bus()
+    pool = SubagentPool(
+        InProcessSubagentExecutor(lambda request: "done"),
+        event_bus=bus,
+        run_id="run-1",
+        turn_id="turn-1",
+    )
+
+    result = pool.run(SubagentRequest(task="调研"))
+
+    assert not result.is_error
+    assert [event.type.value for event in seen] == [
+        "subagent_started",
+        "subagent_completed",
+    ]
+    assert all(event.run_id == "run-1" for event in seen)
+    assert all(event.turn_id == "turn-1" for event in seen)
+    assert seen[0].metadata["request_id"] == result.request_id
+    assert seen[1].metadata["output"] == "done"
+
+
+def test_pool_publishes_failed_event_for_runner_error():
+    bus, seen = _recording_bus()
+
+    def runner(request):
+        raise RuntimeError("child exploded")
+
+    pool = SubagentPool(InProcessSubagentExecutor(runner), event_bus=bus)
+
+    result = pool.run(SubagentRequest(task="boom"))
+
+    assert result.is_error
+    assert [event.type.value for event in seen] == [
+        "subagent_started",
+        "subagent_failed",
+    ]
+    assert "child exploded" in (seen[1].error or "")
+
+
+def test_pool_publishes_timed_out_event():
+    bus, seen = _recording_bus()
+
+    def slow(request):
+        time.sleep(5)
+        return "late"
+
+    pool = SubagentPool(
+        InProcessSubagentExecutor(slow),
+        timeout_seconds=0.2,
+        event_bus=bus,
+    )
+
+    pool.run(SubagentRequest(task="slow"))
+
+    assert [event.type.value for event in seen] == [
+        "subagent_started",
+        "subagent_timed_out",
+    ]
+
+
+def test_pool_publishes_failed_event_when_depth_exceeded():
+    bus, seen = _recording_bus()
+    pool = SubagentPool(
+        InProcessSubagentExecutor(lambda request: "x"),
+        max_depth=2,
+        event_bus=bus,
+    )
+
+    result = pool.run(SubagentRequest(task="deep", depth=3))
+
+    assert result.is_error
+    assert [event.type.value for event in seen] == ["subagent_failed"]
+
+
+def test_pool_works_without_event_bus():
+    pool = SubagentPool(InProcessSubagentExecutor(lambda request: "ok"))
+
+    result = pool.run(SubagentRequest(task="t"))
+
+    assert not result.is_error
+    assert result.output == "ok"
+
+
+def test_broken_subscriber_cannot_break_delegation():
+    from artpm_agent.runtime.event_bus import EventBus
+
+    bus = EventBus()
+    bus.subscribe(lambda event: 1 / 0)
+    pool = SubagentPool(
+        InProcessSubagentExecutor(lambda request: "ok"),
+        event_bus=bus,
+    )
+
+    result = pool.run(SubagentRequest(task="t"))
+
+    assert not result.is_error
+    assert result.output == "ok"

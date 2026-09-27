@@ -97,15 +97,18 @@ def test_chat_theme_uses_neutral_semantic_surfaces():
     assert "border: 0" in assistant_block
 
 
-def test_sidebar_and_error_callback_use_compact_workbench_geometry():
-    assert "--pm-sidebar-width:      288px" in STYLE_CSS
-    assert "--pm-sidebar-bg:   #f7f8fa" in STYLE_CSS
+def test_sidebar_and_error_callback_use_evoflow_geometry():
+    assert "--pm-sidebar-width:      240px" in STYLE_CSS
+    assert "--pm-sidebar-bg:   #f6f7f9" in STYLE_CSS
+    assert "--pm-accent:       #635bff" in STYLE_CSS
     assert "max-width: 620px !important" in STYLE_CSS
     assert ".pm-error-summary" in STYLE_CSS
     assert ".st-key-sidebar_footer" in STYLE_CSS
     assert ".brand-tagline" in STYLE_CSS
     assert "flex: 0 0 auto !important" in STYLE_CSS
     assert "opacity: 0" in STYLE_CSS
+    assert "EvoFlow compatibility layer" in STYLE_CSS
+    assert "max-width: 760px !important" in STYLE_CSS
 
 
 def test_welcome_suggestion_persists_user_message_before_processing(monkeypatch):

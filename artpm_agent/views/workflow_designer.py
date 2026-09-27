@@ -125,16 +125,15 @@ def _render_canvas(
         )
         if index:
             nodes.append(
-                '<span class="pm-workflow-edge" aria-hidden="true">'
-                '&rarr;</span>'
+                '<span class="pm-workflow-edge" aria-hidden="true">&rarr;</span>'
             )
         nodes.append(
             '<div class="pm-workflow-node" role="listitem">'
             f'<span class="pm-workflow-node-index">{index + 1}</span>'
-            f'<strong>{escape(step_id)}</strong>'
-            f'<span>{escape(skill_id or "未选择 Skill")}</span>'
-            f'<small>{escape(capability)} · {escape(policy)}</small>'
-            '</div>'
+            f"<strong>{escape(step_id)}</strong>"
+            f"<span>{escape(skill_id or '未选择 Skill')}</span>"
+            f"<small>{escape(capability)} · {escape(policy)}</small>"
+            "</div>"
         )
     if not nodes:
         nodes.append('<div class="pm-workflow-empty">暂无步骤</div>')
@@ -189,7 +188,9 @@ def render_workflow_designer(
     selected = st.selectbox(
         "工作流",
         [_NEW_WORKFLOW, *sorted(custom)],
-        format_func=lambda item: "新建工作流" if item == _NEW_WORKFLOW else custom[item].name,
+        format_func=lambda item: (
+            "新建工作流" if item == _NEW_WORKFLOW else custom[item].name
+        ),
         key="workflow_designer_selected",
     )
     loaded_key = f"{workspace_id}:{profile_id}:{selected}"
@@ -197,7 +198,12 @@ def render_workflow_designer(
         _load_editor(custom.get(selected), options[0])
         st.session_state.workflow_designer_loaded_key = loaded_key
 
-    identity_col, priority_col = st.columns([3, 1])
+    st.markdown(
+        '<div class="wd-section"><span>基本信息</span>'
+        "<small>工作流 ID 保存后不可改；名称与说明用于列表识别。</small></div>",
+        unsafe_allow_html=True,
+    )
+    identity_col, name_col = st.columns([1, 1])
     with identity_col:
         workflow_id = st.text_input(
             "工作流 ID",
@@ -205,6 +211,34 @@ def render_workflow_designer(
             disabled=selected != _NEW_WORKFLOW,
             placeholder="asset_delivery_review",
         ).strip()
+    with name_col:
+        name = st.text_input("名称", key="workflow_designer_name").strip()
+    description = st.text_area(
+        "说明",
+        key="workflow_designer_description",
+        max_chars=4000,
+        height=80,
+    ).strip()
+
+    st.markdown(
+        '<div class="wd-section"><span>触发条件</span>'
+        "<small>命中关键词即匹配；开启始终触发则忽略关键词。优先级越大越先选中。</small></div>",
+        unsafe_allow_html=True,
+    )
+    trigger_col, always_col, priority_col = st.columns(
+        [2.2, 1, 1], vertical_alignment="bottom"
+    )
+    with trigger_col:
+        keywords = st.text_input(
+            "触发关键词",
+            key="workflow_designer_keywords",
+            placeholder="交付, 验收",
+        )
+    with always_col:
+        trigger_always = st.toggle(
+            "始终触发",
+            key="workflow_designer_always",
+        )
     with priority_col:
         priority = int(
             st.number_input(
@@ -215,25 +249,12 @@ def render_workflow_designer(
                 key="workflow_designer_priority",
             )
         )
-    name = st.text_input("名称", key="workflow_designer_name").strip()
-    description = st.text_area(
-        "说明",
-        key="workflow_designer_description",
-        max_chars=4000,
-    ).strip()
-    trigger_col, mode_col = st.columns([3, 1])
-    with trigger_col:
-        keywords = st.text_input(
-            "触发关键词",
-            key="workflow_designer_keywords",
-            placeholder="交付, 验收",
-        )
-    with mode_col:
-        trigger_always = st.toggle(
-            "始终触发",
-            key="workflow_designer_always",
-        )
 
+    st.markdown(
+        '<div class="wd-section"><span>执行步骤</span>'
+        "<small>表格里增删步骤，下行是同一份数据的流程图预览。</small></div>",
+        unsafe_allow_html=True,
+    )
     rows_value = st.data_editor(
         st.session_state.get("workflow_designer_rows", []),
         key="workflow_designer_steps",

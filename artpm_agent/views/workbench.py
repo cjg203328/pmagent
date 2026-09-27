@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from html import escape
 from typing import Any
 
 import streamlit as st
@@ -33,10 +34,22 @@ _STATUS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 _EXECUTABLE_JOB_TYPES = {"office_weekly"}
 _NOTICE_KEY = "wb_notice"
+_STATUS_LABELS = {
+    "draft": "草稿",
+    "queued": "排队中",
+    "running": "执行中",
+    "waiting": "等待输入",
+    "needs_input": "需要补充",
+    "succeeded": "已完成",
+    "failed": "失败",
+    "cancelled": "已取消",
+}
 
 
 def _label(job: dict[str, Any]) -> str:
-    return f"{job.get('job_name')} · {job.get('status')}"
+    name = str(job.get("job_name") or "未命名任务").strip()
+    status = str(job.get("status") or "unknown")
+    return f"{name} · {_STATUS_LABELS.get(status, status)}"
 
 
 def _render_task_column(jobs: Any) -> dict[str, Any] | None:
@@ -127,10 +140,15 @@ def _render_process_column(jobs: Any, job: dict[str, Any] | None) -> None:
         if job is None:
             st.info("在①选择或新建一个任务。")
             return
-        st.markdown(f"### {job.get('job_name')}")
+        job_name = escape(str(job.get("job_name") or "未命名任务"))
+        status = str(job.get("status") or "")
+        st.markdown(
+            f'<div class="wb-process-title"><strong>{job_name}</strong>'
+            f"<span>{escape(_STATUS_LABELS.get(status, status or '未知状态'))}</span></div>",
+            unsafe_allow_html=True,
+        )
         st.caption(
-            f"类型 `{job.get('job_type')}` · 触发 `{job.get('trigger')}` · "
-            f"状态 `{job.get('status')}`"
+            f"{job.get('job_type') or '未分类'} · 由 {job.get('trigger') or '手动'} 触发"
         )
         current = job.get("status")
         steps: list[str] = [str(step) for step in _LIFECYCLE]
@@ -138,10 +156,17 @@ def _render_process_column(jobs: Any, job: dict[str, Any] | None) -> None:
             steps.append(str(current))
         reached = steps.index(current) if current in steps else -1
         for position, step in enumerate(steps):
-            mark = (
-                "✅" if position < reached else ("▶️" if position == reached else "⬜")
+            state = (
+                "完成"
+                if position < reached
+                else ("当前" if position == reached else "待处理")
             )
-            st.markdown(f"{mark} `{step}`")
+            st.markdown(
+                f'<div class="wb-step wb-step-{state}"><span aria-hidden="true"></span>'
+                f"<strong>{escape(_STATUS_LABELS.get(step, step))}</strong>"
+                f"<small>{state}</small></div>",
+                unsafe_allow_html=True,
+            )
         if job.get("inputs"):
             with st.expander("输入", expanded=False):
                 st.json(job["inputs"])
@@ -207,19 +232,39 @@ def workbench_page() -> None:
         elif notice.get("kind") == "error":
             st.error(message)
 
+    st.markdown('<div class="workbench-page-marker"></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="wb-page-head"><div><div class="page-kicker">项目执行</div>'
+        "<h1>工作台</h1><p>从任务状态到可下载成果，所有关键动作集中在同一条工作流里。</p></div>"
+        '<div class="wb-page-meta"><span>任务驱动</span><small>当前工作区</small></div></div>',
+        unsafe_allow_html=True,
+    )
+
     jobs = get_job_service()
     if jobs is None:
         st.warning("Job 服务不可用，工作台无法读取任务列表。")
         return
     col_task, col_process, col_artifact = st.columns([2.4, 3.4, 2.2], gap="medium")
     with col_task:
-        st.caption("① 任务")
+        st.markdown(
+            '<div class="wb-column-caption"><b>01</b><strong>任务</strong>'
+            "<span>选择或创建工作项</span></div>",
+            unsafe_allow_html=True,
+        )
         selected = _render_task_column(jobs)
     with col_process:
-        st.caption("② 过程")
+        st.markdown(
+            '<div class="wb-column-caption"><b>02</b><strong>过程</strong>'
+            "<span>查看状态与执行动作</span></div>",
+            unsafe_allow_html=True,
+        )
         _render_process_column(jobs, selected)
     with col_artifact:
-        st.caption("③ 成果")
+        st.markdown(
+            '<div class="wb-column-caption"><b>03</b><strong>成果</strong>'
+            "<span>核验并下载交付物</span></div>",
+            unsafe_allow_html=True,
+        )
         _render_artifact_column(jobs, selected)
 
 

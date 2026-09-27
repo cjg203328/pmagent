@@ -3,34 +3,35 @@ STYLE_CSS = """
     /* ArtPM Agent UI design system */
     :root {
         /* ── 色板 ── */
+        /* EvoFlow-compatible neutral workspace surfaces. */
         --pm-paper:        #ffffff;
-        --pm-canvas:       #ffffff;
-        --pm-surface:      #f1f4f8;
-        --pm-sidebar-bg:   #f7f8fa;
-        --pm-sidebar-hover:#eef1f5;
+        --pm-canvas:       #f7f7f8;
+        --pm-surface:      #f1f1f3;
+        --pm-sidebar-bg:   #f6f7f9;
+        --pm-sidebar-hover:#ececef;
         --pm-sidebar-active:#ffffff;
-        --pm-ink:          #172231;
-        --pm-ink-secondary:#334155;
-        --pm-muted:        #5b6b7d;
-        --pm-line:         #dce3ec;
-        --pm-line-light:   #e9eef4;
+        --pm-ink:          #24232b;
+        --pm-ink-secondary:#55545f;
+        --pm-muted:        #686771;
+        --pm-line:         #dedee4;
+        --pm-line-light:   #ebebef;
 
-        /* Codex-like focus color: neutral reading surfaces, blue actions. */
-        --pm-accent:       #2563eb;
-        --pm-accent-hover: #1d4ed8;
-        --pm-accent-soft:  #eff6ff;
-        --pm-accent-glow:  rgba(37, 99, 235, 0.12);
-        --pm-accent-warm:  #f7f7f5;
-        --pm-accent-pale:  #dbeafe;
-        --pm-focus:        #1d4ed8;
+        /* EvoFlow primary purple: reserved for selection, focus and execution. */
+        --pm-accent:       #635bff;
+        --pm-accent-hover: #554be9;
+        --pm-accent-soft:  #efedff;
+        --pm-accent-glow:  rgba(99, 91, 255, 0.14);
+        --pm-accent-warm:  #fafafa;
+        --pm-accent-pale:  #ddd9ff;
+        --pm-focus:        #554be9;
 
-        /* Chat surfaces stay quiet; the accent is reserved for actions. */
-        --pm-chat-user-bg:     #eaf2ff;
-        --pm-chat-user-fg:     #202124;
+        /* Assistant output is an open reading surface; user turns are quiet pills. */
+        --pm-chat-user-bg:     #ededf2;
+        --pm-chat-user-fg:     #292832;
         --pm-chat-assistant-bg:transparent;
-        --pm-chat-assistant-fg:#41454b;
-        --pm-chat-border:      #cfe0fa;
-        --pm-chat-code-bg:     #f1f4f8;
+        --pm-chat-assistant-fg:#484752;
+        --pm-chat-border:      #dcdbe3;
+        --pm-chat-code-bg:     #f1f1f3;
 
         /* 语义色 */
         --pm-success:      #22c55e;
@@ -58,9 +59,9 @@ STYLE_CSS = """
         --pm-space-12:48px;
 
         /* 布局 */
-        --pm-chat-shell-width:   940px;
-        --pm-chat-thread-width:  820px;
-        --pm-sidebar-width:      288px;
+        --pm-chat-shell-width:   980px;
+        --pm-chat-thread-width:  760px;
+        --pm-sidebar-width:      240px;
         --pm-composer-reserve:   136px;
         --pm-page-gutter:        clamp(20px, 3.5vw, 44px);
 
@@ -575,7 +576,7 @@ STYLE_CSS = """
         background: transparent !important;
         border-color: transparent !important;
         box-shadow: none !important;
-        opacity: 0;
+        opacity: .72;
         transition: var(--pm-transition) !important;
     }
     .st-key-conversation_list [data-testid="stHorizontalBlock"]:hover
@@ -583,6 +584,18 @@ STYLE_CSS = """
     .st-key-conversation_list [data-testid="stHorizontalBlock"]:focus-within
         > [data-testid="stColumn"]:last-child .stButton button {
         opacity: 1;
+    }
+
+    [data-testid="stDialog"] [data-testid="stHorizontalBlock"] {
+        gap: 10px !important;
+    }
+
+    [data-testid="stDialog"] [data-testid="stCaptionContainer"] {
+        margin-bottom: 18px;
+    }
+
+    [data-testid="stDialog"] button {
+        min-height: 44px !important;
     }
     .st-key-conversation_list [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:last-child .stButton button:hover:not(:disabled) {
         color: var(--pm-danger) !important;
@@ -1425,6 +1438,51 @@ STYLE_CSS = """
         color: var(--pm-muted);
         padding: 16px;
         width: 100%;
+    }
+
+    /* ── 工作流编辑器分区标题：把平铺控件切成可扫读的段落 ── */
+    .wd-section-marker,
+    [data-testid="stElementContainer"]:has(.wd-section-marker) {
+        display: none;
+    }
+
+    .wd-section,
+    .settings-group {
+        border-left: 2px solid var(--pm-accent);
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        margin: 20px 0 6px;
+        padding: 2px 0 2px 10px;
+    }
+
+    .wd-section span,
+    .settings-group span {
+        color: var(--pm-ink);
+        font-size: 13px;
+        font-weight: 650;
+    }
+
+    .wd-section small,
+    .settings-group small {
+        color: var(--pm-muted);
+        font-size: 11px;
+        line-height: 1.5;
+    }
+
+    .settings-group:first-of-type {
+        margin-top: 12px;
+    }
+
+    /* 组内控件靠拢，组与组之间拉开，避免六行控件均匀铺开 */
+    .st-key-workflow_designer_priority,
+    .st-key-workflow_designer_always {
+        max-width: 168px;
+    }
+
+    .st-key-workflow_priority input,
+    .st-key-workflow_designer_priority input {
+        text-align: left !important;
     }
 
     [data-testid="stChatInput"] {
@@ -2659,6 +2717,816 @@ STYLE_CSS = """
 from artpm_agent.ui.style_chat import CHAT_POLISH_CSS  # noqa: E402
 
 STYLE_CSS = f"{STYLE_CSS}\n{CHAT_POLISH_CSS}"
+
+# Product-level polish layered after the legacy selectors. Keeping this small
+# override block at the injection boundary makes the visual refresh reversible
+# while page components continue their staged migration.
+PRODUCT_POLISH_CSS = """
+<style>
+    :root {
+        /* EvoFlow-compatible control-plane palette and geometry. */
+        --pm-paper: #ffffff;
+        --pm-canvas: #f7f7f8;
+        --pm-surface: #f1f1f3;
+        --pm-sidebar-bg: #f6f7f9;
+        --pm-sidebar-hover: #ececef;
+        --pm-sidebar-active: #ffffff;
+        --pm-ink: #24232b;
+        --pm-ink-secondary: #55545f;
+        --pm-muted: #686771;
+        --pm-line: #dedee4;
+        --pm-line-light: #ebebef;
+        --pm-accent: #635bff;
+        --pm-accent-hover: #554be9;
+        --pm-accent-soft: #efedff;
+        --pm-accent-glow: rgba(99, 91, 255, .14);
+        --pm-focus: #554be9;
+        --pm-chat-user-bg: #ededf2;
+        --pm-chat-user-fg: #292832;
+        --pm-chat-border: #dcdbe3;
+        --pm-chat-assistant-fg: #484752;
+        --pm-sidebar-width: 240px;
+        --pm-chat-shell-width: 980px;
+        --pm-chat-thread-width: 760px;
+    }
+
+    [data-testid="stAppViewContainer"],
+    [data-testid="stMain"] {
+        background: var(--pm-canvas) !important;
+    }
+
+    [data-testid="stMainBlockContainer"] {
+        max-width: 1240px;
+        padding-top: 28px;
+        padding-bottom: 56px;
+    }
+
+    [data-testid="stMainBlockContainer"]:has(.chat-page-marker) {
+        max-width: calc(var(--pm-chat-shell-width) + 80px);
+        padding: 24px 32px 124px;
+    }
+
+    [data-testid="stSidebar"] {
+        background: var(--pm-sidebar-bg) !important;
+        border-right-color: var(--pm-line) !important;
+    }
+
+    [data-testid="stSidebarContent"] {
+        padding: 18px 14px 14px;
+    }
+
+    .sidebar-brand {
+        margin: 2px 8px 16px;
+        padding-bottom: 14px;
+        border-bottom: 1px solid var(--pm-line-light);
+    }
+
+    .brand-mark {
+        background: #2563eb;
+        box-shadow: 0 4px 10px rgba(37, 99, 235, .18);
+    }
+
+    .st-key-conversation_panel .sidebar-section-label {
+        color: var(--pm-muted);
+        font-size: 10px;
+        letter-spacing: .12em;
+        margin-top: 20px;
+        text-transform: uppercase;
+    }
+
+    .st-key-conversation_list {
+        background: rgba(255,255,255,.42);
+        border: 1px solid var(--pm-line-light);
+        border-radius: var(--pm-radius);
+        padding: 5px;
+    }
+
+    .st-key-conversation_list .stButton button {
+        border-radius: 8px !important;
+        min-height: 38px !important;
+    }
+
+    .st-key-conversation_list .stButton button[kind="primary"] {
+        background: var(--pm-paper) !important;
+        border-color: #d6e3f5 !important;
+        box-shadow: 0 1px 3px rgba(23,34,49,.07), inset 3px 0 0 var(--pm-accent) !important;
+        color: var(--pm-ink) !important;
+    }
+
+    .st-key-sidebar_footer {
+        margin-top: auto;
+        padding-top: 16px;
+    }
+
+    .st-key-sidebar_nav_pills [data-testid="stPillsContainer"] {
+        background: #e8eef6;
+        border-color: #d6e0eb;
+    }
+
+    .st-key-sidebar_nav_pills button[role="radio"][aria-checked="true"] {
+        background: var(--pm-paper) !important;
+        color: var(--pm-accent) !important;
+        box-shadow: 0 1px 4px rgba(23,34,49,.10) !important;
+    }
+
+    .st-key-chat_header {
+        border-bottom: 1px solid var(--pm-line-light);
+        margin-bottom: 14px;
+        padding: 2px 0 14px;
+    }
+
+    .st-key-chat_header [data-testid="stHorizontalBlock"] {
+        align-items: center !important;
+    }
+
+    .st-key-chat_header h1 {
+        font-size: 20px !important;
+        line-height: 1.35 !important;
+        margin-bottom: 0 !important;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .st-key-chat_header [data-testid="stColumn"]:nth-child(2) {
+        display: flex;
+        justify-content: flex-end;
+    }
+
+    .st-key-chat_header [data-testid="stColumn"]:last-child {
+        display: flex;
+        justify-content: flex-end;
+    }
+
+    .st-key-chat_header button {
+        min-height: 40px !important;
+    }
+
+    .st-key-chat_thread {
+        gap: 8px !important;
+    }
+
+    [data-testid="stChatMessage"] {
+        padding: 10px 0;
+    }
+
+    [data-testid="stChatMessage"]:has(.chat-role-user) {
+        padding: 8px 0 12px;
+    }
+
+    [data-testid="stChatMessage"]:has(.chat-role-user) [data-testid="stChatMessageContent"] {
+        border-radius: 12px 12px 4px 12px;
+        max-width: min(78%, 620px);
+        padding: 11px 15px;
+    }
+
+    [data-testid="stChatMessage"]:has(.chat-role-assistant) {
+        margin-bottom: 10px;
+    }
+
+    [data-testid="stChatMessage"]:has(.chat-role-assistant) [data-testid="stChatMessageContent"] {
+        max-width: calc(100% - 42px);
+        padding: 3px 0 7px;
+    }
+
+    [data-testid="stChatMessage"]:has(.chat-role-assistant) [data-testid="stChatMessageContent"] p,
+    [data-testid="stChatMessage"]:has(.chat-role-assistant) [data-testid="stChatMessageContent"] li {
+        font-size: 14.5px !important;
+        line-height: 1.72 !important;
+    }
+
+    [data-testid="stChatInput"] {
+        border-color: #c7d5e5;
+        border-radius: 16px;
+        box-shadow: 0 10px 30px rgba(23,34,49,.10);
+    }
+
+    [data-testid="stChatInput"] textarea {
+        font-size: 15px;
+        min-height: 54px;
+        padding: 15px 17px 8px !important;
+    }
+
+    .st-key-chat_composer_shell {
+        max-width: var(--pm-chat-thread-width);
+        margin: 0 auto;
+    }
+
+    .st-key-welcome_suggestions {
+        gap: 10px;
+        margin-top: 22px;
+        max-width: 760px;
+    }
+
+    .st-key-welcome_suggestions [data-testid="stButton"] button {
+        align-items: center;
+        justify-content: flex-start;
+        min-height: 46px !important;
+        padding: 0 14px !important;
+        text-align: left !important;
+    }
+
+    .pm-welcome {
+        max-width: 620px;
+        margin: 0 auto;
+    }
+
+    .pm-welcome h1 {
+        font-size: clamp(28px, 4vw, 36px) !important;
+        letter-spacing: -.01em !important;
+        margin-bottom: 10px !important;
+    }
+
+    .pm-welcome p {
+        color: var(--pm-muted);
+        font-size: 14px;
+        line-height: 1.65;
+        margin: 0;
+    }
+
+    .pm-welcome-chain {
+        color: var(--pm-accent) !important;
+        font-size: 12px !important;
+        font-weight: 600;
+        letter-spacing: .04em;
+        margin-top: 10px !important;
+    }
+
+    /* 欢迎页按工作阶段分组：每一段是一步链路，而不是平铺的按钮墙 */
+    .pm-welcome-stage {
+        align-items: center;
+        display: flex;
+        gap: 10px;
+        margin: 22px 0 8px;
+    }
+
+    .pm-welcome-stage:first-of-type {
+        margin-top: 16px;
+    }
+
+    .pm-welcome-stage-index {
+        align-items: center;
+        background: var(--pm-paper);
+        border: 1px solid var(--pm-line);
+        border-radius: 7px;
+        color: var(--pm-muted);
+        display: inline-flex;
+        font-family: "SF Mono", Bahnschrift, monospace;
+        font-size: 11px;
+        font-weight: 600;
+        height: 26px;
+        justify-content: center;
+        width: 30px;
+    }
+
+    .pm-welcome-stage-copy {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        min-width: 0;
+    }
+
+    .pm-welcome-stage-copy strong {
+        color: var(--pm-ink);
+        font-size: 13.5px;
+        font-weight: 650;
+    }
+
+    .pm-welcome-stage-copy small {
+        color: var(--pm-muted);
+        font-size: 11.5px;
+        line-height: 1.45;
+    }
+
+    /* 计划模式：模式药丸 + 输入框上方的授权确认条 */
+    .st-key-chat_mode_pills_row [data-testid="stPillsContainer"] {
+        background: transparent;
+        border: none;
+        gap: 6px;
+        padding: 0;
+    }
+
+    .st-key-chat_mode_pills_row button[role="radio"] {
+        background: var(--pm-paper);
+        border: 1px solid var(--pm-line);
+        border-radius: 999px;
+        color: var(--pm-muted);
+        font-size: 12.5px;
+        font-weight: 600;
+        min-height: 32px;
+        padding: 0 14px;
+        transition: var(--pm-transition);
+    }
+
+    .st-key-chat_mode_pills_row button[role="radio"]:hover {
+        background: var(--pm-accent-soft);
+        border-color: #cfe0fb;
+        color: var(--pm-accent);
+    }
+
+    .st-key-chat_mode_pills_row button[role="radio"][aria-checked="true"] {
+        background: var(--pm-ink) !important;
+        border-color: var(--pm-ink) !important;
+        color: var(--pm-paper) !important;
+    }
+
+    [class*="st-key-plan_confirmation_bar"] {
+        background: var(--pm-paper);
+        border: 1px solid var(--pm-line-light);
+        border-left: 3px solid var(--pm-accent);
+        border-radius: 10px;
+        margin-bottom: 10px;
+        padding: 12px 14px 10px;
+    }
+
+    [class*="st-key-plan_confirmation_bar"] .stButton button {
+        min-height: 38px !important;
+    }
+
+    .pm-plan-bar {
+        align-items: baseline;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 10px;
+    }
+
+    .pm-plan-bar-kicker {
+        background: var(--pm-accent-soft);
+        border-radius: 5px;
+        color: var(--pm-accent);
+        font-size: 11px;
+        font-weight: 650;
+        padding: 3px 7px;
+    }
+
+    .pm-plan-bar-title {
+        color: var(--pm-ink);
+        font-size: 13.5px;
+    }
+
+    .pm-plan-bar-status {
+        color: var(--pm-ink-secondary);
+        font-size: 12px;
+    }
+
+    .pm-plan-bar-summary {
+        color: var(--pm-muted);
+        font-size: 11.5px;
+        margin-left: auto;
+    }
+
+    .pm-plan-bar-proposed .pm-plan-bar-kicker {
+        background: #fdf2d9;
+        color: var(--pm-warning);
+    }
+
+    .pm-plan-bar-approved .pm-plan-bar-kicker {
+        background: #e4f5ea;
+        color: var(--pm-success);
+    }
+
+    [data-testid="stMainBlockContainer"]:has(.chat-empty-marker) {
+        padding-top: clamp(88px, 12vh, 136px);
+    }
+
+    [data-testid="stMainBlockContainer"]:has(.workbench-page-marker),
+    [data-testid="stMainBlockContainer"]:has(.observability-page-marker) {
+        max-width: 1280px;
+        padding-top: 28px;
+    }
+
+    .workbench-page-marker,
+    .observability-page-marker {
+        display: none;
+    }
+
+    .wb-page-head {
+        align-items: flex-end;
+        border-bottom: 1px solid var(--pm-line-light);
+        display: flex;
+        gap: 20px;
+        justify-content: space-between;
+        margin-bottom: 22px;
+        padding-bottom: 18px;
+    }
+
+    .wb-page-head h1 {
+        color: var(--pm-ink);
+        font-size: 28px !important;
+        letter-spacing: 0 !important;
+        margin: 2px 0 6px !important;
+    }
+
+    .wb-page-head p {
+        color: var(--pm-muted);
+        font-size: 13px;
+        line-height: 1.55;
+        margin: 0;
+    }
+
+    .wb-page-meta {
+        align-items: flex-end;
+        display: flex;
+        flex: 0 0 auto;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .wb-page-meta span {
+        background: var(--pm-accent-soft);
+        border: 1px solid #cfe0fb;
+        border-radius: 999px;
+        color: var(--pm-accent);
+        font-size: 12px;
+        font-weight: 650;
+        padding: 5px 10px;
+    }
+
+    .wb-page-meta small {
+        color: var(--pm-muted);
+        font-size: 11px;
+    }
+
+    .wb-column-caption {
+        align-items: center;
+        display: flex;
+        gap: 9px;
+        margin: 0 0 9px;
+        min-height: 28px;
+    }
+
+    .wb-column-caption b {
+        align-items: center;
+        background: var(--pm-ink);
+        border-radius: 6px;
+        color: var(--pm-paper);
+        display: inline-flex;
+        font-family: "SF Mono", Bahnschrift, monospace;
+        font-size: 10px;
+        height: 24px;
+        justify-content: center;
+        width: 24px;
+    }
+
+    .wb-column-caption strong {
+        color: var(--pm-ink);
+        font-size: 14px;
+    }
+
+    .wb-column-caption span {
+        color: var(--pm-muted);
+        font-size: 11px;
+        margin-left: auto;
+    }
+
+    .st-key-wb_tasks,
+    .st-key-wb_process,
+    .st-key-wb_artifacts {
+        background: var(--pm-paper);
+        border: 1px solid var(--pm-line-light);
+        border-radius: var(--pm-radius);
+        box-shadow: var(--pm-shadow-card);
+        padding: 14px;
+    }
+
+    .st-key-wb_tasks [data-testid="stExpander"],
+    .st-key-wb_process [data-testid="stExpander"] {
+        background: var(--pm-surface);
+        border-color: var(--pm-line-light) !important;
+        border-radius: 8px !important;
+    }
+
+    .st-key-wb_tasks [data-testid="stRadio"] [role="radiogroup"] {
+        gap: 5px;
+    }
+
+    .st-key-wb_tasks [data-testid="stRadio"] label {
+        border: 1px solid transparent;
+        border-radius: 8px;
+        padding: 8px 9px;
+        transition: var(--pm-transition);
+    }
+
+    .st-key-wb_tasks [data-testid="stRadio"] label:has(input:checked) {
+        background: var(--pm-accent-soft);
+        border-color: #cfe0fb;
+        color: var(--pm-accent);
+    }
+
+    .wb-process-title {
+        align-items: center;
+        display: flex;
+        gap: 10px;
+        justify-content: space-between;
+    }
+
+    .wb-process-title strong {
+        color: var(--pm-ink);
+        font-size: 17px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .wb-process-title span {
+        background: var(--pm-accent-soft);
+        border-radius: 999px;
+        color: var(--pm-accent);
+        flex: 0 0 auto;
+        font-size: 11px;
+        padding: 4px 8px;
+    }
+
+    .wb-step {
+        align-items: center;
+        border-left: 2px solid var(--pm-line);
+        display: flex;
+        gap: 9px;
+        margin-left: 5px;
+        min-height: 36px;
+        padding: 5px 8px 5px 14px;
+        position: relative;
+    }
+
+    .wb-step > span {
+        background: var(--pm-line);
+        border: 3px solid var(--pm-paper);
+        border-radius: 50%;
+        height: 10px;
+        left: -7px;
+        position: absolute;
+        width: 10px;
+    }
+
+    .wb-step strong {
+        color: var(--pm-ink-secondary);
+        font-size: 13px;
+    }
+
+    .wb-step small {
+        color: var(--pm-muted);
+        font-size: 11px;
+        margin-left: auto;
+    }
+
+    .wb-step-完成 { border-left-color: var(--pm-success); }
+    .wb-step-完成 > span { background: var(--pm-success); }
+    .wb-step-当前 { border-left-color: var(--pm-accent); }
+    .wb-step-当前 > span {
+        background: var(--pm-accent);
+        box-shadow: 0 0 0 3px var(--pm-accent-glow);
+    }
+
+    [data-testid="stMainBlockContainer"]:has(.observability-page-marker) .metric-rail {
+        margin-top: 14px;
+    }
+
+    [data-testid="stMainBlockContainer"]:has(.observability-page-marker) .section-heading {
+        margin-top: 30px;
+    }
+
+    @media (max-width: 768px) {
+        [data-testid="stMainBlockContainer"],
+        [data-testid="stMainBlockContainer"]:has(.chat-page-marker) {
+            padding-left: 16px;
+            padding-right: 16px;
+        }
+
+        [data-testid="stChatMessage"]:has(.chat-role-user) [data-testid="stChatMessageContent"] {
+            max-width: 90%;
+        }
+
+        .st-key-chat_header h1 {
+            font-size: 18px !important;
+        }
+
+        .st-key-welcome_suggestions [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap;
+        }
+
+        .st-key-welcome_suggestions [data-testid="stColumn"] {
+            min-width: 100% !important;
+        }
+
+        .wb-page-head {
+            align-items: flex-start;
+            flex-direction: column;
+        }
+
+        .wb-page-meta {
+            align-items: flex-start;
+        }
+
+        .wb-column-caption span {
+            display: none;
+        }
+
+        .st-key-wb_tasks,
+        .st-key-wb_process,
+        .st-key-wb_artifacts {
+            margin-bottom: 12px;
+        }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+            scroll-behavior: auto !important;
+            transition-duration: 0.01ms !important;
+            animation-duration: 0.01ms !important;
+        }
+    }
+
+    /* EvoFlow compatibility layer: final selectors intentionally replace the
+       old blue workbench chrome instead of layering another visual language. */
+    [data-testid="stSidebar"] {
+        background: #f6f7f9 !important;
+        border-right: 1px solid #dedee4 !important;
+        min-width: 240px !important;
+        width: 240px !important;
+    }
+
+    [data-testid="stSidebarContent"] {
+        padding: 18px 12px 12px !important;
+    }
+
+    .sidebar-brand {
+        border-bottom: 1px solid #ebebef !important;
+        margin: 0 6px 14px !important;
+        padding: 2px 0 14px !important;
+    }
+
+    .brand-mark {
+        background: #635bff !important;
+        box-shadow: none !important;
+        height: 28px !important;
+        width: 28px !important;
+    }
+
+    .brand-name { color: #24232b !important; }
+    .brand-tagline { color: #686771 !important; }
+
+    .st-key-conversation_panel > [data-testid="stVerticalBlock"] > .stButton button,
+    .st-key-new_conversation button {
+        background: #635bff !important;
+        border: 1px solid #635bff !important;
+        border-radius: 9px !important;
+        box-shadow: none !important;
+        color: #ffffff !important;
+        font-size: 13px !important;
+        min-height: 36px !important;
+    }
+
+    .st-key-conversation_list {
+        background: transparent !important;
+        border: 0 !important;
+        border-radius: 0 !important;
+        padding: 2px 0 !important;
+    }
+
+    .st-key-conversation_list [data-testid="stHorizontalBlock"] {
+        gap: 3px !important;
+        margin: 1px 0 !important;
+    }
+
+    .st-key-conversation_list .stButton button {
+        background: transparent !important;
+        border: 1px solid transparent !important;
+        border-radius: 8px !important;
+        color: #55545f !important;
+        font-size: 12.5px !important;
+        min-height: 34px !important;
+        text-align: left !important;
+    }
+
+    .st-key-conversation_list .stButton button:hover,
+    .st-key-conversation_list .stButton button:focus-visible {
+        background: #ececef !important;
+        border-color: #dedee4 !important;
+        color: #24232b !important;
+    }
+
+    .st-key-conversation_list .stButton button[kind="primary"] {
+        background: #ffffff !important;
+        border-color: #dedee4 !important;
+        box-shadow: inset 3px 0 0 #635bff !important;
+        color: #24232b !important;
+    }
+
+    .st-key-sidebar_footer {
+        border-top: 1px solid #ebebef;
+        margin-top: 18px !important;
+        padding-top: 12px !important;
+    }
+
+    .st-key-sidebar_nav_pills [data-testid="stPillsContainer"] {
+        background: transparent !important;
+        border: 0 !important;
+        gap: 2px !important;
+    }
+
+    .st-key-sidebar_nav_pills button[role="radio"] {
+        border: 1px solid transparent !important;
+        border-radius: 7px !important;
+        color: #686771 !important;
+        font-size: 12px !important;
+        min-height: 32px !important;
+    }
+
+    .st-key-sidebar_nav_pills button[role="radio"][aria-checked="true"] {
+        background: #ffffff !important;
+        border-color: #dedee4 !important;
+        box-shadow: 0 1px 2px rgba(36, 35, 43, .05) !important;
+        color: #635bff !important;
+    }
+
+    [data-testid="stMainBlockContainer"]:has(.chat-page-marker) {
+        max-width: 1080px !important;
+        padding: 24px 32px 132px !important;
+    }
+
+    .st-key-chat_thread {
+        max-width: 760px !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+    }
+
+    [data-testid="stChatMessage"]:has(.chat-role-assistant)
+    [data-testid="stChatMessageContent"] {
+        background: transparent !important;
+        border: 0 !important;
+        box-shadow: none !important;
+        color: #484752 !important;
+        max-width: 100% !important;
+        padding: 2px 0 8px !important;
+    }
+
+    [data-testid="stChatMessage"]:has(.chat-role-user)
+    [data-testid="stChatMessageContent"] {
+        background: #ededf2 !important;
+        border: 1px solid #dcdbe3 !important;
+        border-radius: 14px 14px 5px 14px !important;
+        box-shadow: none !important;
+        max-width: 78% !important;
+    }
+
+    [data-testid="stChatInput"] {
+        background: #ffffff !important;
+        border: 1px solid #dcdbe4 !important;
+        border-radius: 12px !important;
+        box-shadow: 0 6px 20px rgba(36, 35, 43, .08) !important;
+    }
+
+    [data-testid="stChatInput"]:focus-within {
+        border-color: #635bff !important;
+        box-shadow: 0 0 0 3px rgba(99, 91, 255, .14) !important;
+    }
+
+    [data-testid="stChatInput"] textarea {
+        background: #ffffff !important;
+        color: #24232b !important;
+        font-size: 14px !important;
+        min-height: 52px !important;
+    }
+
+    [data-testid="stChatInputSubmitButton"] button,
+    [data-testid="stChatInputFileUploadButton"] button,
+    [data-testid="stChatInputMicButton"] button {
+        color: #635bff !important;
+    }
+
+    [class*="st-key-plan_confirmation_bar"] {
+        background: #ffffff !important;
+        border: 1px solid #dedee4 !important;
+        border-left: 3px solid #635bff !important;
+        border-radius: 10px !important;
+        box-shadow: 0 4px 14px rgba(36, 35, 43, .06) !important;
+    }
+
+    .pm-plan-bar-kicker {
+        background: #efedff !important;
+        color: #635bff !important;
+    }
+
+    .st-key-plan_confirmation_bar button[kind="primary"] {
+        background: #635bff !important;
+        border-color: #635bff !important;
+    }
+
+    @media (max-width: 760px) {
+        [data-testid="stSidebar"] {
+            min-width: min(88vw, 280px) !important;
+            width: min(88vw, 280px) !important;
+        }
+
+        [data-testid="stMainBlockContainer"]:has(.chat-page-marker) {
+            padding-left: 16px !important;
+            padding-right: 16px !important;
+        }
+    }
+</style>
+"""
+STYLE_CSS = f"{STYLE_CSS}\n{PRODUCT_POLISH_CSS}"
 
 # P2 staged facade.  The full stylesheet stays a single value for the
 # Streamlit injection contract; these helpers expose the intended ownership

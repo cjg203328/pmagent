@@ -153,6 +153,17 @@ class StorageRegistry:
         return self._get("jobs", build)
 
     @property
+    def plans(self) -> Any:
+        """计划模式存储。落点沿用 data_root 下的 plans.json，不另开连接。"""
+
+        def build() -> Any:
+            module = import_module_timed("artpm_agent.runtime.plan")
+            store = module.PlanStore(module.default_plan_store_path())
+            return module.PlanCoordinator(store)
+
+        return self._get("plans", build)
+
+    @property
     def knowledge(self) -> Any:
         def build() -> Any:
             embeddings = import_module_timed("artpm_agent.memory.embeddings")

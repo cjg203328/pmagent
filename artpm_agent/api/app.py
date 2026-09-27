@@ -46,6 +46,7 @@ from .routers import (
     create_chat_router,
     create_jobs_router,
     create_permissions_router,
+    create_plans_router,
     create_search_router,
     create_system_router,
     create_voice_router,
@@ -442,6 +443,14 @@ def create_app(
     )
     app.include_router(
         create_jobs_router(
+            services=services,
+            principal_for_request=_principal,
+            require_workspace=_require_workspace,
+            normalize_json=_json_safe,
+        )
+    )
+    app.include_router(
+        create_plans_router(
             services=services,
             principal_for_request=_principal,
             require_workspace=_require_workspace,

@@ -199,16 +199,28 @@ def test_sidebar_restore_control_is_not_hidden_with_header():
     assert "background: transparent" in STYLE_CSS
 
 
-def test_workbench_renders_three_columns_without_exception():
+def test_product_ui_polish_has_readable_chat_measure_and_accessible_states():
+    assert "--pm-chat-thread-width: 760px" in STYLE_CSS
+    assert ".st-key-chat_composer_shell" in STYLE_CSS
+    assert "prefers-reduced-motion: reduce" in STYLE_CSS
+    assert "button:focus-visible" in STYLE_CSS
+    assert "max-width: 90%" in STYLE_CSS
+    assert ".wb-page-head" in STYLE_CSS
+    assert ".observability-page-marker" in STYLE_CSS
+
+
+def test_workbench_is_removed_from_navigation_and_falls_back_to_chat():
     app = AppTest.from_file(APP_FILE).run(timeout=30)
 
-    app.pills(key="sidebar_nav_pills").set_value("工作台").run(timeout=30)
+    assert set(app.pills(key="sidebar_nav_pills").options) == {"对话", "设置", "可观测"}
+    assert "工作台" not in app.pills(key="sidebar_nav_pills").options
+
+    app.session_state["view"] = "工作台"
+    app.run(timeout=30)
 
     assert not app.exception
-    captions = [str(item.value) for item in app.caption]
-    assert "① 任务" in captions
-    assert "② 过程" in captions
-    assert "③ 成果" in captions
+    assert app.session_state["view"] == "对话"
+    assert app.chat_input(key="chat_input") is not None
 
 
 def test_workbench_runs_weekly_skill_with_trusted_tenant_and_profile(monkeypatch):
@@ -300,11 +312,32 @@ def test_sidebar_pills_expose_exactly_the_three_views():
     app = AppTest.from_file(APP_FILE).run(timeout=30)
 
     nav = app.pills(key="sidebar_nav_pills")
-    assert set(nav.options) == {"工作台", "对话", "设置", "可观测"}
+    assert set(nav.options) == {"对话", "设置", "可观测"}
 
     # legacy multi-section button nav must be gone
     legacy_keys = {button.key for button in app.button if button.key.startswith("nav_")}
     assert legacy_keys == set()
+
+
+def test_conversation_delete_confirmation_is_outside_fixed_list():
+    app = AppTest.from_file(APP_FILE).run(timeout=30)
+    conversation_id = app.session_state["active_conversation_id"]
+
+    app.button(key=f"quick_delete_conversation_{conversation_id}").click().run(
+        timeout=30
+    )
+
+    assert not app.exception
+    assert app.session_state["pending_conversation_delete"] == conversation_id
+    assert app.button(key="confirm_delete_dialog") is not None
+    assert app.button(key="cancel_delete_dialog") is not None
+    assert not any(
+        button.key.startswith("confirm_quick_delete_") for button in app.button
+    )
+
+    app.button(key="cancel_delete_dialog").click().run(timeout=30)
+    assert not app.exception
+    assert "pending_conversation_delete" not in app.session_state
 
 
 def test_empty_chat_renders_all_welcome_actions():
@@ -988,17 +1021,16 @@ def test_sidebar_quick_delete_requires_confirmation_and_switches_active_thread()
         timeout=30
     )
     assert app.session_state["pending_conversation_delete"] == conversation_id
-    assert f"confirm_quick_delete_{conversation_id}" in {
-        button.key for button in app.button
-    }
+    assert "confirm_delete_dialog" in {button.key for button in app.button}
+    assert "cancel_delete_dialog" in {button.key for button in app.button}
 
-    app.button(key=f"cancel_quick_delete_{conversation_id}").click().run(timeout=30)
+    app.button(key="cancel_delete_dialog").click().run(timeout=30)
     assert "pending_conversation_delete" not in app.session_state
 
     app.button(key=f"quick_delete_conversation_{conversation_id}").click().run(
         timeout=30
     )
-    app.button(key=f"confirm_quick_delete_{conversation_id}").click().run(timeout=30)
+    app.button(key="confirm_delete_dialog").click().run(timeout=30)
 
     assert app.session_state["active_conversation_id"] != conversation_id
     assert (

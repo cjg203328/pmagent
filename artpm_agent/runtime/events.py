@@ -33,6 +33,12 @@ class AgentEventType(str, Enum):
     TOOL_EXECUTION_UPDATE = "tool_execution_update"
     TOOL_EXECUTION_END = "tool_execution_end"
     RUNTIME_ERROR = "runtime_error"
+    # Delegated-subtask lifecycle. EvoFlow surfaces these to the client so a
+    # long delegation shows real progress instead of a silent spinner.
+    SUBAGENT_STARTED = "subagent_started"
+    SUBAGENT_COMPLETED = "subagent_completed"
+    SUBAGENT_FAILED = "subagent_failed"
+    SUBAGENT_TIMED_OUT = "subagent_timed_out"
 
 
 class EventDomain(str, Enum):

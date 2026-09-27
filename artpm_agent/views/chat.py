@@ -71,6 +71,20 @@ from artpm_agent.views.chat_welcome import (
     render_welcome_intro,
     render_welcome_suggestions,
 )
+from artpm_agent.views.chat_plan_mode import (
+    MODE_STATE_KEY,
+    PLAN_BAR_DISMISSED_KEY,
+    PLAN_ID_STATE_KEY,
+    PLAN_MODE,
+    draft_plan_payload,
+    normalize_mode,
+    placeholder_for_mode,
+    plan_bar_view,
+    plan_steps_view,
+    render_mode_pills,
+    render_plan_confirmation_bar,
+    render_plan_dialog,
+)
 
 _LEGACY_MODEL_RUNTIME_RE = re.compile(
     r"当前配置的生成模型 ID 是 \*\*`(?P<model>[^`]+)`\*\*.*?"
@@ -1184,6 +1198,12 @@ def chat_page():
     voice_input_enabled = _voice_recording_ready()
     with st.bottom:
         with st.container(key="chat_composer_shell"):
+            plan_bar_action = _render_plan_mode_controls(
+                active_id,
+                disabled=bool(pending_request) or permission_pending,
+            )
+            if plan_bar_action == "restart":
+                st.rerun()
             _render_chat_access_control(
                 active_id,
                 mode_change_disabled=bool(pending_request) or permission_pending,
@@ -1192,7 +1212,7 @@ def chat_page():
                 (
                     "请先处理上方权限请求（允许一次或拒绝）"
                     if permission_pending
-                    else "输入消息或添加附件"
+                    else placeholder_for_mode(st.session_state.get(MODE_STATE_KEY))
                 ),
                 key="chat_input",
                 max_chars=4000,
@@ -1326,6 +1346,58 @@ def chat_page():
                     "voice": voice_metadata,
                 }
             )
+        # 计划模式：提交内容先变成待确认计划，不直接执行。
+        # EvoFlow 的 Plan 语义是「先定稿计划再授权执行」，所以这里只落库草稿。
+        if normalize_mode(st.session_state.get(MODE_STATE_KEY)) == PLAN_MODE:
+            if attachment_store is not None and attachments:
+                try:
+                    attachment_store.remove_files(attachments)
+                except Exception:  # noqa: BLE001 - rollback is best effort
+                    logger.exception("回滚未绑定的会话附件失败")
+                message_metadata.pop("attachments", None)
+                render_error_callback(
+                    {
+                        "message": "计划模式暂不接受附件，请先切换到执行模式处理文件。",
+                        "suggestions": ["切换到执行模式后再上传", "先描述目标生成计划"],
+                        "severity": "warning",
+                        "error_id": "plan-mode-attachments",
+                    },
+                    key="plan_mode_attachments_rejected",
+                    retry=False,
+                )
+                return
+            if store is not None and active_id:
+                try:
+                    store.add_message(
+                        active_id,
+                        "user",
+                        prompt,
+                        turn_id=turn_id,
+                        metadata={"input_mode": "plan", "plan_request": True},
+                    )
+                except Exception as error:  # noqa: BLE001 - surface the real reason
+                    logger.exception("保存计划需求失败")
+                    render_error_callback(
+                        build_error_info(
+                            error,
+                            context={"operation": "plan_request_persistence"},
+                        ),
+                        key=f"plan_request_save_error_{turn_id}",
+                        retry=False,
+                    )
+                    return
+            else:
+                st.session_state.messages.append(
+                    {
+                        "role": "user",
+                        "content": prompt,
+                        "time": format_cn_date(datetime.now(), include_time=True),
+                        "turn_id": turn_id,
+                        "metadata": {"input_mode": "plan", "plan_request": True},
+                    }
+                )
+            _create_draft_plan(prompt, active_id)
+            st.rerun()
         if store is not None and active_id:
             try:
                 user_message = store.add_message(
@@ -1404,6 +1476,190 @@ def chat_page():
             key="agent_not_ready",
             retry=False,
         )
+
+
+def _active_plan_record() -> dict | None:
+    """Return the stored plan the plan bar should reflect, if any."""
+    plan_id = st.session_state.get(PLAN_ID_STATE_KEY)
+    coordinator = get_plan_coordinator()
+    if not plan_id or coordinator is None:
+        return None
+    try:
+        plan = coordinator.store.get(plan_id)
+    except Exception:  # noqa: BLE001 - the bar degrades, chat keeps working
+        logger.exception("加载计划失败: %s", plan_id)
+        return None
+    return plan.to_dict() if plan is not None else None
+
+
+def _render_plan_mode_controls(active_id, *, disabled: bool) -> str | None:
+    """Render the mode pills and, in plan mode, the authorization bar.
+
+    Returns ``"restart"`` when the caller should rerun the page. Nothing here
+    authorizes execution on its own: approving a plan is a host decision, and a
+    plan without an executor only moves the state machine forward.
+    """
+    mode = render_mode_pills(st, disabled=disabled)
+    if mode != PLAN_MODE:
+        return None
+
+    plan = _active_plan_record()
+    if plan is None:
+        st.caption("计划模式：先描述多步骤目标，提交后生成待确认计划。")
+        return None
+
+    plan_id = str(plan.get("plan_id"))
+    if st.session_state.get(PLAN_BAR_DISMISSED_KEY) == plan_id:
+        return None
+
+    action = render_plan_confirmation_bar(st, plan_bar_view(plan))
+    if action is None:
+        return None
+    if action == "view":
+        # 首击直接打开弹窗；旧逻辑先写状态再 rerun，下一轮又没有调用
+        # dialog，结果就是按钮像死了一样。Streamlit dialog 必须在当前 run 调用。
+        st.session_state.plan_dialog_open_for = plan_id
+        _render_plan_dialog(plan)
+        return None
+    if action == "dismiss":
+        st.session_state[PLAN_BAR_DISMISSED_KEY] = plan_id
+        return "restart"
+
+    return _advance_plan(plan, plan_id)
+
+
+def _render_plan_dialog(plan: dict) -> None:
+    """Show the task-plan dialog for one stored plan."""
+
+    dialog = getattr(st, "dialog", None)
+    body = lambda: render_plan_dialog(  # noqa: E731 - tiny render adapter
+        st, plan_bar_view(plan), plan_steps_view(plan)
+    )
+    if not callable(dialog):
+        with st.container(border=True):
+            body()
+        return
+
+    @dialog("任务计划", width="large")
+    def _dialog() -> None:
+        body()
+
+    _dialog()
+
+
+def _advance_plan(plan: dict, plan_id: str) -> str | None:
+    """Move a plan through the review lifecycle using host actions only."""
+
+    coordinator = get_plan_coordinator()
+    if coordinator is None:
+        render_error_callback(
+            {
+                "message": "计划服务未就绪，无法推进这份计划。",
+                "suggestions": ["刷新页面重建服务", "确认数据目录可写"],
+                "severity": "error",
+                "error_id": "plan-service-unavailable",
+            },
+            key="plan_service_unavailable",
+            retry=False,
+        )
+        return None
+    status = str(plan.get("status") or "draft")
+    try:
+        if status == "draft":
+            coordinator.propose(plan_id)
+            st.toast("计划已定稿，等待授权执行")
+        elif status == "proposed":
+            coordinator.approve(plan_id)
+            st.toast("计划已授权；执行器接入后才会真正跑步骤")
+        else:
+            st.toast("这份计划已经授权")
+    except Exception as error:  # noqa: BLE001 - surface the real reason
+        logger.exception("推进计划失败: %s", plan_id)
+        render_error_callback(
+            build_error_info(error, context={"operation": "plan_advance"}),
+            key=f"plan_advance_error_{plan_id}",
+            retry=False,
+        )
+        return None
+    return "restart"
+
+
+def _create_draft_plan(prompt: str, active_id) -> str | None:
+    """Create or revise the plan represented by the current plan bar.
+
+    EvoFlow's plan composer is iterative: after a draft or proposal is shown,
+    the next composer message revises that same plan instead of creating a
+    second orphan plan. Approved plans are still immutable from this shortcut;
+    the user must start a new plan after authorization.
+    """
+
+    coordinator = get_plan_coordinator()
+    payload = draft_plan_payload(prompt)
+    existing = _active_plan_record()
+    if coordinator is None or payload is None:
+        render_error_callback(
+            {
+                "message": "计划服务未就绪，这条需求无法生成计划。",
+                "suggestions": ["刷新页面重建服务", "确认数据目录可写"],
+                "severity": "error",
+                "error_id": "plan-service-unavailable",
+            },
+            key="plan_service_unavailable",
+            retry=False,
+        )
+        return None
+    try:
+        existing_id = str(existing.get("plan_id") or "") if existing else ""
+        existing_status = str(existing.get("status") or "") if existing else ""
+        if existing_id and existing_status in {"draft", "proposed"}:
+            # 继续输入是修改当前计划，不是再造一张孤儿计划卡。
+            plan = coordinator.revise(existing_id, payload["steps"])
+            operation = "plan_revise"
+        else:
+            plan = coordinator.create_plan(
+                payload["title"], payload["objective"], payload["steps"]
+            )
+            operation = "plan_create"
+    except Exception as error:  # noqa: BLE001 - surface the real reason
+        logger.exception("计划更新失败")
+        render_error_callback(
+            build_error_info(
+                error,
+                context={
+                    "operation": operation if "operation" in locals() else "plan_create"
+                },
+            ),
+            key="plan_update_error",
+            retry=False,
+        )
+        return None
+    st.session_state[PLAN_ID_STATE_KEY] = plan.plan_id
+    st.session_state.pop(PLAN_BAR_DISMISSED_KEY, None)
+    if active_id:
+        store = get_conversation_store()
+        if store is not None:
+            try:
+                action_text = (
+                    "已更新当前计划"
+                    if operation == "plan_revise"
+                    else "已生成待确认计划"
+                )
+                store.add_message(
+                    active_id,
+                    "assistant",
+                    f"{action_text}「{plan.title}」，共 {len(plan.steps)} 个步骤。"
+                    "确认无误后点「提交定稿」，再点「授权执行」。",
+                    turn_id=uuid4().hex,
+                    metadata={
+                        "plan_id": plan.plan_id,
+                        "plan_status": plan.status.value,
+                        "plan_operation": operation,
+                    },
+                )
+            except Exception:  # noqa: BLE001 - the plan itself is already saved
+                logger.exception("写入计划提示消息失败")
+        load_active_messages()
+    return plan.plan_id
 
 
 def _preceding_user_prompt(index: int) -> str:

@@ -6,6 +6,7 @@
 
 共享状态、常量、getter 已提取到 artpm_agent.ui_state。
 """
+
 from datetime import datetime
 from contextlib import nullcontext
 from collections.abc import Mapping
@@ -67,6 +68,7 @@ from artpm_agent.ui_state import (  # noqa: F401 — re-exported for wildcard co
     get_knowledge_store,
     get_wiki_store,
     get_permission_store,
+    get_plan_coordinator,
     get_profile_store,
     get_workflow_store,
     MODEL_CATALOG_AVAILABLE,
@@ -99,6 +101,7 @@ logger = get_logger(__name__)
 # preserve the historical import surface while allowing focused unit tests.
 from artpm_agent import ui_formatters as _ui_formatters  # noqa: E402
 
+
 def format_cn_date(value, include_time=False):
     """以中文产品格式显示日期，避免将 ISO 时间暴露到界面。"""
     if not value:
@@ -108,16 +111,22 @@ def format_cn_date(value, include_time=False):
 
 def format_money(value, compact=False):
     return _ui_formatters.format_money(value, compact=compact)
+
+
 def render_page_header(section, title, meta=""):
     st.markdown(f'<div class="page-kicker">{section}</div>', unsafe_allow_html=True)
     st.title(title)
     if meta:
         st.markdown(f'<div class="page-meta">{meta}</div>', unsafe_allow_html=True)
+
+
 def render_section_heading(title, meta=""):
     st.markdown(
         f'<div class="section-heading"><strong>{title}</strong><span>{meta}</span></div>',
         unsafe_allow_html=True,
     )
+
+
 def get_project_stats():
     if not AVAILABLE or not st.session_state.get("db"):
         return EMPTY_STATS.copy(), "数据库未连接"
@@ -126,6 +135,8 @@ def get_project_stats():
     except Exception as error:
         logger.warning(f"项目统计加载失败: {error}")
         return EMPTY_STATS.copy(), "项目数据加载失败，请检查数据库连接"
+
+
 def get_projects(limit=100, status=None):
     if not AVAILABLE or not st.session_state.get("db"):
         return [], "数据库未连接，请检查配置并重启服务"
@@ -134,6 +145,8 @@ def get_projects(limit=100, status=None):
     except Exception as error:
         logger.warning(f"项目列表加载失败: {error}")
         return [], "项目列表加载失败，请检查数据库连接后重试"
+
+
 def project_rows(projects):
     return [
         {
@@ -150,6 +163,8 @@ def project_rows(projects):
         }
         for project in projects
     ]
+
+
 def render_project_table(projects, key):
     rows = project_rows(projects)
     st.dataframe(
@@ -167,12 +182,16 @@ def render_project_table(projects, key):
         },
         key=key,
     )
+
+
 def _conversation_title_from_prompt(prompt, max_length=28):
     """Create a compact local title without spending another model request."""
     title = _ui_rendering.conversation_title_from_prompt(prompt, max_length)
     if title == "新对话":
         return getattr(ConversationStore, "DEFAULT_TITLE", title)
     return title
+
+
 def _message_for_ui(message):
     """Keep storage metadata nested while exposing legacy fields used by the UI."""
     return _ui_rendering.message_for_ui(message)
@@ -248,6 +267,8 @@ def extract_knowledge_rule(prompt):
 
 def is_knowledge_ingestion_request(prompt):
     return _ui_knowledge.is_knowledge_ingestion_request(prompt)
+
+
 def build_knowledge_ingestion_resources(agent, attachments, file_paths, prompt):
     """Use the harness ingestion contract for every UI and agent path."""
     from artpm_agent.harness.knowledge_handler import (
@@ -260,6 +281,8 @@ def build_knowledge_ingestion_resources(agent, attachments, file_paths, prompt):
         file_paths,
         prompt,
     )
+
+
 def get_workflow_coordinator():
     """Return a coordinator bound to the current Agent, if it supports Skills."""
     if not WORKFLOW_RUNTIME_AVAILABLE:
@@ -318,6 +341,8 @@ def get_workflow_coordinator():
             return None
         st.session_state.workflow_coordinator = coordinator
     return coordinator
+
+
 def load_active_messages():
     store = get_conversation_store()
     conversation_id = st.session_state.get("active_conversation_id")
@@ -333,6 +358,8 @@ def load_active_messages():
     ]
     st.session_state.messages_loaded_for = (workspace_id, str(conversation_id))
     return st.session_state.messages
+
+
 def activate_conversation(conversation_id):
     store = get_conversation_store()
     if store is None:
@@ -383,6 +410,8 @@ def activate_conversation(conversation_id):
     load_active_messages()
     # 同步 messages_loaded_for，避免 _init_session_state 重复加载
     st.session_state.messages_loaded_for = (workspace_id, str(conversation_id))
+
+
 def delete_conversation_and_activate_next(store, conversation_id):
     """Delete one conversation and keep the workspace on a valid active thread."""
     workspace_id = _conversation_workspace_id()
@@ -425,6 +454,8 @@ def delete_conversation_and_activate_next(store, conversation_id):
             else store.create_conversation(workspace_id=workspace_id)
         )
         activate_conversation(next_conversation["id"])
+
+
 def _migrate_legacy_messages(store, messages):
     """Preserve messages from a live pre-upgrade Streamlit session once."""
     workspace_id = _conversation_workspace_id()
@@ -464,6 +495,58 @@ def _migrate_legacy_messages(store, messages):
             workspace_id=workspace_id,
         )
     return conversation
+
+
+@st.dialog("删除会话", width="small")
+def _render_delete_conversation_dialog() -> None:
+    """Confirm deletion outside the fixed-height conversation list."""
+
+    conversation_id = st.session_state.get("pending_conversation_delete")
+    store = get_conversation_store()
+    if not conversation_id or store is None:
+        return
+
+    workspace_id = _conversation_workspace_id()
+    conversation = store.get_conversation(
+        conversation_id,
+        workspace_id=workspace_id,
+    )
+    title = str((conversation or {}).get("title") or "这个会话")
+    st.markdown(f"将删除 **{title}**。")
+    st.caption("消息、附件和运行记录会一并删除，且无法撤销。")
+    confirm_col, cancel_col = st.columns(2)
+    with confirm_col:
+        confirm = st.button(
+            "删除会话",
+            key="confirm_delete_dialog",
+            type="primary",
+            width="stretch",
+        )
+    with cancel_col:
+        cancel = st.button(
+            "保留会话",
+            key="cancel_delete_dialog",
+            width="stretch",
+        )
+
+    if cancel:
+        st.session_state.pop("pending_conversation_delete", None)
+        st.rerun()
+    if confirm:
+        try:
+            delete_conversation_and_activate_next(store, conversation_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Conversation deletion failed")
+            render_error_callback(
+                build_error_info(exc, context={"operation": "conversation_delete"}),
+                key=f"conversation_delete_error_{conversation_id}",
+                retry=False,
+            )
+        else:
+            st.session_state.pop("pending_conversation_delete", None)
+            st.rerun()
+
+
 # _RUNTIME_COMPONENT_LABELS and _record_runtime_init_failure are now in
 # artpm_agent.ui_state and imported as record_runtime_init_failure.
 
@@ -474,7 +557,9 @@ def render_runtime_init_status() -> None:
     if not isinstance(failures, Mapping) or not failures:
         return
     labels = [str(label) for label in failures.values() if str(label).strip()]
-    critical = any(key in failures for key in ("conversation_store", "agent", "database"))
+    critical = any(
+        key in failures for key in ("conversation_store", "agent", "database")
+    )
     suggestions = ["检查数据目录的读写权限和可用空间后重启服务"]
     if "conversation_store" in failures:
         suggestions.insert(0, "当前会话可能无法持久保存，请先不要关闭页面")
@@ -561,9 +646,7 @@ def init_session():
         try:
             wiki_store = storage.wiki
             tenant_context = st.session_state.get("tenant_context")
-            workspace_id = str(
-                getattr(tenant_context, "workspace_id", "local-default")
-            )
+            workspace_id = str(getattr(tenant_context, "workspace_id", "local-default"))
             wiki_store.reconcile(workspace_id=workspace_id)
             st.session_state.wiki_store = wiki_store
         except Exception as error:
@@ -621,6 +704,8 @@ def init_session():
         except Exception as e:
             st.session_state.db = None
             record_runtime_init_failure("database", e)
+
+
 def render_conversation_sidebar():
     store = get_conversation_store()
     if store is None:
@@ -682,8 +767,6 @@ def render_conversation_sidebar():
         else:
             conversations = _conv_cache["data"]
         list_height = min(220, max(78, len(conversations) * 42))
-        if pending_delete_id:
-            list_height = max(list_height, 184)
         with st.container(key="conversation_list", height=list_height, border=False):
             for conversation in conversations:
                 conversation_id = conversation["id"]
@@ -717,41 +800,10 @@ def render_conversation_sidebar():
                     ):
                         st.session_state.pending_conversation_delete = conversation_id
                         st.rerun()
+        if pending_delete_id:
+            _render_delete_conversation_dialog()
 
-                if pending_delete_id == conversation_id:
-                    st.warning("确认删除这个会话？消息、附件和运行记录会一并删除，且无法撤销。")
-                    confirm_col, cancel_col = st.columns(2)
-                    with confirm_col:
-                        if st.button(
-                            "确认删除",
-                            key=f"confirm_quick_delete_{conversation_id}",
-                            type="primary",
-                            width="stretch",
-                        ):
-                            try:
-                                delete_conversation_and_activate_next(
-                                    store, conversation_id
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                logger.exception("Conversation deletion failed")
-                                render_error_callback(
-                                    build_error_info(
-                                        exc,
-                                        context={"operation": "conversation_delete"},
-                                    ),
-                                    key=f"conversation_delete_error_{conversation_id}",
-                                    retry=False,
-                                )
-                            else:
-                                st.rerun()
-                    with cancel_col:
-                        if st.button(
-                            "取消",
-                            key=f"cancel_quick_delete_{conversation_id}",
-                            width="stretch",
-                        ):
-                            st.session_state.pop("pending_conversation_delete", None)
-                            st.rerun()
+
 def _render_backend_link_status():
     """Show a cached, non-blocking API gateway link indicator."""
     state = st.session_state.get("_backend_link_status")
@@ -763,6 +815,8 @@ def _render_backend_link_status():
     else:
         status = state
     render_backend_link_status(status)
+
+
 def render_sidebar():
     """渲染侧边栏：品牌区、会话列表和导航切换。"""
     with st.sidebar:
@@ -823,6 +877,8 @@ def render_sidebar():
 def normalize_agent_response(response):
     """Return displayable assistant text or fail loudly instead of rendering blank."""
     return _ui_formatters.normalize_agent_response(response)
+
+
 def stream_agent_response(agent, prompt, context):
     """Render incremental model output and return the complete persisted text."""
     stream_chat = getattr(agent, "stream_chat", None)
@@ -855,6 +911,8 @@ def stream_agent_response(agent, prompt, context):
     if isinstance(rendered, str) and rendered.strip():
         return rendered.strip()
     return normalize_agent_response("".join(received))
+
+
 def _pending_request(raw_pending):
     if isinstance(raw_pending, dict):
         return raw_pending
@@ -877,6 +935,8 @@ def _pending_request(raw_pending):
         "user_message_id": user_message.get("id"),
         "turn_id": user_message.get("turn_id", uuid4().hex),
     }
+
+
 def _history_limits(agent):
     config = getattr(agent, "config", None)
     if config is None or not hasattr(config, "get"):
@@ -885,18 +945,26 @@ def _history_limits(agent):
         int(config.get("llm.history_max_messages", 12)),
         int(config.get("llm.history_max_chars", 8000)),
     )
+
+
 def _current_model_id(agent):
     config = getattr(agent, "config", None)
     if config is None or not hasattr(config, "get"):
         return None
     model_id = config.get("llm.model")
     return str(model_id).strip() if model_id else None
+
+
 def _response_model_id(agent):
     """Prefer the model that actually completed this response over the default."""
     if hasattr(agent, "last_response_model"):
         model_id = getattr(agent, "last_response_model")
-        return model_id.strip() if isinstance(model_id, str) and model_id.strip() else None
+        return (
+            model_id.strip() if isinstance(model_id, str) and model_id.strip() else None
+        )
     return _current_model_id(agent)
+
+
 def _chat_error_message(error, model_id=None):
     """Return a useful, bounded message without exposing provider internals."""
     signals = []
@@ -915,6 +983,7 @@ def _chat_error_message(error, model_id=None):
         try:
             import json
             import os
+
             available = json.loads(os.getenv("LLM_AVAILABLE_MODELS", "[]"))
             if available and isinstance(available, list):
                 models_str = "、".join(available[:3])  # 最多显示3个
@@ -1050,6 +1119,8 @@ def _chat_error_message(error, model_id=None):
         "4. 查看应用日志获取详细错误信息"
         f"{available_hint}"
     )
+
+
 def _render_message_attachments(attachments):
     names = [
         escape(str(attachment.get("name", "附件")))
@@ -1059,13 +1130,14 @@ def _render_message_attachments(attachments):
     if not names:
         return
     items = "".join(
-        f'<span class="chat-attachment-name">附件 · {name}</span>'
-        for name in names
+        f'<span class="chat-attachment-name">附件 · {name}</span>' for name in names
     )
     st.markdown(
         f'<div class="chat-attachments">{items}</div>',
         unsafe_allow_html=True,
     )
+
+
 @st.cache_data(show_spinner=False)
 def _read_artifact_bytes(root, stored_path, max_size):
     """读取生成文件字节（带路径与大小校验），按路径缓存避免每帧重读全部附件。"""
@@ -1143,13 +1215,20 @@ def _render_message_artifacts(metadata, message_key):
         # ── Kimi 风格文件产物卡片 ──
         with st.container():
             # 锚点：供全局 CSS 选中该卡片并套用 Kimi 卡片样式
-            st.markdown('<span class="pm-artifact-anchor"></span>', unsafe_allow_html=True)
+            st.markdown(
+                '<span class="pm-artifact-anchor"></span>', unsafe_allow_html=True
+            )
 
             # 卡片头部：类型图标 + 文件名 + 元信息（行/列/大小）
             fmt = str(artifact.get("format") or "").lower()
             icon = {
-                "xlsx": "📊", "csv": "📋", "docx": "📄",
-                "pptx": "📽️", "pdf": "📕", "md": "📝", "txt": "📃",
+                "xlsx": "📊",
+                "csv": "📋",
+                "docx": "📄",
+                "pptx": "📽️",
+                "pdf": "📕",
+                "md": "📝",
+                "txt": "📃",
             }.get(fmt, "📁")
             head_html = (
                 '<div class="pm-artifact-head">'
@@ -1157,7 +1236,7 @@ def _render_message_artifacts(metadata, message_key):
                 '<div class="pm-artifact-meta">'
                 f'<div class="pm-artifact-name" title="{escape(name)}">{escape(name)}</div>'
                 f'<div class="pm-artifact-sub">{escape(_artifact_subtitle(artifact))}</div>'
-                '</div></div>'
+                "</div></div>"
             )
             st.markdown(head_html, unsafe_allow_html=True)
             verification = artifact.get("verification")
@@ -1172,7 +1251,9 @@ def _render_message_artifacts(metadata, message_key):
             if not preview_markdown:
                 try:
                     preview = generator.preview_artifact(stored_path, max_chars=4000)
-                    preview_markdown = str(preview.get("preview_markdown") or "").strip()
+                    preview_markdown = str(
+                        preview.get("preview_markdown") or ""
+                    ).strip()
                 except (OSError, ValueError, RuntimeError):
                     preview_markdown = ""
 
@@ -1323,6 +1404,7 @@ def _render_message_artifacts(metadata, message_key):
                     )
                     st.session_state[edit_state_key] = outcome.to_dict()
                     st.rerun()
+
 
 def _persist_workflow_response(run, content, *, status="complete"):
     """Persist one final assistant message for a workflow turn, idempotently."""
@@ -1627,10 +1709,7 @@ def _execute_approved_permission(request, approved):
             safe_result = (
                 redact_sensitive(result) if callable(redact_sensitive) else result
             )
-            content = str(
-                safe_result.get("content")
-                or f"Tool completed: {tool_name}"
-            )
+            content = str(safe_result.get("content") or f"Tool completed: {tool_name}")
             return completed, content, "complete"
 
         if claimed.source != "skill":
@@ -1682,7 +1761,9 @@ def _execute_approved_permission(request, approved):
         formatter = getattr(agent, "_format_skill_result", None)
         content = formatter(skill_name, safe_result) if callable(formatter) else ""
         if not str(content or "").strip():
-            content = f"已完成：{_PERMISSION_ACTION_LABELS.get(skill_name, skill_name)}。"
+            content = (
+                f"已完成：{_PERMISSION_ACTION_LABELS.get(skill_name, skill_name)}。"
+            )
         return completed, str(content), "complete"
     except Exception as error:
         try:
@@ -1801,25 +1882,25 @@ def _render_permission_approvals(conversation_id):
                 (
                     '<div class="pm-permission-heading">'
                     '<div class="pm-permission-title">'
-                    '<h3>需要你的确认</h3>'
-                    f'<p>{escape(request.agent_id)} 请求执行以下操作</p></div>'
+                    "<h3>需要你的确认</h3>"
+                    f"<p>{escape(request.agent_id)} 请求执行以下操作</p></div>"
                     f'<span class="pm-risk pm-risk-{escape(request.risk)}">'
-                    f'{escape(risk_label)}</span></div>'
+                    f"{escape(risk_label)}</span></div>"
                     f'<div class="pm-permission-action">{escape(action_label)}</div>'
                     '<div class="pm-permission-facts" role="list">'
                     '<div class="pm-permission-fact" role="listitem">'
-                    '<span>影响</span>'
-                    f'<strong>{escape(impact_label)}</strong></div>'
+                    "<span>影响</span>"
+                    f"<strong>{escape(impact_label)}</strong></div>"
                     '<div class="pm-permission-fact" role="listitem">'
-                    '<span>作用域</span>'
-                    f'<strong>工作区 {escape(request.workspace_id)} · 仅此操作</strong>'
+                    "<span>作用域</span>"
+                    f"<strong>工作区 {escape(request.workspace_id)} · 仅此操作</strong>"
                     '</div><div class="pm-permission-fact" role="listitem">'
-                    '<span>确认级别</span>'
-                    f'<strong>{escape(confirmation_label)} · {escape(role_label)}</strong>'
-                    '</div></div>'
+                    "<span>确认级别</span>"
+                    f"<strong>{escape(confirmation_label)} · {escape(role_label)}</strong>"
+                    "</div></div>"
                     '<div class="pm-permission-params">'
-                    '<span>参数</span>'
-                    f'<code>{escape(parameter_summary)}</code></div>'
+                    "<span>参数</span>"
+                    f"<code>{escape(parameter_summary)}</code></div>"
                 ),
                 unsafe_allow_html=True,
             )
@@ -1920,9 +2001,11 @@ def _render_permission_approvals(conversation_id):
                         acknowledged_risk=request.risk if elevated else None,
                     )
                     with st.spinner("正在执行已授权操作…"):
-                        terminal, content, response_status = _execute_approved_permission(
-                            request,
-                            approved,
+                        terminal, content, response_status = (
+                            _execute_approved_permission(
+                                request,
+                                approved,
+                            )
                         )
                     _persist_permission_response(
                         terminal,
@@ -1969,7 +2052,9 @@ def _render_permission_approvals(conversation_id):
                 except Exception as error:
                     logger.exception("Permission approval failed")
                     render_error_callback(
-                        build_error_info(error, context={"operation": "permission_approve"}),
+                        build_error_info(
+                            error, context={"operation": "permission_approve"}
+                        ),
                         key=f"permission_approve_error_{request.id}",
                         retry=False,
                     )
@@ -2016,18 +2101,18 @@ def _render_permission_approvals(conversation_id):
                 except Exception as error:
                     logger.exception("Permission rejection failed")
                     render_error_callback(
-                        build_error_info(error, context={"operation": "permission_reject"}),
+                        build_error_info(
+                            error, context={"operation": "permission_reject"}
+                        ),
                         key=f"permission_reject_error_{request.id}",
                         retry=False,
                     )
+
+
 def _persist_profile_response(proposal, content):
     """Persist one profile decision response for the originating chat turn."""
     store = get_conversation_store()
-    if (
-        store is None
-        or not proposal.conversation_id
-        or not proposal.turn_id
-    ):
+    if store is None or not proposal.conversation_id or not proposal.turn_id:
         return
     workspace_id = _conversation_workspace_id()
     existing = next(
@@ -2053,6 +2138,8 @@ def _persist_profile_response(proposal, content):
             workspace_id=workspace_id,
         )
     load_active_messages()
+
+
 def _render_profile_approvals(conversation_id):
     """Render pending Agent Profile changes inside their source conversation."""
     profile_store = get_profile_store()
@@ -2099,7 +2186,9 @@ def _render_profile_approvals(conversation_id):
                 except Exception as error:
                     logger.exception("确认 Agent Profile 提案失败")
                     render_error_callback(
-                        build_error_info(error, context={"operation": "profile_approve"}),
+                        build_error_info(
+                            error, context={"operation": "profile_approve"}
+                        ),
                         key=f"profile_approve_error_{proposal.id}",
                         retry=False,
                     )
@@ -2117,10 +2206,14 @@ def _render_profile_approvals(conversation_id):
                 except Exception as error:
                     logger.exception("拒绝 Agent Profile 提案失败")
                     render_error_callback(
-                        build_error_info(error, context={"operation": "profile_reject"}),
+                        build_error_info(
+                            error, context={"operation": "profile_reject"}
+                        ),
                         key=f"profile_reject_error_{proposal.id}",
                         retry=False,
                     )
+
+
 def _persist_knowledge_response(rule, content):
     store = get_conversation_store()
     conversation_id = rule.get("source_conversation_id")
@@ -2135,8 +2228,7 @@ def _persist_knowledge_response(rule, content):
                 conversation_id,
                 workspace_id=workspace_id,
             )
-            if message.get("role") == "assistant"
-            and message.get("turn_id") == turn_id
+            if message.get("role") == "assistant" and message.get("turn_id") == turn_id
         ),
         None,
     )
@@ -2151,6 +2243,8 @@ def _persist_knowledge_response(rule, content):
             workspace_id=workspace_id,
         )
     load_active_messages()
+
+
 def _persist_ingestion_response(proposal, content):
     store = get_conversation_store()
     conversation_id = proposal.get("conversation_id")
@@ -2165,8 +2259,7 @@ def _persist_ingestion_response(proposal, content):
                 conversation_id,
                 workspace_id=workspace_id,
             )
-            if message.get("role") == "assistant"
-            and message.get("turn_id") == turn_id
+            if message.get("role") == "assistant" and message.get("turn_id") == turn_id
         ),
         None,
     )
@@ -2181,6 +2274,8 @@ def _persist_ingestion_response(proposal, content):
             workspace_id=workspace_id,
         )
     load_active_messages()
+
+
 def _render_knowledge_ingestion_approvals(conversation_id):
     knowledge_store = get_knowledge_store()
     if knowledge_store is None or not conversation_id:
@@ -2246,7 +2341,9 @@ def _render_knowledge_ingestion_approvals(conversation_id):
                 except Exception as error:
                     logger.exception("确认资料入库失败")
                     render_error_callback(
-                        build_error_info(error, context={"operation": "knowledge_ingest"}),
+                        build_error_info(
+                            error, context={"operation": "knowledge_ingest"}
+                        ),
                         key=f"knowledge_ingest_error_{proposal['id']}",
                         retry=False,
                     )
@@ -2267,10 +2364,14 @@ def _render_knowledge_ingestion_approvals(conversation_id):
                 except Exception as error:
                     logger.exception("取消资料入库失败")
                     render_error_callback(
-                        build_error_info(error, context={"operation": "knowledge_ingest_reject"}),
+                        build_error_info(
+                            error, context={"operation": "knowledge_ingest_reject"}
+                        ),
                         key=f"knowledge_ingest_reject_error_{proposal['id']}",
                         retry=False,
                     )
+
+
 def _render_knowledge_approvals(conversation_id):
     knowledge_store = get_knowledge_store()
     if knowledge_store is None or not conversation_id:
@@ -2325,9 +2426,7 @@ def _render_knowledge_approvals(conversation_id):
                         tenant_id=tenant_id,
                         workspace_id=workspace_id,
                         confirmed_by="本地用户（会话确认）",
-                        confirmation_token=(
-                            f"{conversation_id}:{rule['id']}:accepted"
-                        ),
+                        confirmation_token=(f"{conversation_id}:{rule['id']}:accepted"),
                     )
                     _persist_knowledge_response(
                         accepted,
@@ -2337,7 +2436,9 @@ def _render_knowledge_approvals(conversation_id):
                 except Exception as error:
                     logger.exception("采纳知识规则失败")
                     render_error_callback(
-                        build_error_info(error, context={"operation": "knowledge_rule_approve"}),
+                        build_error_info(
+                            error, context={"operation": "knowledge_rule_approve"}
+                        ),
                         key=f"knowledge_rule_approve_error_{rule['id']}",
                         retry=False,
                     )
@@ -2357,10 +2458,14 @@ def _render_knowledge_approvals(conversation_id):
                 except Exception as error:
                     logger.exception("拒绝知识规则失败")
                     render_error_callback(
-                        build_error_info(error, context={"operation": "knowledge_rule_reject"}),
+                        build_error_info(
+                            error, context={"operation": "knowledge_rule_reject"}
+                        ),
                         key=f"knowledge_rule_reject_error_{rule['id']}",
                         retry=False,
                     )
+
+
 def _cached_workflow_preview(run_id):
     """缓存待审批工作流的预览渲染结果，避免每条待审批运行每帧重算。"""
     coordinator = get_workflow_coordinator()
@@ -2460,7 +2565,9 @@ def _render_workflow_approvals(conversation_id):
                 except Exception as error:
                     logger.exception("工作流审批执行失败")
                     render_error_callback(
-                        build_error_info(error, context={"operation": "workflow_approve"}),
+                        build_error_info(
+                            error, context={"operation": "workflow_approve"}
+                        ),
                         key=f"workflow_approve_error_{run.id}",
                         retry=False,
                     )
@@ -2481,7 +2588,9 @@ def _render_workflow_approvals(conversation_id):
                 except Exception as error:
                     logger.exception("取消工作流失败")
                     render_error_callback(
-                        build_error_info(error, context={"operation": "workflow_reject"}),
+                        build_error_info(
+                            error, context={"operation": "workflow_reject"}
+                        ),
                         key=f"workflow_reject_error_{run.id}",
                         retry=False,
                     )

@@ -33,6 +33,98 @@ def test_converter_normalizes_spreadsheet_to_markdown(tmp_path):
     assert "| Character Model | 2 | 1200 |" in result.markdown
 
 
+def test_converter_drops_trailing_empty_columns_from_markdown(tmp_path):
+    xlsx_path = tmp_path / "padded.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Summary"
+    worksheet.append(["Asset", "Qty"])
+    worksheet.append(["Character", 2])
+    worksheet.append(["Prop", 1])
+    # Readers that report a padded used range make these columns look present.
+    worksheet["D1"] = None
+    worksheet["AF1"] = None
+    workbook.save(xlsx_path)
+
+    result = LocalMarkdownConverter().convert(xlsx_path)
+
+    assert result.success is True
+    assert "| Asset | Qty |" in result.markdown
+    assert "Column " not in result.markdown
+
+
+def test_converter_indexes_every_sheet_before_sheet_tables(tmp_path):
+    xlsx_path = tmp_path / "roster.xlsx"
+    workbook = Workbook()
+    first = workbook.active
+    first.title = "一月"
+    first.append(["项目", "任务名称"])
+    first.append(["NBA", "麦迪"])
+    second = workbook.create_sheet("五月")
+    second.append(["项目", "罗旭", "程榆婷"])
+    second.append(["NBA", 5, None])
+    workbook.save(xlsx_path)
+
+    result = LocalMarkdownConverter().convert(xlsx_path)
+
+    assert result.success is True
+    assert "## 工作簿结构索引" in result.markdown
+    assert result.markdown.index("## 工作簿结构索引") < result.markdown.index(
+        "## Sheet:"
+    )
+    index_block = result.markdown.split("## Sheet:")[0]
+    assert "一月" in index_block
+    assert "五月" in index_block
+    assert "程榆婷" in index_block
+
+
+def test_converter_keeps_header_only_person_columns(tmp_path):
+    xlsx_path = tmp_path / "people.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "五月"
+    worksheet.append(["项目", "罗旭", "程榆婷"])
+    worksheet.append(["NBA", 5, None])
+    workbook.save(xlsx_path)
+
+    result = LocalMarkdownConverter().convert(xlsx_path)
+
+    assert result.success is True
+    assert "程榆婷" in result.markdown
+    assert result.metadata["sheet_count"] == 1
+
+
+def test_converter_reads_workbook_with_empty_fill_nodes(tmp_path):
+    import re
+    import zipfile
+
+    xlsx_path = tmp_path / "wps.xlsx"
+    _write_workbook(xlsx_path)
+    with zipfile.ZipFile(xlsx_path) as archive:
+        members = [(item, archive.read(item.filename)) for item in archive.infolist()]
+    styles = {item.filename: payload for item, payload in members}["xl/styles.xml"]
+    styles = styles.decode("utf-8")
+    styles = re.sub(
+        r'<fills count="(\d+)">',
+        lambda match: f'<fills count="{int(match.group(1)) + 1}">',
+        styles,
+        count=1,
+    )
+    styles = styles.replace("</fills>", "<fill/></fills>", 1)
+    with zipfile.ZipFile(xlsx_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for item, payload in members:
+            archive.writestr(
+                item,
+                styles.encode("utf-8") if item.filename == "xl/styles.xml" else payload,
+            )
+
+    result = LocalMarkdownConverter().convert(xlsx_path)
+
+    assert result.success is True
+    assert "| Asset | Qty | Cost |" in result.markdown
+    assert result.error is None
+
+
 def test_converter_normalizes_docx_and_image_ocr_text(tmp_path):
     docx_path = tmp_path / "brief.docx"
     document = Document()

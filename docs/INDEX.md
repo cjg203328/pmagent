@@ -7,10 +7,10 @@ README 是入口文档；本页按读者角色和主题提供深入文档导航�
 
 | 文档 | 用途 |
 | --- | --- |
-| [`product/PRD.md`](product/PRD.md) | **定位权威**：企业级业务助手·美术项目经理，收缩范围、场景、对象模型、界面规格、指标和里程碑 |
+| [`product/PRD.md`](product/PRD.md) | **定位权威**：通用智能体·有记忆的办公助手（§0，2026-09-27 修订），可靠性下限、预置场景、对象模型、界面规格、冻结清单和里程碑 |
 | [`product/领域数据契约.md`](product/领域数据契约.md) | 费率、供应商分层、资产类型基线、改稿系数的单一权威与缺失行为（数值待业务方确认） |
 | [`product/交付物模板库.md`](product/交付物模板库.md) | 报价单、人天汇总表、复盘报告、催办通知的字段与版式规格 |
-| [`../prototype/交互规格.md`](../prototype/交互规格.md) | 三栏工作台信息架构、断点、状态机、关键流程与验收清单 |
+| [`../prototype/交互规格.md`](../prototype/交互规格.md) | 历史三栏工作台信息架构与兼容验收记录；当前主 UI 以对话控制平面为准 |
 | [`../tests/golden/README.md`](../tests/golden/README.md) | 报价正确性评测集：结构断言（可做）与真值断言（阻塞中） |
 | [`../tests/golden/test_structure.py`](../tests/golden/test_structure.py) | ST-1..ST-7 结构性 golden 断言（不需要业务真值） |
 | [`roadmaps/NEXT_STEPS.md`](roadmaps/NEXT_STEPS.md) | 当前一周动作（范围一律以 PRD 为准） |

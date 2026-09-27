@@ -15,13 +15,17 @@ unboundedly.
 
 from __future__ import annotations
 
+import logging
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, overload
 from uuid import uuid4
 
+from .events import AgentEventType
 from .tools import AgentTool, ToolUpdateCallback
+
+logger = logging.getLogger(__name__)
 
 #: Default guardrails mirroring a small local deployment.
 DEFAULT_MAX_CONCURRENCY = 4
@@ -77,9 +81,7 @@ class InProcessSubagentExecutor(SubagentExecutor):
             return output
         if isinstance(output, str):
             return SubagentResult(output=output, request_id=request.request_id)
-        raise TypeError(
-            "subagent runner must return a SubagentResult or a string"
-        )
+        raise TypeError("subagent runner must return a SubagentResult or a string")
 
 
 class SubagentPool:
@@ -97,6 +99,9 @@ class SubagentPool:
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
         max_depth: int = DEFAULT_MAX_DEPTH,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        event_bus: Any = None,
+        run_id: str = "",
+        turn_id: str = "",
     ) -> None:
         if isinstance(max_concurrency, bool) or max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1")
@@ -113,6 +118,43 @@ class SubagentPool:
         self._semaphore = threading.Semaphore(max_concurrency)
         self._active = 0
         self._lock = threading.Lock()
+        # Optional observability seam: when a bus is supplied each delegation
+        # publishes its lifecycle, so a long child task is visible instead of
+        # appearing as a silent wait.
+        self._event_bus = event_bus
+        self._run_id = run_id or f"subagent-pool-{uuid4().hex[:12]}"
+        self._turn_id = turn_id or self._run_id
+
+    def _publish(
+        self,
+        event_type: "AgentEventType",
+        request: SubagentRequest,
+        *,
+        result: Optional[SubagentResult] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        bus = self._event_bus
+        if bus is None:
+            return
+        try:
+            from .events import AgentEvent
+
+            bus.publish(
+                AgentEvent(
+                    type=event_type,
+                    run_id=self._run_id,
+                    turn_id=self._turn_id,
+                    error=error,
+                    is_error=event_type is not AgentEventType.SUBAGENT_COMPLETED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "depth": request.depth,
+                        "output": (result.output if result else "")[:2000],
+                    },
+                )
+            )
+        except Exception:  # observation must never break execution
+            logger.warning("subagent event publish failed", exc_info=True)
 
     @property
     def active_count(self) -> int:
@@ -122,22 +164,54 @@ class SubagentPool:
     def run(self, request: SubagentRequest) -> SubagentResult:
         """Run one subtask through the executor with guardrails applied."""
         if request.depth > self.max_depth:
-            return SubagentResult(
+            result = SubagentResult(
                 output="",
                 request_id=request.request_id,
                 is_error=True,
                 error=f"subagent depth {request.depth} exceeds limit {self.max_depth}",
             )
+            self._publish(
+                AgentEventType.SUBAGENT_FAILED,
+                request,
+                result=result,
+                error=result.error,
+            )
+            return result
         with self._semaphore:
             with self._lock:
                 self._active += 1
+            self._publish(AgentEventType.SUBAGENT_STARTED, request)
             try:
                 if self.timeout_seconds is None:
-                    return self.executor.run(request)
-                return self._run_with_timeout(request)
+                    result = self.executor.run(request)
+                else:
+                    result = self._run_with_timeout(request)
+            except BaseException as error:
+                self._publish(
+                    AgentEventType.SUBAGENT_FAILED,
+                    request,
+                    error=f"{type(error).__name__}: {error}",
+                )
+                raise
             finally:
                 with self._lock:
                     self._active -= 1
+            self._publish_result(request, result)
+            return result
+
+    def _publish_result(self, request: SubagentRequest, result: SubagentResult) -> None:
+        """Publish the terminal event matching how the subtask actually ended."""
+
+        if not result.is_error:
+            self._publish(AgentEventType.SUBAGENT_COMPLETED, request, result=result)
+            return
+        error = result.error or "subagent failed"
+        event_type = (
+            AgentEventType.SUBAGENT_TIMED_OUT
+            if "timed out" in error
+            else AgentEventType.SUBAGENT_FAILED
+        )
+        self._publish(event_type, request, result=result, error=error)
 
     def _run_with_timeout(self, request: SubagentRequest) -> SubagentResult:
         result_box: list[SubagentResult] = []

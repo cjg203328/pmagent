@@ -201,11 +201,10 @@ class ExcelQuoteParser:
 
     @staticmethod
     def _load_workbook(source: Union[str, Path, BinaryIO], source_name: str):
-        if hasattr(source, "seek"):
-            source.seek(0)
+        from artpm_agent.utils.spreadsheet_io import safe_load_workbook
 
         if Path(source_name).suffix.lower() != ".xls":
-            return openpyxl.load_workbook(source, data_only=True)
+            return safe_load_workbook(source, source_name=source_name, data_only=True)
 
         # openpyxl does not support legacy .xls files. Convert the first sheet
         # in memory so the same extraction rules can be reused.

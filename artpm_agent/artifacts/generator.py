@@ -16,9 +16,10 @@ from typing import Any
 from uuid import uuid4
 
 from docx import Document
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook
 
 from artpm_agent.utils.multimodal_markdown import LocalMarkdownConverter
+from artpm_agent.utils.spreadsheet_io import safe_load_workbook
 
 from .verification import verify_artifact
 
@@ -357,7 +358,7 @@ class WorkspaceArtifactGenerator:
 
     @staticmethod
     def _xlsx_to_csv_bytes(path: Path) -> bytes:
-        workbook = load_workbook(path, read_only=True, data_only=True)
+        workbook = safe_load_workbook(path, read_only=True, data_only=True)
         try:
             worksheet = workbook.worksheets[0]
             stream = StringIO(newline="")

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import io
+import re
+import shutil
+import zipfile
 from hashlib import sha256
 from pathlib import Path
 
@@ -380,6 +383,93 @@ def test_ambiguous_month_across_years_asks_instead_of_guessing(tmp_path):
         resolve_target_month("保留3月", source)
 
 
+@pytest.mark.parametrize(
+    ("prompt", "expected"),
+    [("只保留24年11月的行", "2024-11"), ("只保留25年11月的行", "2025-11")],
+)
+def test_two_digit_year_prompt_is_anchored_on_the_workbook(tmp_path, prompt, expected):
+    """表名写作「25年11月」，用户也会这样提需求；年份不得被当成歧义拒掉。"""
+    from artpm_agent.artifacts.xlsx_monthly import resolve_target_month
+
+    source = _wide_source(tmp_path / "wide.xlsx", titles=["24年11月", "25年11月"])
+
+    assert resolve_target_month(prompt, source) == expected
+
+
+def test_two_digit_year_without_a_workbook_still_asks():
+    from artpm_agent.artifacts.xlsx_monthly import (
+        MonthlyXlsxError,
+        resolve_target_month,
+    )
+
+    with pytest.raises(MonthlyXlsxError, match="四位年份"):
+        resolve_target_month("只保留25年11月的行")
+
+
+def _with_empty_fill(path: Path) -> Path:
+    """Add a self-closing ``<fill/>`` node, as WPS and some add-ins export."""
+    with zipfile.ZipFile(path) as archive:
+        members = [(item, archive.read(item.filename)) for item in archive.infolist()]
+    styles = {item.filename: payload for item, payload in members}[
+        "xl/styles.xml"
+    ].decode("utf-8")
+    styles, updated = re.subn(
+        r'<fills count="(\d+)">',
+        lambda match: f'<fills count="{int(match.group(1)) + 1}">',
+        styles,
+        count=1,
+    )
+    assert updated == 1, "openpyxl output did not contain a countable <fills> node"
+    styles = styles.replace("</fills>", "<fill/></fills>", 1).encode("utf-8")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for item, payload in members:
+            archive.writestr(
+                item, styles if item.filename == "xl/styles.xml" else payload
+            )
+    return path
+
+
+def test_wide_row_count_ignores_formatting_only_tail_rows(tmp_path):
+    """真实月度表的格式延伸到最后一行之后，空行不得算成交付行数。"""
+    from openpyxl.styles import PatternFill
+
+    source = tmp_path / "wide.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.remove(workbook.active)
+    sheet = workbook.create_sheet("24年11月")
+    sheet.append(["甲方工作室", "任务名称", "商务人天"])
+    sheet.append(["NBA", "麦迪", 18])
+    sheet.append(["", "艾弗森", 19])
+    sheet.cell(200, 3).fill = PatternFill(
+        fill_type="solid", start_color="FF8CDDFA", end_color="FF8CDDFA"
+    )
+    workbook.save(source)
+
+    output = tmp_path / "out.xlsx"
+    result = transform_monthly_workbook(source, output, "2024-11")
+
+    assert sheet.max_row == 200, "夹具必须复现真实表的格式延伸"
+    assert result.matched_rows == 2
+
+
+def test_monthly_transform_opens_a_workbook_with_empty_fill_nodes(tmp_path):
+    """真实客户表用 WPS 导出，空 ``<fill/>`` 会让 openpyxl 整本报错（PRD §10）。"""
+    source = _with_empty_fill(_wide_source(tmp_path / "wide.xlsx"))
+
+    with pytest.raises(TypeError):
+        load_workbook(source)
+
+    output = tmp_path / "out.xlsx"
+    result = transform_monthly_workbook(source, output, "2024-11")
+
+    assert result.matched_rows == 2
+    workbook = load_workbook(output)
+    try:
+        assert workbook.sheetnames == ["24年11月", "处理说明"]
+    finally:
+        workbook.close()
+
+
 # ── 端到端：请求必须经 run_turn 走到可下载交付物，而不是聊天内表格 ──
 
 
@@ -455,3 +545,29 @@ def test_run_turn_delivers_a_monthly_workbook(tmp_path, prompt):
         assert workbook.sheetnames == ["24年11月", "处理说明"]
     finally:
         workbook.close()
+
+
+def test_monthly_artifact_is_named_after_the_uploaded_file_and_month(tmp_path):
+    """上传件在盘上是哈希名，交付物必须回到用户认得的名字（含月份）。"""
+    from artpm_agent.artifacts.coordinator import ArtifactCoordinator
+
+    stored = tmp_path / "uploads" / "58af653edd434cf68f0b661dd780bbf4.xlsx"
+    stored.parent.mkdir()
+    shutil.copy(_wide_source(tmp_path / "wide.xlsx"), stored)
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    coordinator = ArtifactCoordinator(
+        WorkspaceArtifactGenerator(root),
+        llm=_NoLLM(),
+    )
+
+    result = coordinator.process(
+        "只保留24年11月的行",
+        attachments=[
+            {"name": "角色组-任务及绩效分配.xlsx", "stored_path": str(stored)}
+        ],
+        file_paths=[str(stored)],
+    )
+
+    assert result.rejected is False
+    assert result.artifact["name"] == "角色组-任务及绩效分配-2024-11.xlsx"

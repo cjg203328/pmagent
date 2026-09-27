@@ -10,7 +10,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from openpyxl import load_workbook
+from artpm_agent.utils.spreadsheet_io import safe_load_workbook
 
 
 class MonthlyXlsxError(ValueError):
@@ -51,6 +51,9 @@ _MONTH_VALUE = re.compile(
     r"(?P<year>20\d{2})\s*(?:年|[-/.])\s*(?P<month>1[0-2]|0?[1-9])\s*(?:月)?"
 )
 _MONTH_ONLY = re.compile(r"(?<!\d)(?P<month>1[0-2]|0?[1-9])\s*月(?!\d)")
+_SHORT_MONTH_VALUE = re.compile(
+    r"(?<!\d)(?P<year>\d{2})\s*(?:年|[-/.])\s*(?P<month>1[0-2]|0?[1-9])\s*月"
+)
 _MODES = {"new_items", "cumulative"}
 
 
@@ -110,7 +113,7 @@ def _explicit_years(source_path: Path, month_number: int) -> tuple[int, ...]:
     in a per-row month column, so both are scanned.
     """
     years: set[int] = set()
-    workbook = load_workbook(source_path, data_only=True)
+    workbook = safe_load_workbook(source_path, data_only=True)
     try:
         for sheet in workbook.worksheets:
             titled = sheet_target_month(sheet.title)
@@ -133,6 +136,25 @@ def _explicit_years(source_path: Path, month_number: int) -> tuple[int, ...]:
     return tuple(sorted(years))
 
 
+def _anchor_month(
+    month_number: int,
+    source_path: Path,
+    label: str,
+    *,
+    two_digit_year: int | None = None,
+) -> str:
+    """Pick the single year the workbook itself offers for that month."""
+    years = _explicit_years(source_path, month_number)
+    if two_digit_year is not None:
+        years = tuple(year for year in years if year % 100 == two_digit_year)
+    if len(years) == 1:
+        return f"{years[0]:04d}-{month_number:02d}"
+    if not years:
+        raise MonthlyXlsxError(f"表格中没有找到 {label} 的数据")
+    joined = "、".join(str(year) for year in years)
+    raise MonthlyXlsxError(f"表格中 {label} 同时出现在 {joined} 年，请指定年份")
+
+
 def resolve_target_month(prompt: str, source_path: str | Path | None = None) -> str:
     """Resolve a prompt month to ``YYYY-MM`` without guessing a year.
 
@@ -144,19 +166,23 @@ def resolve_target_month(prompt: str, source_path: str | Path | None = None) -> 
     match = _MONTH_VALUE.search(text)
     if match:
         return f"{int(match.group('year')):04d}-{int(match.group('month')):02d}"
+    source = Path(source_path) if source_path is not None else None
+    short = _SHORT_MONTH_VALUE.search(text)
+    if short is not None:
+        month_number = int(short.group("month"))
+        label = f"{short.group('year')}年{month_number}月"
+        if source is None:
+            raise MonthlyXlsxError(f"需要确认「{label}」属于哪一年，请写成四位年份")
+        return _anchor_month(
+            month_number, source, label, two_digit_year=int(short.group("year"))
+        )
     month_only = _MONTH_ONLY.search(text)
     if month_only is None:
         raise MonthlyXlsxError("未识别到月份")
     month_number = int(month_only.group("month"))
-    if source_path is None:
+    if source is None:
         raise MonthlyXlsxError(f"需要确认「{month_number}月」属于哪一年")
-    years = _explicit_years(Path(source_path), month_number)
-    if len(years) == 1:
-        return f"{years[0]:04d}-{month_number:02d}"
-    if not years:
-        raise MonthlyXlsxError(f"表格中没有找到 {month_number}月 的数据")
-    joined = "、".join(str(year) for year in years)
-    raise MonthlyXlsxError(f"表格中 {month_number}月 同时出现在 {joined} 年，请指定年份")
+    return _anchor_month(month_number, source, f"{month_number}月")
 
 
 _SHEET_SHORT_MONTH = re.compile(
@@ -225,7 +251,17 @@ def _select_sheets_by_month(
         if sheet.title == "处理说明":
             continue
         header_row = _text_header_row(sheet)
-        data_rows = max(0, sheet.max_row - header_row)
+        # Monthly sheets carry their formatting far below the last record, so
+        # ``max_row`` counts empty rows. Reporting those as delivered rows told
+        # users the export kept 210 rows when 38 held data.
+        data_rows = sum(
+            1
+            for row_index in range(header_row + 1, sheet.max_row + 1)
+            if any(
+                sheet.cell(row_index, column).value not in (None, "")
+                for column in range(1, sheet.max_column + 1)
+            )
+        )
         total_matched += data_rows
         summaries.append(
             {
@@ -388,7 +424,9 @@ def transform_monthly_workbook(
     target_year = int(normalized_target[:4])
     destination.parent.mkdir(parents=True, exist_ok=True)
     source_digest = sha256(source.read_bytes()).hexdigest()
-    workbook = load_workbook(source, keep_vba=source.suffix.lower() == ".xlsm")
+    workbook = safe_load_workbook(
+        source, keep_vba=source.suffix.lower() == ".xlsm"
+    )
     try:
         titled = {
             sheet.title: sheet_target_month(sheet.title)

@@ -1106,10 +1106,24 @@ class ArtifactCoordinator:
         artifact = self.generator.generate_docx(plan.filename, paragraphs)
         return artifact, f"{artifact['paragraphs']} 段", "Word"
 
+    @staticmethod
+    def _monthly_stem(source: Path, attachments: Any) -> str:
+        """Name the copy after the file the user uploaded, not its storage hash."""
+        for item in attachments or []:
+            if not isinstance(item, Mapping):
+                continue
+            name = str(item.get("name") or "").strip()
+            stored = str(item.get("stored_path") or "").strip()
+            if name and stored and Path(stored).name == source.name:
+                return Path(name).stem or source.stem
+        return source.stem
+
     def _generate_monthly(
         self,
         prompt: str,
         source: Path,
+        *,
+        attachments: Any = None,
     ) -> ArtifactCoordinationResult:
         """Filter an uploaded workbook down to one month, keeping its formatting."""
         try:
@@ -1126,7 +1140,9 @@ class ArtifactCoordinator:
         scope = "累计" if mode == "cumulative" else "仅当月"
         try:
             artifact = self.generator.generate_xlsx_monthly(
-                source.stem,
+                # The month belongs in the name: two months of one workbook are two
+                # deliverables, not two versions of the same artifact.
+                f"{self._monthly_stem(source, attachments)}-{target_month}",
                 source,
                 target_month,
                 mode=mode,
@@ -1226,7 +1242,9 @@ class ArtifactCoordinator:
         if monthly_sources and is_monthly_request(prompt):
             named_format, _ = self._detect_format(prompt)
             if named_format in (None, "xlsx"):
-                return self._generate_monthly(prompt, monthly_sources[0])
+                return self._generate_monthly(
+                    prompt, monthly_sources[0], attachments=attachments
+                )
 
         expected_format, detection_error = self._detect_format(prompt)
         if detection_error == "ambiguous_format":
