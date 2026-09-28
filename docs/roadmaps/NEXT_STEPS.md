@@ -21,20 +21,19 @@ Review cadence: 每个里程碑结束时
 
 ## M1（本周）：修缺陷 + 收敛数据模型
 
-按 PRD §11 M1 与 §10 缺陷清单。**进度以 2026-09-19 实测为准**（见
-[`../operations/CURRENT_STATUS.md`](../operations/CURRENT_STATUS.md)）：
+按 PRD §11 M1 与 §10 缺陷清单。下列 2026-09-19 内容保留为历史工作快照；当前门禁与 UI 状态见
+[`../operations/CURRENT_STATUS.md`](../operations/CURRENT_STATUS.md)：
 
 1. **R-0 内置工作流版本自增死循环** — checksum 排除 `version`/`tenant_id`/
    `workspace_id`；清理历史幻影版本。实测单日已从 111 行涨到 123 行，越晚修数据越多。
-   **状态：未开始。**
+    **状态：已完成**（`store_codec.py` 排除业务语义哈希之外的易变字段；幂等版本回归已覆盖）。
 2. **R-3 Excel 附件分类硬编码** — `parsers/excel_parser.py` 停止对任意 Excel
    返回「报价单」，改按表头/结构判别，判不出返回 `unknown`。
    **状态：已完成**（判别与客户识别解耦；`tests/test_s0_monthly_workbook.py` 与
    `tests/test_regressions.py` 覆盖）。
 3. **R-4 文件类请求接通交付物管道** — 让「导出/另存/汇总版」命中 `artifacts/`
    XLSX 生成与核验，产出可下载文件而不是聊天内 markdown。
-   **状态：部分完成**——`generate_xlsx_monthly` 与核验已实现并测试通过，
-   但**尚未接入 UI/意图路由**，用户仍拿不到文件。
+    **状态：S0 路径已完成**——`generate_xlsx_monthly`、核验与 `run_turn` 端到端路径已接通；S1 报价链仍未完成。
 4. **人员模型收敛** — 保留 `team_members`，并入 `daily_cost`，废弃 `staff` 与
    `task_assignments`；删除 `skill_router.py:538` 的 `or` 兜底与三处 `hasattr` 阶梯。
    ⚠ 需先走 `docs/operations/收缩迁移手册.md`，并需业务方确认走 `team_members`。
@@ -52,12 +51,13 @@ Review cadence: 每个里程碑结束时
 出口判据：报价技能读同一张表；Excel 不再一律判成报价单；S0 能产出 `.xlsx`；
 fast 套件全绿。
 
-**当前实际达成**：Excel 不再一律判成报价单 ✅；S0 管道能产出并核验 `.xlsx` ✅
-（未接 UI）；fast 套件 1840 passed / 0 failed ✅；报价技能读同一张表 ✅
-（代码路径已通，真实库因缺档位数据仍返回 `needs_input`）；Job 对象与三栏原型 ✅。
+**当前实际达成**：Excel 不再一律判成报价单 ✅；S0 管道能产出并核验 `.xlsx` ✅；
+R-0 工作流内置版本已幂等 ✅；全量测试 `1987 passed / 29 skipped`；EvoFlow 兼容
+对话控制平面与计划授权交互已接入；计划 API、附件容错和确定性工作簿查询已覆盖测试。
 
-**当前未达成**：`data/artpm.db` 无可用费率数据；S0 未接 UI 入口；报价真值断言
-V-1..V-3 因 `tests/golden/cases/` 为空未成立；收缩迁移手册的能力删除未执行。
+**当前未达成**：`data/artpm.db` 仍缺可用费率数据；报价真值断言 V-1..V-3 因
+`tests/golden/cases/` 为空未成立；S1 报价端到端、`ledger_update` 等剩余办公流技能、
+PostgreSQL/MCP/真实浏览器集成验证仍未完成。
 
 ## M1.5（与 M1 并行）：三栏技术 spike
 

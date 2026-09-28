@@ -1,6 +1,6 @@
 # Current Project Status
 
-Validated on 2026-09-19 from branch
+Validated on 2026-09-28 from branch
 `chore/consolidate-uncommitted-work`.
 
 产品定位与范围以 [`../product/PRD.md`](../product/PRD.md) 为准。本文件只记录
@@ -21,7 +21,7 @@ Validated on 2026-09-19 from branch
 | 业务技能命中率 | 0 / 3 | 2026-09-19 的 3 条真实业务请求 `intent=None`，全部由 LLM 兜底 |
 | 交付物产出 | S0 路径已打通 | 「仅11月汇总版」现经 `run_turn` 产出可下载 `.xlsx`（此前只得到聊天内 markdown） |
 
-fast 套件实测（2026-09-20）：**1864 passed, 7 skipped, 0 failed**（91 deselected）。
+fast 套件实测（2026-09-20，历史快照）：**1864 passed, 7 skipped, 0 failed**（91 deselected）。
 相比收缩迁移手册 §0 记录的 1673 passed 基线，新增来自 S0 回归（含走 `run_turn` 的端到端
 断言）、费率模型、播种脚本、Job 服务、golden 结构断言与知识 owner 隔离断言。
 
@@ -29,11 +29,11 @@ fast 套件实测（2026-09-20）：**1864 passed, 7 skipped, 0 failed**（91 de
 `POSTGRES_TEST_URL` 跳过，1 个是 `tests/golden/test_structure.py` 的 T1
 报价单生成器未实现。
 
-同时段内的实测口径（复测于 2026-09-27）：
+同时段内的历史实测口径（复测于 2026-09-27）：
 
 | 检查 | 结果 |
 | --- | --- |
-| 全量 fast 套件 | 1894 passed, 7 skipped, 0 failed（约 180 秒） |
+| 全量测试套件 | 1987 passed, 29 skipped（2026-09-28） |
 | 报价门禁 `scripts/quote_golden_check.py`（结构） | 13 passed, 1 skipped，退出码 0 |
 | 报价门禁 `--values`（真值） | 退出码 **3**：`cases/` 为空，未验证 |
 | `ruff check artpm_agent tests scripts` | All checks passed，退出码 0 |
@@ -473,8 +473,9 @@ permission store + full 模式才放行，标错会导致每次生成周报都�
 | `/v1/jobs` 三条路由 | 已接入 | `api/routers/jobs.py`；`tests/test_jobs_api.py` 覆盖 201/200/404/401 |
 | `weekly_report` → Job | 已接入 | 建 Job(running) → 挂交付物 → `succeeded`；生成失败转 `failed`，不留半状态 |
 
-门禁终态：fast 套件 **1864 passed / 0 failed**；阻塞 lint 全过；compileall 通过；
+门禁终态（历史快照）：fast 套件 **1864 passed / 0 failed**；阻塞 lint 全过；compileall 通过；
 mypy 棘轮 **451 = 基线**，strict 四包（runtime/harness/api/tenancy）通过。
+当前全量门禁：**1987 passed / 29 skipped**；Ruff、compileall、git diff --check 与启动配置检查通过。
 
 ### 推送前已知的非阻塞遗留
 
@@ -483,7 +484,7 @@ mypy 棘轮 **451 = 基线**，strict 四包（runtime/harness/api/tenancy）通
   死代码；mypy 报 1 条 attr-defined。未猜补实现——补 9 个方法等于替别人完成半成品设计。
 - `knowledge_migrations.py` 的 8 条 `_utc_now` attr-defined 是 **mypy 对 mixin 的误报**：
   运行时由 `WorkspaceKnowledgeStore` 的 MRO 提供该方法，全新库迁移实测通过。
-- 三栏 UI 骨架、S1 端到端、其余办公流技能未做（M2/M3.5 剩余部分）。
+- S1 报价端到端与其余办公流技能仍未完成；旧三栏 UI 仅作为兼容实现，当前主 UI 已切换为 EvoFlow 兼容对话控制平面。
 
 ### EvoFlow 兼容改造（2026-09-28）
 
