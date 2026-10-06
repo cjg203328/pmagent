@@ -135,6 +135,54 @@ def test_chat_with_failover_caps_total_attempts_by_default():
     assert unused_fallback.chat.call_count == 0
 
 
+def test_explicit_failover_attempts_win_over_the_environment(monkeypatch):
+    """An explicit config value must not be overridden by the environment.
+
+    ``artpm_agent.config`` already folds ``LLM_FAILOVER_MAX_ATTEMPTS`` into the
+    config dict at startup. Reading the environment first inside the gateway
+    would let a stale ``.env`` value silently cap a caller that asked for more
+    attempts, so the config dict stays authoritative.
+    """
+
+    monkeypatch.setenv("LLM_FAILOVER_MAX_ATTEMPTS", "2")
+    primary = Mock()
+    primary.chat.side_effect = TimeoutError("primary timeout")
+    first_fallback = Mock()
+    first_fallback.chat.side_effect = TimeoutError("fallback timeout")
+    second_fallback = Mock()
+    second_fallback.chat.return_value = "final answer"
+    g = _gateway(
+        primary="a",
+        available=["b", "c"],
+        primary_client=primary,
+        factory=Mock(side_effect=[first_fallback, second_fallback]),
+        failover_max_attempts=3,
+    )
+
+    assert g.chat_with_failover("hi", "sys", []).endswith("final answer")
+    assert g.last_response_model == "c"
+
+
+def test_environment_supplies_failover_attempts_when_config_is_silent(monkeypatch):
+    """The environment remains the fallback when the config omits the key."""
+
+    monkeypatch.setenv("LLM_FAILOVER_MAX_ATTEMPTS", "1")
+    primary = Mock()
+    primary.chat.side_effect = TimeoutError("primary timeout")
+    unused_fallback = Mock()
+    g = _gateway(
+        primary="a",
+        available=["b", "c"],
+        primary_client=primary,
+        factory=Mock(side_effect=[unused_fallback]),
+    )
+
+    with pytest.raises(RuntimeError, match="模型请求失败"):
+        g.chat_with_failover("hi", "sys", [])
+
+    unused_fallback.chat.assert_not_called()
+
+
 def test_runtime_model_override_builds_client_for_selected_model():
     original = Mock()
     selected = Mock()

@@ -3,7 +3,7 @@
 **版本**: v1  
 **协议**: REST / JSON  
 **认证**: Trusted Header + Shared Secret  
-**最后更新**: 2026-07-22
+**最后更新**: 2026-10-06
 
 ---
 
@@ -236,6 +236,183 @@ curl -X POST http://127.0.0.1:8765/v1/chat \
   }
 }
 ```
+
+---
+
+### 会话管理端点
+
+React 前端的侧边栏通过这些端点重建会话列表、归档/恢复与删除会话，并读写每个会话的
+审批档位。所有端点都按请求头中的 `workspace_id` 隔离。
+
+#### GET /v1/conversations
+
+**列出工作区会话**，按最近更新倒序。
+
+| 查询参数 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `limit` | int | 100 | 1–500 |
+| `offset` | int | 0 | 分页偏移 |
+| `archived` | bool | false | `true` 返回归档桶，`false` 返回活跃桶 |
+
+```bash
+curl "http://127.0.0.1:8765/v1/conversations?limit=50" \
+  -H "X-Workspace-ID: local-default" \
+  -H "X-Actor-ID: local-ui"
+```
+
+```json
+{
+  "workspace_id": "local-default",
+  "archived": false,
+  "items": [
+    {
+      "id": "conv-789",
+      "title": "帮我检查项目进度",
+      "created_at": "2026-10-06T02:47:26+00:00",
+      "updated_at": "2026-10-06T03:12:44+00:00"
+    }
+  ]
+}
+```
+
+`archived=true` 与 `archived=false` 构成可逆的软删除：归档只是把会话移出活跃桶，
+`DELETE` 才是不可撤销的永久删除。
+
+#### GET /v1/conversations/{conversation_id}/messages
+
+**读取某个会话的消息记录**，用于恢复对话上下文。
+
+#### PATCH /v1/conversations/{conversation_id}
+
+**重命名和/或归档、恢复会话**。`title` 与 `archived` 至少提供一个。
+
+```bash
+curl -X PATCH http://127.0.0.1:8765/v1/conversations/conv-789 \
+  -H "X-Workspace-ID: local-default" \
+  -H "X-Actor-ID: local-ui" \
+  -H "Content-Type: application/json" \
+  -d '{"archived": true}'
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `title` | string? | 最长 80 字符，首尾空白会被裁剪 |
+| `archived` | bool? | `true` 归档，`false` 恢复 |
+
+两者都省略时返回 `422`。
+
+#### DELETE /v1/conversations/{conversation_id}
+
+**永久删除会话及其消息与授权行**。不可撤销；需要保留记录时改用 `PATCH archived=true`。
+
+#### GET /v1/conversations/{conversation_id}/access-mode
+
+**查询会话当前生效的审批档位**。
+
+```json
+{ "conversation_id": "conv-789", "mode": "controlled" }
+```
+
+授权行缺失、已过期或绑定不匹配时返回 `controlled`——这是宿主自己的失败即收紧基线。
+
+#### PUT /v1/conversations/{conversation_id}/access-mode
+
+**由人类操作者切换该会话的审批档位**。
+
+```bash
+curl -X PUT http://127.0.0.1:8765/v1/conversations/conv-789/access-mode \
+  -H "X-Workspace-ID: local-default" \
+  -H "X-Actor-ID: local-ui" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "read_only"}'
+```
+
+| 档位 | 语义 | 有效期 |
+| --- | --- | --- |
+| `read_only` | 仅放行纯查询；写入类操作直接拒绝，不生成审批请求 | 7 天 |
+| `controlled` | 每个写入操作逐项确认后才执行（默认档） | 不落库 |
+| `full_access` | 受信任的低/中风险操作自动放行，高风险仍需确认 | 1 小时 |
+
+档位由宿主强制，模型无法通过任何请求字段放宽。取值非法返回 `422`。
+
+---
+
+### 网关配置端点
+
+`.env` 白名单配置的读写接口，供 React「设置」页使用。**两个端点都要求
+`X-Actor-Role: admin`**，其他角色返回 `403 admin_required`——编辑配置等于掌握全部
+Provider 凭据并决定网关连往哪个端点，因此不向普通工作区成员开放。
+
+#### GET /v1/config
+
+**返回白名单内的全部环境变量，按分组组织**。密钥类字段的 `value` 恒为空字符串，
+只返回 `configured` 与脱敏 `preview`，明文不经过该接口。
+
+```json
+{
+  "env_path": "E:\\desk\\xm\\artpm\\pmagent\\.env",
+  "provider": "anthropic",
+  "model": "claude-3-5-sonnet-20241022",
+  "groups": [
+    {
+      "id": "keys",
+      "title": "API Key 与接入点",
+      "description": "各 Provider 的凭据。密钥仅写入项目根目录 .env，读取时一律脱敏。",
+      "fields": [
+        {
+          "key": "ANTHROPIC_API_KEY",
+          "label": "Anthropic API Key",
+          "kind": "secret",
+          "help": "",
+          "options": [],
+          "placeholder": "",
+          "value": "",
+          "preview": "••••••3456",
+          "configured": true
+        }
+      ]
+    }
+  ]
+}
+```
+
+分组依次为 `主模型 / API Key 与接入点 / 视觉模型 / 向量与检索 / OCR 服务 /
+文档解析（MinerU） / 实时语音 / 运行时与缓存`。字段 `kind` 取值
+`text | secret | bool | int | float | select`，前端据此渲染对应控件。
+
+#### PUT /v1/config
+
+**校验、落盘并热重载一批 `.env` 变更**。
+
+```bash
+curl -X PUT http://127.0.0.1:8765/v1/config \
+  -H "X-Workspace-ID: local-default" \
+  -H "X-Actor-ID: local-ui" \
+  -H "X-Actor-Role: admin" \
+  -H "Content-Type: application/json" \
+  -d '{"values": {"LLM_MAX_TOKENS": "1500"}}'
+```
+
+```json
+{
+  "applied": ["LLM_MAX_TOKENS"],
+  "env_path": "E:\\desk\\xm\\artpm\\pmagent\\.env",
+  "hot_reloaded": true,
+  "restart_required": false
+}
+```
+
+约束：
+
+- **只能写白名单内的键**。请求无法引入任意环境变量，未知键返回 `422 config_invalid`
+  并列出违规键名。
+- **整批先校验后落盘**。任一值非法（类型不符、不在 `select` 选项内、含换行）则整批
+  不写入，文件保持原样。
+- **保留原文件形态**。注释、键顺序与行尾风格都会被保留；LF 文件不会因为一次编辑变成
+  CRLF。清空某个键写入 `KEY=` 而不是 dotenv 默认的 `KEY=''`。
+- **写后尝试热重载**。配置会重新加载并释放缓存中的模型客户端，使下一轮对话使用新设置。
+  宿主不支持热重载时返回 `restart_required: true`，不会谎称已生效。
+- 密钥可以写入，但读回时永远只有脱敏预览；明文不进入任何响应。
 
 ---
 

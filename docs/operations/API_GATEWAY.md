@@ -27,15 +27,46 @@ artpm-api
 
 核心路由：
 
-- `GET /health`
+- `GET /health`、`GET /ready`
 - `GET /v1/capabilities`
 - `POST /v1/chat`
+- 会话管理：`GET /v1/conversations`（`archived=true` 取归档桶）、
+  `GET /v1/conversations/{id}/messages`、`PATCH /v1/conversations/{id}`
+  （重命名 / 归档 / 恢复）、`DELETE /v1/conversations/{id}`（永久删除）
+- 会话审批档位：`GET/PUT /v1/conversations/{id}/access-mode`
+- 网关配置：`GET/PUT /v1/config`（**仅 admin**，密钥脱敏，写后热重载）
 - `GET /v1/permissions`、`GET /v1/permissions/{id}`
 - `POST /v1/permissions/{id}/approve`、`POST /v1/permissions/{id}/reject`
 - `GET/POST /v1/workflows`
 - `POST /v1/workflows/{id}/runs`
 - `GET /v1/workflow-runs`、`GET /v1/workflow-runs/{id}`
 - `POST /v1/workflow-runs/{id}/steps/{index}/approve|reject`
+
+### 会话审批档位
+
+每个会话持久化一档审批策略，由宿主而非模型强制。`controlled` 是失败即收紧的基线：
+授权行缺失、过期或绑定不匹配时一律回落到它。
+
+| 档位 | 语义 | 有效期 |
+| --- | --- | --- |
+| `read_only` | 仅放行纯查询；写入直接拒绝，不生成审批请求 | 7 天 |
+| `controlled` | 每个写入逐项确认（默认档） | 不落库 |
+| `full_access` | 低/中风险自动放行，高风险仍需确认 | 1 小时 |
+
+授权行存放在 `data/conversations.db` 的 `conversation_access_grants` 表，权限库
+schema 版本为 `4`。React 前端的 composer 模式选择器与 Streamlit 共用同一套语义，
+Streamlit 仅暴露 `controlled` / `full_access` 两档。
+
+### 网关配置接口
+
+`GET /v1/config` 返回 `artpm_agent.api.config_admin.CONFIG_GROUPS` 白名单内的环境
+变量，按八个分组组织。密钥字段的 `value` 恒为空，只返回 `configured` 与脱敏
+`preview`，明文不经过该接口。
+
+`PUT /v1/config` 接受 `{"values": {"KEY": "value"}}`，写入项目根目录 `.env`：仅白名单
+键可写；整批先校验后落盘；保留注释、键顺序与行尾风格；写后热重载并释放缓存的模型
+客户端。宿主不支持热重载时返回 `restart_required: true`。两个端点都要求
+`X-Actor-Role: admin`，其他角色返回 `403`。
 
 审批请求只接受 `expected_version`，服务端从持久化请求恢复原始 payload，执行前做
 SHA-256 绑定、一次性 CAS claim 和脱敏；模型输出不能通过 API 自批。工作流创建时，

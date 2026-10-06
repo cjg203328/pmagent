@@ -5,6 +5,7 @@
 
 | 分类 | 入口 | 用途 |
 | --- | --- | --- |
+| 测试 | `pytest_env.ps1` | 测试脚本公共环境：venv Python 解析 + 仓库内临时目录/缓存隔离 |
 | 测试 | `test_fast.ps1` | 快速离线回归 |
 | 测试 | `test_all.ps1` | 完整离线回归，包含慢速 UI |
 | 测试 | `test_integration.ps1` | 显式外部集成测试 |
@@ -17,6 +18,14 @@
 | 检查 | `verify_optimization.py` | 启动、文档和优化契约检查 |
 | 检查 | `verify_new_features.py` | 历史功能验证脚本，按需运行 |
 | 看板 | `telemetry_dashboard_app.py` | 独立 Streamlit 遥测看板入口 |
+
+所有 PowerShell 测试脚本均通过 `pytest_env.ps1` 启动，并遵循两条本地约定：
+
+1. **解释器**：优先使用项目 `.venv`，避免命中 PATH 上的 Windows Store 别名 stub。
+2. **缓存隔离**：pytest 的 `tmp_path`、`tempfile`、子进程临时目录统一重定向到
+   仓库内 `.cache/tmp`；pip 缓存指向 `.cache/pip`。`.cache/` 已被 `.gitignore`
+   排除，运行测试不会向系统盘（如 `C:\Users\<user>\AppData\Local\Temp`）写入
+   会话残留。
 
 推荐先运行：
 

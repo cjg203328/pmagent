@@ -25,6 +25,10 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from .ocr_config_values import as_bool as _as_bool
+from .ocr_config_values import bounded_float as _bounded_float
+from .ocr_config_values import bounded_int as _bounded_int
+
 
 MAX_MANIFEST_BYTES = 128 * 1024
 MAX_COMMAND_ARGUMENTS = 128
@@ -39,30 +43,6 @@ _PROCESS_STOP_TIMEOUT_SECONDS = 1.0
 
 class OCRRuntimeError(RuntimeError):
     """The bundled OCR runtime could not be validated or started."""
-
-
-def _as_bool(value: Any, default: bool) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _bounded_float(value: Any, default: float, minimum: float, maximum: float) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        parsed = default
-    return max(minimum, min(parsed, maximum))
-
-
-def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = default
-    return max(minimum, min(parsed, maximum))
 
 
 @dataclass(frozen=True)

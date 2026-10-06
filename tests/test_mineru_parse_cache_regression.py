@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import sys
 from threading import Barrier, Lock
 from time import sleep
 from types import SimpleNamespace
@@ -67,7 +68,7 @@ def _converter(tmp_path: Path, source: Path, runner) -> MinerUDocumentConverter:
     return MinerUDocumentConverter(
         MinerUConfig.from_mapping(
             {
-                "command": ["E:/python/python.exe", "-m", "mineru"],
+                "command": [sys.executable, "-m", "mineru"],
                 "output_dir": str(tmp_path / "mineru-output"),
                 "cache_enabled": True,
             }

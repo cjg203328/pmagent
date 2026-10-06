@@ -423,6 +423,29 @@ def try_skill_routing(
                 or metadata.get("metadata_status") == "missing"
             ),
         )
+        if permission_required and mode_decision == "deny":
+            # Read-only mode is a hard stop: no approval request is created and
+            # no execution path is reachable.  Falling through to the model here
+            # would let the same protected Skill be re-requested.
+            from .turn_service import TurnResult
+
+            return TurnResult(
+                response=(
+                    "当前会话处于只读模式，该操作不会执行。"
+                    "如需执行，请先切换访问模式。"
+                ),
+                success=False,
+                awaiting_approval=False,
+                handled_by="access_mode_read_only",
+                metadata={
+                    "turn_id": ctx.turn_id,
+                    "conversation_id": ctx.conversation_id,
+                    "skill_name": intent,
+                    **decision_metadata,
+                    "permission_status": "denied_read_only",
+                },
+            )
+
         if permission_required and mode_decision == "confirm":
             try:
                 request = _permission_request(ctx, intent, inputs, metadata)

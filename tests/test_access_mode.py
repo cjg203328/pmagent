@@ -5,6 +5,7 @@ import pytest
 from artpm_agent.security import (
     ACCESS_MODE_CONTROLLED,
     ACCESS_MODE_FULL,
+    ACCESS_MODE_READ_ONLY,
     access_decision,
     effective_access_risk,
     normalize_access_mode,
@@ -22,6 +23,8 @@ class ReadyPermissionStore:
         (ACCESS_MODE_FULL, ACCESS_MODE_FULL),
         (" FULL_ACCESS ", ACCESS_MODE_FULL),
         (ACCESS_MODE_CONTROLLED, ACCESS_MODE_CONTROLLED),
+        (ACCESS_MODE_READ_ONLY, ACCESS_MODE_READ_ONLY),
+        (" READ_ONLY ", ACCESS_MODE_READ_ONLY),
         ("unknown", ACCESS_MODE_CONTROLLED),
         (None, ACCESS_MODE_CONTROLLED),
     ],
@@ -87,6 +90,50 @@ def test_write_access_fails_closed_without_a_valid_full_access_runtime(context):
 def test_read_only_action_does_not_need_an_access_grant():
     assert access_decision(
         None,
+        read_only=True,
+        requires_approval=False,
+        risk="low",
+    ) == "allow"
+
+
+def test_read_only_mode_denies_every_side_effecting_action():
+    """Read-only is stricter than controlled: writes are refused, not queued."""
+
+    context = {
+        "permission_mode": ACCESS_MODE_READ_ONLY,
+        "permission_store": ReadyPermissionStore(),
+    }
+
+    for risk in ("low", "medium", "high", "critical", "untrusted"):
+        assert access_decision(
+            context,
+            read_only=False,
+            requires_approval=True,
+            risk=risk,
+            required_role="user",
+            auto_approval_allowed=True,
+        ) == "deny"
+
+    # A full-access-shaped runtime must not upgrade a read-only conversation.
+    context_with_full_runtime = {
+        "permission_mode": ACCESS_MODE_READ_ONLY,
+        "permission_store": ReadyPermissionStore(),
+    }
+    assert access_decision(
+        context_with_full_runtime,
+        read_only=False,
+        requires_approval=True,
+        risk="medium",
+        required_role="user",
+        auto_approval_allowed=True,
+    ) == "deny"
+
+
+def test_read_only_mode_still_allows_pure_reads():
+    context = {"permission_mode": ACCESS_MODE_READ_ONLY}
+
+    assert access_decision(
+        context,
         read_only=True,
         requires_approval=False,
         risk="low",

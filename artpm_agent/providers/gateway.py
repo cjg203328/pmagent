@@ -501,11 +501,17 @@ class ModelGateway:
         return bool(self._llm_config.get("task_classifier_enabled", False))
 
     def _read_failover_max_attempts(self) -> int:
-        """Bound total provider attempts so one turn cannot time out N times."""
+        """Bound total provider attempts so one turn cannot time out N times.
 
-        raw_value = os.getenv("LLM_FAILOVER_MAX_ATTEMPTS", "") or self._llm_config.get(
-            "failover_max_attempts", 2
-        )
+        The config dict is authoritative. ``artpm_agent.config`` already folds
+        ``LLM_FAILOVER_MAX_ATTEMPTS`` into it at startup, so consulting the
+        environment first here would let the file override a value the caller
+        passed in explicitly.
+        """
+
+        raw_value = self._llm_config.get("failover_max_attempts")
+        if raw_value is None:
+            raw_value = os.getenv("LLM_FAILOVER_MAX_ATTEMPTS", "")
         try:
             value = int(raw_value)
         except (TypeError, ValueError):

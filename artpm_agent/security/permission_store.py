@@ -51,6 +51,16 @@ _MAX_TEXT_LENGTH = 4_000
 _DEFAULT_TTL_SECONDS = 10 * 60
 _MAX_TTL_SECONDS = 7 * 24 * 60 * 60
 
+# Full access is a session convenience mode, not a durable privilege. One hour
+# matches the Streamlit host's original grant window so both UIs expire a
+# conversation-scoped grant at the same point in time.
+FULL_ACCESS_TTL_SECONDS = 60 * 60
+# Read-only is the strictest mode, so its expiry must not tighten anything: it
+# falls back to `controlled`, which is the safe baseline that confirms every
+# write. A long window keeps an explicit choice stable across restarts.
+READ_ONLY_TTL_SECONDS = _MAX_TTL_SECONDS
+ACCESS_MODES = frozenset({"read_only", "controlled", "full_access"})
+
 _SENSITIVE_KEYS = frozenset(
     {
         "access_key",
@@ -124,6 +134,17 @@ def _state_version(value: Any, field: str = "expected_version") -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise PermissionValidationError(f"{field} must be a non-negative integer")
     return value
+
+
+def _parse_iso(value: str) -> datetime | None:
+    """Parse one persisted UTC timestamp; ``None`` when malformed."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _normalize_json(
@@ -326,7 +347,7 @@ class PermissionRequest:
 class PermissionStore:
     """Persist permission requests and enforce their one-shot lifecycle."""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 4
     BUSY_TIMEOUT_MS = 10_000
 
     def __init__(
@@ -504,6 +525,80 @@ class PermissionStore:
                     (self._iso(self._now()),),
                 )
 
+            if current < 3:
+                # Conversation-scoped access mode grants. Full access is a
+                # time-boxed convenience mode: the row is durable so an API
+                # restart cannot silently drop the user's explicit choice, but
+                # reads treat an expired grant as controlled and delete it.
+                connection.executescript(
+                    """
+                CREATE TABLE IF NOT EXISTS conversation_access_grants (
+                    conversation_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    principal_id TEXT NOT NULL,
+                    mode TEXT NOT NULL CHECK(mode IN ('controlled', 'full_access')),
+                    issued_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_conversation_access_scope
+                    ON conversation_access_grants(tenant_id, workspace_id, expires_at);
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO permission_schema_migrations(version, applied_at) "
+                    "VALUES (3, ?)",
+                    (self._iso(self._now()),),
+                )
+
+            if current < 4:
+                # Read-only joins the set of conversation-scoped access modes.
+                # SQLite cannot widen a CHECK constraint in place, so the table
+                # is rebuilt. Unknown legacy modes are filtered out rather than
+                # copied, which keeps the migration fail-closed.
+                connection.execute(
+                    """
+                    CREATE TABLE conversation_access_grants_v4 (
+                        conversation_id TEXT PRIMARY KEY,
+                        tenant_id TEXT NOT NULL,
+                        workspace_id TEXT NOT NULL,
+                        principal_id TEXT NOT NULL,
+                        mode TEXT NOT NULL CHECK(mode IN (
+                            'read_only', 'controlled', 'full_access'
+                        )),
+                        issued_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO conversation_access_grants_v4(
+                        conversation_id, tenant_id, workspace_id, principal_id,
+                        mode, issued_at, expires_at
+                    )
+                    SELECT conversation_id, tenant_id, workspace_id, principal_id,
+                           mode, issued_at, expires_at
+                    FROM conversation_access_grants
+                    WHERE mode IN ('controlled', 'full_access')
+                    """
+                )
+                connection.execute("DROP TABLE conversation_access_grants")
+                connection.execute(
+                    "ALTER TABLE conversation_access_grants_v4 "
+                    "RENAME TO conversation_access_grants"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_conversation_access_scope "
+                    "ON conversation_access_grants(tenant_id, workspace_id, expires_at)"
+                )
+                connection.execute(
+                    "INSERT INTO permission_schema_migrations(version, applied_at) "
+                    "VALUES (4, ?)",
+                    (self._iso(self._now()),),
+                )
+
     @staticmethod
     def _resolve_scope(
         *,
@@ -537,6 +632,139 @@ class PermissionStore:
         ).fetchone()
         if row is not None and row["tenant_id"] not in (None, "", tenant_id):
             raise PermissionBindingError("workspace does not belong to the requested tenant")
+
+    def get_conversation_access_mode(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str,
+        workspace_id: str,
+        principal_id: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Return the effective conversation access mode.
+
+        A missing, expired, or differently-bound grant reads as ``controlled``.
+        Expired rows are removed opportunistically so the table cannot grow
+        without bound.
+        """
+        conversation_id = _required_text(conversation_id, "conversation_id", max_length=256)
+        tenant_id = _required_text(tenant_id, "tenant_id")
+        workspace_id = _required_text(workspace_id, "workspace_id")
+        principal_id = _required_text(principal_id, "principal_id")
+        current = self._now() if now is None else now.astimezone(timezone.utc)
+        with self._connection(write=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM conversation_access_grants WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if row is None:
+                return {"mode": "controlled"}
+            binding_matches = (
+                str(row["tenant_id"]) == tenant_id
+                and str(row["workspace_id"]) == workspace_id
+                and str(row["principal_id"]) == principal_id
+            )
+            expires_at = _parse_iso(str(row["expires_at"]))
+            expired = expires_at is None or expires_at <= current
+            if not binding_matches or expired:
+                connection.execute(
+                    "DELETE FROM conversation_access_grants WHERE conversation_id = ?",
+                    (conversation_id,),
+                )
+                return {"mode": "controlled"}
+            return {
+                "mode": str(row["mode"]),
+                "issued_at": str(row["issued_at"]),
+                "expires_at": str(row["expires_at"]),
+            }
+
+    def set_conversation_access_mode(
+        self,
+        conversation_id: str,
+        mode: str,
+        *,
+        tenant_id: str,
+        workspace_id: str,
+        principal_id: str,
+        ttl_seconds: int | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Persist one conversation-scoped access mode choice.
+
+        ``controlled`` removes any grant. ``read_only`` and ``full_access``
+        store a time-boxed row bound to the exact tenant/workspace/principal
+        triple, mirroring the Streamlit host's conversation grant semantics.
+        """
+        conversation_id = _required_text(conversation_id, "conversation_id", max_length=256)
+        tenant_id = _required_text(tenant_id, "tenant_id")
+        workspace_id = _required_text(workspace_id, "workspace_id")
+        principal_id = _required_text(principal_id, "principal_id")
+        normalized = str(mode or "").strip().casefold()
+        if normalized not in ACCESS_MODES:
+            raise PermissionValidationError(f"unsupported access mode: {mode}")
+        if normalized == "controlled":
+            with self._connection(write=True) as connection:
+                connection.execute(
+                    "DELETE FROM conversation_access_grants WHERE conversation_id = ?",
+                    (conversation_id,),
+                )
+            return {"mode": "controlled"}
+        if ttl_seconds is None:
+            ttl_seconds = (
+                READ_ONLY_TTL_SECONDS
+                if normalized == "read_only"
+                else FULL_ACCESS_TTL_SECONDS
+            )
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+            raise PermissionValidationError("ttl_seconds must be an integer")
+        if not 1 <= ttl_seconds <= _MAX_TTL_SECONDS:
+            raise PermissionValidationError(
+                f"ttl_seconds must be between 1 and {_MAX_TTL_SECONDS}"
+            )
+        issued = self._now() if now is None else now.astimezone(timezone.utc)
+        expires = issued + timedelta(seconds=ttl_seconds)
+        with self._connection(write=True) as connection:
+            connection.execute(
+                """
+                INSERT INTO conversation_access_grants(
+                    conversation_id, tenant_id, workspace_id, principal_id,
+                    mode, issued_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    tenant_id = excluded.tenant_id,
+                    workspace_id = excluded.workspace_id,
+                    principal_id = excluded.principal_id,
+                    mode = excluded.mode,
+                    issued_at = excluded.issued_at,
+                    expires_at = excluded.expires_at
+                """,
+                (
+                    conversation_id,
+                    tenant_id,
+                    workspace_id,
+                    principal_id,
+                    normalized,
+                    self._iso(issued),
+                    self._iso(expires),
+                ),
+            )
+        return {
+            "mode": normalized,
+            "issued_at": self._iso(issued),
+            "expires_at": self._iso(expires),
+        }
+
+    def clear_conversation_access_mode(self, conversation_id: str) -> None:
+        """Drop any access grant for a conversation that is being removed."""
+        conversation_id = _required_text(
+            conversation_id, "conversation_id", max_length=256
+        )
+        with self._connection(write=True) as connection:
+            connection.execute(
+                "DELETE FROM conversation_access_grants WHERE conversation_id = ?",
+                (conversation_id,),
+            )
 
     def _now(self) -> datetime:
         value = self.clock()

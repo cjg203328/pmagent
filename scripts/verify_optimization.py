@@ -158,7 +158,7 @@ def main():
     # 5. 代码质量检查
     print("5️⃣  代码质量检查")
     success, _ = run_command(
-        ["ruff", "check", "artpm_agent", "--quiet"],
+        [sys.executable, "-m", "ruff", "check", "artpm_agent", "--quiet"],
         "Ruff 代码检查"
     )
     checks.append(success)

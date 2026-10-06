@@ -329,8 +329,13 @@ def test_schema_migration_is_idempotent_and_wal_is_enabled(tmp_path):
         versions = conn.execute(
             "SELECT version FROM chat_schema_migrations ORDER BY version"
         ).fetchall()
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(conversations)")
+        }
     assert journal_mode.lower() == "wal"
-    assert versions == [(1,), (2,), (3,)]
+    # v4 adds the archived_at soft-delete column.
+    assert versions == [(1,), (2,), (3,), (4,)]
+    assert "archived_at" in columns
 
 
 def test_concurrent_message_writes_do_not_lose_data(tmp_path):

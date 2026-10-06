@@ -70,6 +70,7 @@ def conversation_gateway(tmp_path: Path) -> SimpleNamespace:
         if command.message == "publish the confidential report":
             request = permissions.create_request(
                 workspace_id=command.principal.workspace_id,
+                tenant_id=command.principal.tenant_id,
                 conversation_id=command.conversation_id,
                 turn_id=command.turn_id,
                 agent_id="integration-agent",

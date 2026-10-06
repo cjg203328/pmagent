@@ -14,7 +14,7 @@ from uuid import uuid4
 class ConversationStore:
     """Own an isolated SQLite database for chat conversations."""
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
     BUSY_TIMEOUT_MS = 10_000
     DEFAULT_WORKSPACE_ID = "local-default"
     DEFAULT_PROFILE_ID = "local-default"
@@ -159,6 +159,23 @@ class ConversationStore:
                 conn.execute(
                     "INSERT INTO chat_schema_migrations(version, applied_at) VALUES (?, ?)",
                     (3, self._utc_now()),
+                )
+
+            if current_version < 4:
+                # Archiving is a soft-delete: archived conversations stay
+                # readable (and restorable) but leave the default sidebar
+                # list. NULL means "not archived" so existing rows migrate
+                # without rewriting data.
+                columns = {
+                    item[1] for item in conn.execute("PRAGMA table_info(conversations)")
+                }
+                if "archived_at" not in columns:
+                    conn.execute(
+                        "ALTER TABLE conversations ADD COLUMN archived_at TEXT"
+                    )
+                conn.execute(
+                    "INSERT INTO chat_schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (4, self._utc_now()),
                 )
 
             self._ensure_default_workspace(conn)
@@ -504,18 +521,31 @@ class ConversationStore:
         workspace_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        include_archived: bool = False,
+        archived_only: bool = False,
     ) -> list[dict[str, Any]]:
-        """List conversations from most recently updated to oldest."""
+        """List conversations from most recently updated to oldest.
+
+        ``archived_only`` returns just the archived bucket; ``include_archived``
+        returns both buckets. The default excludes archived rows so the
+        sidebar stays clean while archived threads remain recoverable.
+        """
         workspace_id = self._normalize_workspace_id(workspace_id)
         limit = self._validate_non_negative_integer(limit, "limit")
         offset = self._validate_non_negative_integer(offset, "offset")
         if limit == 0:
             return []
+        if archived_only:
+            archived_clause = "AND archived_at IS NOT NULL"
+        elif include_archived:
+            archived_clause = ""
+        else:
+            archived_clause = "AND archived_at IS NULL"
         with self._connection() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM conversations
-                WHERE workspace_id = ?
+                WHERE workspace_id = ? {archived_clause}
                 ORDER BY updated_at DESC, created_at DESC, id DESC
                 LIMIT ? OFFSET ?
                 """,
@@ -560,6 +590,36 @@ class ConversationStore:
                 WHERE id = ? AND workspace_id = ?
                 """,
                 (title, self._utc_now(), conversation_id, workspace_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"Unknown conversation: {conversation_id}")
+            row = conn.execute(
+                """
+                SELECT * FROM conversations
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (conversation_id, workspace_id),
+            ).fetchone()
+        return self._conversation_from_row(row)
+
+    def set_conversation_archived(
+        self,
+        conversation_id: str,
+        archived: bool,
+        *,
+        workspace_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Archive or restore a conversation; return the updated row."""
+        conversation_id = self._validate_identifier(conversation_id, "conversation_id")
+        workspace_id = self._normalize_workspace_id(workspace_id)
+        archived_at = self._utc_now() if archived else None
+        with self._connection(write=True) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE conversations SET archived_at = ?, updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (archived_at, self._utc_now(), conversation_id, workspace_id),
             )
             if cursor.rowcount == 0:
                 raise KeyError(f"Unknown conversation: {conversation_id}")

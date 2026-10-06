@@ -191,6 +191,11 @@ def _set_conversation_permission_mode(
     now: float | None = None,
 ) -> None:
     normalized = normalize_access_mode(mode)
+    # Streamlit only models the controlled/full_access pair. Read-only exists on
+    # the API host; accepting it here would silently store a full-access grant
+    # because the write below is hard-coded to ACCESS_MODE_FULL.
+    if normalized not in {ACCESS_MODE_CONTROLLED, ACCESS_MODE_FULL}:
+        raise ValueError(f"unsupported Streamlit access mode: {mode}")
     grants = st.session_state.get("conversation_permission_grants")
     if not isinstance(grants, dict):
         grants = {}

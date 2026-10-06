@@ -19,7 +19,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 try:  # Keep import errors actionable when the optional API extra is omitted.
-    from fastapi import FastAPI, Query, Request
+    from fastapi import FastAPI, File, Query, Request, UploadFile
     from fastapi.exceptions import RequestValidationError
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse
@@ -45,7 +45,10 @@ from artpm_agent.voice import (
 )
 
 from .models import (
+    AccessModeRequest,
     ChatRequest,
+    ConfigUpdateRequest,
+    ConversationUpdateRequest,
     PermissionDecisionRequest,
     WorkflowApprovalRequest,
     WorkflowDefinitionRequest,
@@ -76,7 +79,15 @@ def _cors_origins() -> list[str]:
         if "*" in origins:
             raise RuntimeError("ARTPM_CORS_ORIGINS must list explicit origins; '*' is not allowed")
         return origins
-    return ["http://127.0.0.1:8501", "http://localhost:8501"]
+    # 8501 serves the Streamlit UI; 1501 serves the React frontend that is
+    # replacing it (see README "本地端口分配"). Both stay explicit so the
+    # local development contract never depends on a wildcard origin.
+    return [
+        "http://127.0.0.1:8501",
+        "http://localhost:8501",
+        "http://127.0.0.1:1501",
+        "http://localhost:1501",
+    ]
 
 
 class GatewayError(Exception):
@@ -186,6 +197,22 @@ def _tenant_context(request: Request) -> Any:
 def _human(principal: RequestPrincipal) -> None:
     if principal.actor_kind != "human":
         raise GatewayError(403, "human_confirmation_required", "approval requires a human actor")
+
+
+def _admin(principal: RequestPrincipal) -> None:
+    """Guard credential-bearing routes.
+
+    Editing ``.env`` can read every provider key and change which endpoint the
+    gateway talks to, so it stays behind the same admin role the permission
+    store already recognizes rather than any workspace member.
+    """
+
+    if principal.actor_role != "admin":
+        raise GatewayError(
+            403,
+            "admin_required",
+            "configuration changes require an admin actor",
+        )
 
 
 def _require_workspace(
@@ -457,7 +484,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=_cors_origins(),
         allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
         expose_headers=["x-request-id"],
     )
@@ -560,6 +587,297 @@ def create_app(
             entries = [_json_safe(item) for item in (capabilities_value or [])]
         return {"workspace_id": principal.workspace_id, "items": entries}
 
+    @app.get("/v1/config", tags=["config"])
+    def get_configuration(request: Request):
+        """Return the allowlisted ``.env`` configuration with secrets masked.
+
+        Only keys declared in ``config_admin.CONFIG_GROUPS`` are exposed, and a
+        secret is reported as ``configured`` plus a masked preview so the UI can
+        show its state without the plaintext ever leaving the process.
+        """
+        from .config_admin import read_config
+
+        principal = _principal(request)
+        _admin(principal)
+        return _json_safe(read_config())
+
+    @app.put("/v1/config", tags=["config"])
+    def update_configuration(request: Request, payload: ConfigUpdateRequest):
+        """Validate, persist and hot-reload one batch of ``.env`` changes."""
+        from .config_admin import (
+            ConfigValidationError,
+            apply_config,
+            invalidate_runtime,
+        )
+
+        principal = _principal(request)
+        _admin(principal)
+        try:
+            result = apply_config(payload.values)
+        except ConfigValidationError as error:
+            raise GatewayError(422, "config_invalid", str(error)) from error
+        except OSError as error:
+            logger.exception("Config write failed [%s]", _request_id(request))
+            raise GatewayError(
+                500,
+                "config_write_failed",
+                "unable to persist configuration",
+            ) from error
+
+        # Model clients capture settings at build time, so release them before
+        # reporting success. A host without the hook keeps its old objects and
+        # the caller is told a restart is still required.
+        hot_reloaded = invalidate_runtime(services)
+        return {
+            **result,
+            "hot_reloaded": hot_reloaded,
+            "restart_required": not hot_reloaded,
+        }
+
+    @app.get("/v1/conversations", tags=["conversations"])
+    def list_conversations(
+        request: Request,
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        archived: bool = Query(default=False),
+    ):
+        """List workspace conversations, most recently updated first.
+
+        Read-only view over the same store ``POST /v1/chat`` writes to, so the
+        React frontend can rebuild its sidebar without touching SQLite.
+        ``archived=true`` returns the archived bucket instead, which is what
+        makes archiving recoverable rather than a one-way hide.
+        """
+        principal = _principal(request)
+        _require_workspace(services, principal, request)
+        try:
+            conversations = services.conversations.list_conversations(
+                workspace_id=principal.workspace_id,
+                limit=limit,
+                offset=offset,
+                archived_only=archived,
+            )
+        except Exception as error:  # noqa: BLE001 - normalize store errors
+            raise _map_store_error(error) from error
+        return {
+            "workspace_id": principal.workspace_id,
+            "archived": archived,
+            "items": [_json_safe(item) for item in conversations],
+        }
+
+    @app.get("/v1/conversations/{conversation_id}/messages", tags=["conversations"])
+    def list_conversation_messages(
+        request: Request,
+        conversation_id: str,
+        limit: int = Query(default=200, ge=1, le=1000),
+        before_message_id: int | None = Query(default=None, ge=0),
+    ):
+        """List messages of one workspace conversation in chronological order."""
+        principal = _principal(request)
+        _require_workspace(services, principal, request)
+        conversation = _conversation(services, principal, conversation_id)
+        try:
+            messages = services.conversations.list_messages(
+                conversation["id"],
+                limit=limit,
+                before_message_id=before_message_id,
+                workspace_id=principal.workspace_id,
+            )
+        except Exception as error:  # noqa: BLE001 - normalize store errors
+            raise _map_store_error(error) from error
+        return {
+            "workspace_id": principal.workspace_id,
+            "conversation_id": conversation["id"],
+            "items": [_json_safe(item) for item in messages],
+        }
+
+    @app.patch("/v1/conversations/{conversation_id}", tags=["conversations"])
+    def update_conversation(
+        request: Request,
+        conversation_id: str,
+        payload: ConversationUpdateRequest,
+    ):
+        """Rename and/or archive one conversation (soft delete)."""
+        principal = _principal(request)
+        _human(principal)
+        _require_workspace(services, principal, request)
+        conversation = _conversation(services, principal, conversation_id)
+        try:
+            updated = conversation
+            if payload.title is not None:
+                updated = services.conversations.rename_conversation(
+                    conversation["id"],
+                    payload.title,
+                    workspace_id=principal.workspace_id,
+                )
+            if payload.archived is not None:
+                updated = services.conversations.set_conversation_archived(
+                    conversation["id"],
+                    payload.archived,
+                    workspace_id=principal.workspace_id,
+                )
+        except Exception as error:  # noqa: BLE001 - normalize store errors
+            raise _map_store_error(error) from error
+        return {"item": _json_safe(updated)}
+
+    @app.delete("/v1/conversations/{conversation_id}", tags=["conversations"])
+    def delete_conversation(request: Request, conversation_id: str):
+        """Delete one conversation and its dependent local resources.
+
+        The database delete is authoritative. Attachment cleanup and the
+        conversation-scoped permission grant are best-effort follow-ups so a
+        stale file or grant can never keep the conversation visible.
+        """
+        principal = _principal(request)
+        _human(principal)
+        _require_workspace(services, principal, request)
+        conversation = _conversation(services, principal, conversation_id)
+        try:
+            deleted = services.conversations.delete_conversation(
+                conversation["id"],
+                workspace_id=principal.workspace_id,
+            )
+        except Exception as error:  # noqa: BLE001 - normalize store errors
+            raise _map_store_error(error) from error
+        if not deleted:
+            raise GatewayError(404, "conversation_not_found", "conversation was not found")
+        if services.attachments is not None:
+            try:
+                services.attachments.remove_conversation(conversation["id"])
+            except Exception as error:  # noqa: BLE001 - cleanup is best-effort
+                logger.warning(
+                    "Conversation attachment cleanup failed [%s]: %s",
+                    _request_id(request),
+                    error,
+                )
+        clear_access_mode = getattr(
+            services.permissions, "clear_conversation_access_mode", None
+        )
+        if callable(clear_access_mode):
+            try:
+                clear_access_mode(conversation["id"])
+            except Exception as error:  # noqa: BLE001 - cleanup is best-effort
+                logger.warning(
+                    "Conversation access grant cleanup failed [%s]: %s",
+                    _request_id(request),
+                    error,
+                )
+        return JSONResponse(
+            status_code=204,
+            content=None,
+            headers={"x-request-id": _request_id(request)},
+        )
+
+    @app.get("/v1/conversations/{conversation_id}/access-mode", tags=["permissions"])
+    def get_conversation_access_mode(request: Request, conversation_id: str):
+        """Return the effective conversation-scoped access mode."""
+        principal = _principal(request)
+        _require_workspace(services, principal, request)
+        conversation = _conversation(services, principal, conversation_id)
+        getter = getattr(services.permissions, "get_conversation_access_mode", None)
+        if not callable(getter):
+            return {"conversation_id": conversation["id"], "mode": "controlled"}
+        try:
+            grant = getter(
+                conversation["id"],
+                tenant_id=principal.tenant_id,
+                workspace_id=principal.workspace_id,
+                principal_id=principal.actor_id,
+            )
+        except Exception as error:  # noqa: BLE001 - normalize store errors
+            raise _map_store_error(error) from error
+        return {"conversation_id": conversation["id"], **_json_safe(grant)}
+
+    @app.put("/v1/conversations/{conversation_id}/access-mode", tags=["permissions"])
+    def set_conversation_access_mode(
+        request: Request,
+        conversation_id: str,
+        payload: AccessModeRequest,
+    ):
+        """Switch one conversation between controlled and full access.
+
+        Full access is a time-boxed (1 hour) convenience mode. Server-owned
+        risk floors still require per-action confirmation for high-risk,
+        external, and admin actions.
+        """
+        principal = _principal(request)
+        _human(principal)
+        _require_workspace(services, principal, request)
+        conversation = _conversation(services, principal, conversation_id)
+        setter = getattr(services.permissions, "set_conversation_access_mode", None)
+        if not callable(setter):
+            raise GatewayError(
+                503,
+                "access_mode_unavailable",
+                "access mode persistence is not configured on this gateway",
+            )
+        try:
+            grant = setter(
+                conversation["id"],
+                payload.mode,
+                tenant_id=principal.tenant_id,
+                workspace_id=principal.workspace_id,
+                principal_id=principal.actor_id,
+            )
+        except Exception as error:  # noqa: BLE001 - normalize store errors
+            raise _map_store_error(error) from error
+        return {"conversation_id": conversation["id"], **_json_safe(grant)}
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/attachments",
+        tags=["conversations"],
+    )
+    async def upload_conversation_attachments(
+        request: Request,
+        conversation_id: str,
+        files: list[UploadFile] = File(...),
+    ):
+        """Store uploaded chat files and return their server-issued ids.
+
+        The multipart body is validated by the same storage layer the
+        Streamlit host uses: extension whitelist, per-file 50 MB, batch
+        100 MB, at most 3 files, and empty files rejected. Chat requests then
+        reference each returned ``attachment_id``.
+        """
+        principal = _principal(request)
+        _human(principal)
+        _require_workspace(services, principal, request)
+        conversation = _conversation(services, principal, conversation_id)
+        if services.attachments is None:
+            raise GatewayError(
+                503,
+                "attachments_unavailable",
+                "attachment storage is not configured on this gateway",
+            )
+        try:
+            metadata = services.attachments.save_files(conversation["id"], files)
+        except ValueError as error:
+            raise GatewayError(422, "invalid_attachment", str(error)) from error
+        except Exception as error:  # noqa: BLE001 - normalize storage errors
+            logger.exception(
+                "Attachment upload failed [%s]", _request_id(request)
+            )
+            raise GatewayError(
+                503,
+                "attachment_storage_unavailable",
+                "attachment storage could not complete the upload",
+            ) from error
+        items = [
+            {
+                "attachment_id": str(item.get("id") or ""),
+                "name": str(item.get("name") or ""),
+                "media_type": str(item.get("mime_type") or ""),
+                "size_bytes": int(item.get("size") or 0),
+                "extension": str(item.get("extension") or ""),
+            }
+            for item in metadata
+        ]
+        return JSONResponse(
+            status_code=201,
+            content={"conversation_id": conversation["id"], "items": items},
+            headers={"x-request-id": _request_id(request)},
+        )
+
     @app.get("/v1/voice/status", tags=["voice"])
     def voice_status(request: Request):
         principal = _principal(request)
@@ -640,7 +958,43 @@ def create_app(
             except Exception as error:  # noqa: BLE001 - normalize persistence errors
                 raise _map_store_error(error) from error
         turn_id = uuid4().hex
-        attachments = tuple(item.model_dump(mode="json") for item in payload.attachments)
+        # Resolve uploaded attachment references into verified local paths.
+        # A client can only reference files it previously uploaded through
+        # POST /v1/conversations/{id}/attachments; anything else fails closed.
+        attachment_metadata: list[dict[str, Any]] = []
+        for item in payload.attachments:
+            entry = item.model_dump(mode="json")
+            attachment_id = str(entry.pop("attachment_id", "") or "").strip()
+            if attachment_id:
+                if services.attachments is None:
+                    raise GatewayError(
+                        503,
+                        "attachments_unavailable",
+                        "attachment storage is not configured on this gateway",
+                    )
+                try:
+                    resolved = services.attachments.attachment_paths(
+                        conversation["id"],
+                        attachment_id,
+                        entry.get("name", ""),
+                    )
+                except FileNotFoundError as error:
+                    raise GatewayError(
+                        404, "attachment_not_found", str(error)
+                    ) from error
+                except ValueError as error:
+                    raise GatewayError(
+                        422, "invalid_attachment", str(error)
+                    ) from error
+                entry.update(
+                    {
+                        "id": resolved["attachment_id"],
+                        "stored_path": resolved["stored_path"],
+                        "file_path": resolved["file_path"],
+                    }
+                )
+            attachment_metadata.append(entry)
+        attachments = tuple(attachment_metadata)
         user_message_persisted = False
         try:
             user_message = services.conversations.add_message(

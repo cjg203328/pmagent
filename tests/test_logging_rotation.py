@@ -124,3 +124,23 @@ def test_explicit_log_file_overrides_process_role(
 
     handler = configured.handlers[0]
     assert handler.baseFilename == str(tmp_path / "custom.log")
+
+
+def test_blank_log_file_env_falls_back_to_process_role(
+    tmp_path, monkeypatch, isolated_root_logger
+):
+    """An empty ARTPM_LOG_FILE must not disable role-based log isolation.
+
+    ``.env`` ships this key blank on purpose so each process role keeps its own
+    file. A blank value has to behave exactly like an unset one; treating it as
+    a literal file name would either write to a stray path or, worse, let every
+    role share one handle.
+    """
+
+    monkeypatch.setenv("ARTPM_PROCESS_ROLE", "api")
+    monkeypatch.setenv("ARTPM_LOG_FILE", "")
+
+    configured = logger_module.setup_logging(log_dir=tmp_path, console=False)
+
+    handler = configured.handlers[0]
+    assert handler.baseFilename == str(tmp_path / "artpm-api.log")

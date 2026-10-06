@@ -67,17 +67,25 @@ def permission_preflight(
         arguments=arguments,
     )
     required_role = "admin" if risk in {"critical", "untrusted"} else "user"
-    if access_decision(
+    decision = access_decision(
         context,
         read_only=tool.read_only,
         requires_approval=tool.requires_approval,
         risk=risk,
         required_role=required_role,
         auto_approval_allowed=tool.auto_approval_allowed,
-    ) == "allow":
+    )
+    if decision == "allow":
         return BeforeToolCallDecision(
             approved=True,
             reason=f"conversation_full_access:{tool.name}",
+        )
+    if decision == "deny":
+        # Read-only mode refuses side-effecting tools outright.  No approval
+        # request is created, so a later approval cannot turn this into a run.
+        return BeforeToolCallDecision(
+            block=True,
+            reason=f"Conversation is in read-only mode: {tool.name}",
         )
 
     store = context.get("permission_store") if isinstance(context, Mapping) else None

@@ -1,4 +1,7 @@
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "pytest_env.ps1")
+
 $env:ART_ENABLE_INTEGRATION = "1"
-python -m pytest -q -m integration @args
+& $PythonExe -m pytest -q -m integration @args
+exit $LASTEXITCODE

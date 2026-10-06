@@ -14,9 +14,12 @@ from typing import Any, Literal
 
 ACCESS_MODE_CONTROLLED = "controlled"
 ACCESS_MODE_FULL = "full_access"
-ACCESS_MODES = frozenset({ACCESS_MODE_CONTROLLED, ACCESS_MODE_FULL})
+ACCESS_MODE_READ_ONLY = "read_only"
+ACCESS_MODES = frozenset(
+    {ACCESS_MODE_CONTROLLED, ACCESS_MODE_FULL, ACCESS_MODE_READ_ONLY}
+)
 
-AccessDecision = Literal["allow", "confirm"]
+AccessDecision = Literal["allow", "deny", "confirm"]
 
 _RISK_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3, "untrusted": 4}
 _HIGH_RISK_MARKERS = frozenset(
@@ -92,6 +95,11 @@ def access_decision(
     if read_only and not requires_approval:
         return "allow"
     mode = access_mode_from_context(context)
+    # `read_only` is the strictest mode: a pure query still passes above, but
+    # every side-effecting action is denied outright instead of being queued for
+    # approval.  Relaxing it must stay an explicit user action.
+    if mode == ACCESS_MODE_READ_ONLY:
+        return "deny"
     permission_store = context.get("permission_store") if isinstance(context, Mapping) else None
     # Full access is a convenience mode, never a replacement for the durable
     # approval/audit boundary.  Fail closed when the store is unavailable.
@@ -114,6 +122,7 @@ def access_decision(
 __all__ = [
     "ACCESS_MODE_CONTROLLED",
     "ACCESS_MODE_FULL",
+    "ACCESS_MODE_READ_ONLY",
     "ACCESS_MODES",
     "access_decision",
     "access_mode_from_context",

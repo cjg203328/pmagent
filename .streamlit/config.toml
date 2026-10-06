@@ -1,0 +1,22 @@
+# ArtPM Agent — Streamlit runtime configuration.
+#
+# The UI is designed as a light "project ledger" surface. When a browser or OS
+# prefers a dark color scheme, Streamlit would otherwise follow it and render
+# native widgets (chat input, bottom composer, dialogs) dark while the custom
+# stylesheet keeps the page body light. That split-theme state shows up as
+# black input bars and black blocks around the composer and looks like a
+# frozen page. Pin the theme explicitly so every widget matches the light
+# design system in artpm_agent/ui_style.py.
+
+[theme]
+base = "light"
+primaryColor = "#2563eb"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f7f8fa"
+textColor = "#172231"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

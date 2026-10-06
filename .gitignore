@@ -20,8 +20,9 @@ wheels/
 .installed.cfg
 *.egg
 
-# 虚拟环境
+# 虚拟环境（.venv 是本项目实际使用的命名，必须显式忽略）
 venv/
+.venv/
 ENV/
 env/
 
@@ -98,3 +99,10 @@ coverage.xml
 
 # 工具私有目录（非项目源码）
 .workbuddy/
+.gstack/
+
+# Node / 前端依赖与构建产物（非源码，体积大）
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+.pnpm-store/

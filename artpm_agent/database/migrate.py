@@ -36,12 +36,40 @@ def _alembic_dir() -> Path:
     raise RuntimeError("Alembic migration scripts are not available")
 
 
-def _make_config(engine=None):
-    from alembic.config import Config
+def _no_interpolation_config(ini_path: Path):
+    """Build an Alembic ``Config`` that never interpolates option values.
 
+    Alembic constructs its parser with ``ConfigParser``, where ``%`` starts an
+    interpolation escape. SQLAlchemy percent-encodes Windows database paths
+    (``sqlite:///C%3A%5CUsers%5Cname%5Cartpm.db``), so ``set_main_option``
+    raises ``invalid interpolation syntax`` and ``ensure_schema`` never runs.
+    DatabaseManager then silently falls back to ``create_all``, leaving the
+    database without an ``alembic_version`` row.
+
+    Alembic exposes no public knob for this, so the cached ``file_config``
+    parser is pre-seeded with a ``RawConfigParser`` that keeps values verbatim
+    while leaving ``get_main_option`` and the ``here`` substitution token
+    fully functional.
+    """
+    from alembic.config import Config
+    from configparser import RawConfigParser
+
+    cfg = Config(str(ini_path))
+    cfg.config_args["here"] = ini_path.absolute().parent.as_posix()
+
+    parser = RawConfigParser()
+    parser.read([str(ini_path)], encoding="utf-8")
+    if not parser.has_section(cfg.config_ini_section):
+        parser.add_section(cfg.config_ini_section)
+    cfg.__dict__["file_config"] = parser
+    return cfg
+
+
+def _make_config(engine=None):
     alembic_dir = _alembic_dir()
     ini_path = alembic_dir.parent / "alembic.ini"
-    cfg = Config(str(ini_path))
+
+    cfg = _no_interpolation_config(ini_path)
     cfg.set_main_option("script_location", str(alembic_dir))
     if engine is not None:
         # 让迁移作用于与 DatabaseManager 完全相同的库

@@ -3,6 +3,7 @@ Enhanced MCP Client - 连接Claude Code能力
 利用Claude Code的工具能力(Read, Write, Glob, Grep, Bash, Agent)
 """
 from copy import deepcopy
+import fnmatch
 import logging
 import os
 import shlex
@@ -26,6 +27,28 @@ _SENSITIVE_FILE_SUFFIXES = frozenset(
     {".db", ".sqlite", ".sqlite3", ".pem", ".key", ".p12", ".pfx"}
 )
 _SENSITIVE_DIRECTORIES = frozenset({".git", ".ssh", ".aws", ".azure", ".gnupg"})
+
+# Directories that never hold user project content but can contain tens of
+# thousands of files (dependency trees, virtualenvs, tool caches). The
+# recursive file search prunes them during traversal: ``Path.glob`` walks the
+# complete tree before returning even one result, so a project that gains a
+# frontend (node_modules) or a local venv would otherwise make every search
+# appear frozen.
+_SEARCH_PRUNED_DIRECTORIES = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        ".cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".pytest_cache",
+    }
+)
 
 # Executable basename allowlist for the execute_command tool. It must be
 # explicitly non-empty when command execution is enabled. This is defense in
@@ -329,11 +352,31 @@ class EnhancedMCPClient:
             if not search_dir.is_dir():
                 return {"success": False, "error": f"Directory not found: {directory}"}
 
-            if recursive and not pattern.startswith("**"):
-                pattern = f"**/{pattern}"
+            # ``Path.glob("**/...")`` materializes the whole tree before the
+            # first result, so a single node_modules or venv under the
+            # workspace makes every search look frozen. Walk the tree
+            # manually and prune heavy directories during traversal instead.
+            name_pattern = pattern
+            if name_pattern.startswith("**/"):
+                name_pattern = name_pattern[3:]
+            name_pattern = name_pattern or "*"
 
-            # 搜索文件
-            files = sorted(search_dir.glob(pattern), key=lambda item: str(item).lower())
+            files = []
+            for root, dirnames, filenames in os.walk(search_dir):
+                if recursive:
+                    dirnames[:] = [
+                        name
+                        for name in dirnames
+                        if name not in _SEARCH_PRUNED_DIRECTORIES
+                    ]
+                else:
+                    # Non-recursive search stays at the top level only.
+                    dirnames[:] = []
+                for filename in filenames:
+                    if fnmatch.fnmatch(filename.lower(), name_pattern.lower()):
+                        files.append(Path(root) / filename)
+
+            files.sort(key=lambda item: str(item).lower())
 
             # 只保留文件(排除目录)
             safe_files = []

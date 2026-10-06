@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 import zipfile
 
@@ -58,7 +59,7 @@ def test_mineru_local_cli_result_is_normalized_and_cached(tmp_path):
     converter = MinerUDocumentConverter(
         MinerUConfig.from_mapping(
             {
-                "command": ["E:/python/python.exe", "-m", "mineru"],
+                "command": [sys.executable, "-m", "mineru"],
                 "output_dir": str(tmp_path / "mineru-output"),
                 "cache_enabled": True,
             }
@@ -304,7 +305,7 @@ def test_mineru_bounds_structured_output(tmp_path):
 
     converter = MinerUDocumentConverter(
         {
-            "command": ["E:/python/python.exe"],
+            "command": [sys.executable],
             "output_dir": str(tmp_path / "mineru-output"),
             "max_structured_bytes": 16384,
         },

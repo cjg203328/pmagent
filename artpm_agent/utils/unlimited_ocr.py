@@ -29,6 +29,9 @@ from urllib.request import (
 )
 
 from .image_validation import MAX_IMAGE_FILE_SIZE, load_validated_image
+from .ocr_config_values import as_bool as _as_bool
+from .ocr_config_values import bounded_float as _bounded_float
+from .ocr_config_values import bounded_int as _bounded_int
 from .ocr_runtime import OCRRuntimeConfig, OCRRuntimeManager, OCRRuntimeStatus
 
 
@@ -57,30 +60,6 @@ class UnlimitedOCRRequestError(UnlimitedOCRError):
 class _NoRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, request, file_pointer, code, message, headers, new_url):
         return None
-
-
-def _as_bool(value: Any, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _bounded_float(value: Any, default: float, minimum: float, maximum: float) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        parsed = default
-    return max(minimum, min(parsed, maximum))
-
-
-def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = default
-    return max(minimum, min(parsed, maximum))
 
 
 def normalize_unlimited_ocr_base_url(value: str) -> str:

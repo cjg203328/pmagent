@@ -239,6 +239,13 @@ class GatewayServices:
     workflow_engine_factory: Callable[[], Any] | None = None
     health_handler: Callable[[], Mapping[str, Any]] | None = None
     close_handler: Callable[[], None] | None = None
+    # Chat file uploads. ``None`` keeps the gateway usable in deployments
+    # that never receive attachments; the upload route then fails closed.
+    attachments: Any | None = None
+    # Drops objects that captured configuration at build time. ``None`` means
+    # the host cannot hot-reload, so a config write reports that a restart is
+    # still required instead of silently serving stale settings.
+    runtime_invalidator: Callable[[], None] | None = None
 
     def get_workflow_engine(self, tenant_context: Any = None) -> Any:
         engine = self.workflow_engine
@@ -278,6 +285,18 @@ class GatewayServices:
     def close(self) -> None:
         if self.close_handler is not None:
             self.close_handler()
+
+    def invalidate_runtime(self) -> None:
+        """Release cached objects after an operator edits ``.env``.
+
+        Raises :class:`GatewayServiceError` when the host has no hook, so the
+        caller can tell the operator a restart is required rather than claiming
+        a hot reload that never happened.
+        """
+
+        if self.runtime_invalidator is None:
+            raise GatewayServiceError("runtime hot reload is not supported by this host")
+        self.runtime_invalidator()
 
     async def chat_async(self, command: ChatCommand) -> Any:
         """Run chat without blocking the gateway event loop.
@@ -328,6 +347,17 @@ class DefaultGatewayRuntime:
         self.session_store = SessionStore(self.conversations)
         self.permissions = PermissionStore(self.db_path)
         self.workflows = WorkflowStore(self.db_path)
+        # Chat uploads live next to the conversation database, mirroring the
+        # Streamlit host's layout (``data/chat_attachments``).
+        try:
+            from artpm_agent.utils.chat_attachments import ChatAttachmentStore
+
+            self.attachments = ChatAttachmentStore(
+                Path(self.db_path).parent / "chat_attachments"
+            )
+        except Exception as error:  # noqa: BLE001 - uploads are optional
+            logger.warning("chat attachment store unavailable: %s", error)
+            self.attachments = None
         self.knowledge_store: Any = None
         self.episode_store: Any = None
         self.feedback_store: Any = None
@@ -422,6 +452,24 @@ class DefaultGatewayRuntime:
                 self._agent = ArtPMAgent()
         return self._agent
 
+    def invalidate_runtime(self) -> None:
+        """Release cached objects that captured configuration at build time.
+
+        Called after an operator edits ``.env`` so the next turn rebuilds the
+        agent, model clients and vector-backed stores against the new settings
+        instead of serving stale ones until a restart.
+        """
+
+        with self._lock:
+            self._agent = None
+            self._coordinator = None
+            self._engine = None
+            # The embedding provider is bound at construction time, so the
+            # knowledge store has to be rebuilt for a dimension change to apply.
+            if hasattr(self, "knowledge_store"):
+                self.knowledge_store = None
+            self._learning_initialized = False
+
     def _ensure_workflow_runtime(self, tenant_context: Any) -> tuple[Any, Any]:
         agent = self._ensure_agent()
         workspace_id = tenant_context.require_workspace()
@@ -475,6 +523,37 @@ class DefaultGatewayRuntime:
 
         agent = self._ensure_agent()
         return capability_allowlist_from_skill_metadata(agent.router.list_skills())
+
+    def _conversation_access_mode(self, command: ChatCommand) -> str:
+        """Resolve the persisted conversation access mode for the approval gate.
+
+        The model never supplies this value; it comes from the conversation's
+        own grant row. Every failure path falls back to ``controlled``, which is
+        the baseline that still confirms each side-effecting action, so an
+        unreadable store can never relax the gate.
+        """
+
+        from artpm_agent.security import ACCESS_MODE_CONTROLLED, normalize_access_mode
+
+        getter = getattr(self.permissions, "get_conversation_access_mode", None)
+        if not callable(getter):
+            return ACCESS_MODE_CONTROLLED
+        try:
+            grant = getter(
+                command.conversation_id,
+                tenant_id=command.principal.tenant_id,
+                workspace_id=command.principal.workspace_id,
+                principal_id=command.principal.actor_id,
+            )
+        except Exception:  # noqa: BLE001 - an unavailable store must fail closed
+            logger.exception(
+                "Unable to read access mode for conversation %s",
+                command.conversation_id,
+            )
+            return ACCESS_MODE_CONTROLLED
+        if isinstance(grant, Mapping):
+            return normalize_access_mode(grant.get("mode"))
+        return ACCESS_MODE_CONTROLLED
 
     def chat(self, command: ChatCommand) -> ChatOutcome:
         with self._lock:
@@ -534,6 +613,10 @@ class DefaultGatewayRuntime:
                 "actor_role": command.principal.actor_role,
                 "agent_id": "artpm-agent",
                 "permission_store": self.permissions,
+                # The conversation's persisted access mode is the only trusted
+                # source for the approval gate. A missing or unreadable grant
+                # fails closed to `controlled`, which confirms every write.
+                "permission_mode": self._conversation_access_mode(command),
                 "attachments": list(command.attachments),
                 "file_paths": [
                     str(item.get("file_path") or item.get("stored_path"))
@@ -759,9 +842,11 @@ def build_default_services(db_path: str | Path | None = None) -> GatewayServices
         workflow_capability_provider=runtime.workflow_capabilities,
         permission_executor=runtime.execute_permission,
         permission_executor_sources=frozenset({"skill"}),
+        runtime_invalidator=runtime.invalidate_runtime,
         workflow_engine_factory=lambda tenant_context=None: runtime._ensure_workflow_runtime(tenant_context)[0],
         health_handler=runtime.health,
         close_handler=runtime.close,
+        attachments=runtime.attachments,
     )
 
 

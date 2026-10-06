@@ -12,6 +12,16 @@ exclude = [
     "artpm_agent/test_*.py",
 ]
 
+# Pin the rule set this project is written and reviewed against.
+# The repository was cleaned and kept green under Ruff's historical default
+# rule set (E4/E7/E9/F). Ruff 0.16 widened its defaults (UP/UP006, I001,
+# BLE001, S and others), which re-flagged thousands of pre-existing style
+# items and broke `ruff check artpm_agent tests` on a clean checkout. Declare
+# the baseline explicitly so local runs, scripts, and CI all agree instead of
+# silently following whatever default set a Ruff release happens to ship.
+[lint]
+select = ["E4", "E7", "E9", "F"]
+
 [lint.per-file-ignores]
 "tests/*.py" = ["E402"]
 "tests/test_basic.py" = ["F841"]

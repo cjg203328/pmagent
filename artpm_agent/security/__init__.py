@@ -15,6 +15,7 @@ from .permission_store import (
 from .access_mode import (
     ACCESS_MODE_CONTROLLED,
     ACCESS_MODE_FULL,
+    ACCESS_MODE_READ_ONLY,
     ACCESS_MODES,
     access_decision,
     access_mode_from_context,
@@ -37,6 +38,7 @@ __all__ = [
     "permission_preflight",
     "ACCESS_MODE_CONTROLLED",
     "ACCESS_MODE_FULL",
+    "ACCESS_MODE_READ_ONLY",
     "ACCESS_MODES",
     "access_decision",
     "access_mode_from_context",

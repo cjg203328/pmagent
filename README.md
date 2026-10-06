@@ -4,9 +4,11 @@
 进度预警、提醒投递、文档解析和本地文件分析；配置 LLM 后可启用通用对话、语义理解和
 模型工具调用。
 
-核心业务技能和本地文件能力不依赖 API Key。项目提供三种主要入口：
+核心业务技能和本地文件能力不依赖 API Key。项目提供四种主要入口：
 
-- **Streamlit UI**：主界面，提供对话、设置、可观测和工作流功能。
+- **React UI**：新版主界面，位于 `frontend/`，默认 `127.0.0.1:1501`，以 FastAPI
+  网关为 API。提供对话、会话归档/删除、三档审批模式与网关配置页。
+- **Streamlit UI**：现行界面，默认 `8501`，提供对话、设置、可观测和工作流功能。
 - **FastAPI REST 网关**：供外部系统集成，默认监听 `127.0.0.1:8765`。
 - **CLI**：使用 `python main.py` 或安装后的 `artpm-agent` 命令。
 
@@ -21,6 +23,66 @@
 
 基础安装不包含 FastAPI。需要启动完整本地栈时，请安装 `.[api]` 或 `.[dev]`；只运行离线
 UI 时直接使用基础安装即可。
+
+## 本地端口分配
+
+本项目在 Crow5 工作区（`E:\desk\xm\artpm`）中的端口分配记录。分配前已核对工作区内
+其他项目的 README 与配置，确保不重复：
+
+| 服务 | 端口 | 说明 |
+| --- | --- | --- |
+| React 前端（新版） | `1501` | 已交付。位于 `frontend/`，以本仓库 FastAPI 网关为 API，视觉与交互参考 EvoFlow/evopanel。Crow5 前端端口规范区间 1001~2000 |
+| Streamlit UI（现行） | `8501` | 现行界面；与 React 前端并存 |
+| FastAPI REST 网关 | `8765` | 外部系统集成、健康检查与 API 文档 |
+
+React 前端启动方式：
+
+```powershell
+cd frontend
+pnpm install
+pnpm dev --port 1501 --strictPort
+```
+
+质量门禁：`pnpm typecheck`、`pnpm test`、`pnpm build`。
+
+工作区内其他项目占用（不冲突）：`yutang` 5188；`EvoFlow` 参考基准 1421/1521、
+网关 8012/8070。后续新增服务前先在本表登记，避免端口冲突。
+
+## 会话访问模式
+
+每个会话持久化一档审批策略，由宿主（而非模型）强制，接口为
+`GET`/`PUT /v1/conversations/{id}/access-mode`：
+
+| 档位 | 语义 | 有效期 |
+| --- | --- | --- |
+| `read_only` | 仅放行纯查询；写入类操作**直接拒绝**，不生成审批请求 | 7 天 |
+| `controlled` | 每个写入操作逐项确认后才执行（默认档） | 无（不落库） |
+| `full_access` | 受信任的低/中风险操作自动放行，高风险仍需确认 | 1 小时 |
+
+约定与边界：
+
+- 策略来源只有会话自身的授权行。读取失败、授权行缺失或值非法时一律回落到
+  `controlled`，即"失败即收紧"，宿主不可由模型输入放宽。
+- `read_only` 是最严档，任何写入都不会进入待审批队列，因此事后批准也无法把它变成执行。
+- React 前端 composer 的模式选择器（`frontend/src/components/access-mode-picker.tsx`）
+  与 Streamlit 共用同一套语义；Streamlit 仅暴露 `controlled` / `full_access` 两档。
+- 授权行存储在 `data/conversations.db` 的 `conversation_access_grants` 表，
+  权限库 schema 版本为 `4`（v4 放宽了 `mode` 的 `CHECK` 约束以接纳 `read_only`）。
+
+## 日志文件命名
+
+`ARTPM_LOG_FILE` 默认为**空**，此时日志文件名按进程角色派生，避免同一台机器上
+API、UI、语音多个进程争抢同一个文件句柄（Windows 上会导致轮转失败）：
+
+| `ARTPM_PROCESS_ROLE` | 日志文件 |
+| --- | --- |
+| 未设置 | `artpm.log` |
+| `api` | `artpm-api.log` |
+| `ui` | `artpm-ui.log` |
+| `voice` | `artpm-voice.log` |
+
+角色由 `start_with_checks.py` 启动时自动注入，`docker-compose.yml` 中固定为 `api`。
+只有在确实需要让所有角色共写一个文件时，才在 `.env` 中显式设置 `ARTPM_LOG_FILE`。
 
 ## 核心能力
 
@@ -178,8 +240,29 @@ python -m artpm_agent.api
 - `GET /health`、`GET /ready`
 - `GET /v1/capabilities`
 - `POST /v1/chat`
+- 会话管理：`GET /v1/conversations`（`archived=true` 取归档桶）、
+  `GET/PATCH/DELETE /v1/conversations/{id}`、`GET /v1/conversations/{id}/messages`、
+  `GET/PUT /v1/conversations/{id}/access-mode`
+- 网关配置：`GET/PUT /v1/config`（仅 admin，密钥脱敏）
 - 权限审批：`/v1/permissions/*`
 - 工作流及运行记录：`/v1/workflows/*`、`/v1/workflow-runs/*`
+
+### 网关配置接口
+
+`GET /v1/config` 返回 `config_admin.CONFIG_GROUPS` 白名单内的全部环境变量，
+按 `主模型 / API Key / 视觉模型 / 向量检索 / OCR / MinerU / 语音 / 运行时` 八组
+返回。密钥类字段的 `value` 恒为空，只返回 `configured` 与 `preview`（如
+`••••••3456`），明文不经过该接口。
+
+`PUT /v1/config` 接受 `{"values": {"KEY": "value"}}`，写入项目根目录 `.env`：
+
+- 仅白名单内的键可写，请求无法引入任意环境变量；
+- 整批先校验后落盘，任一值非法则整批不写入；
+- 保留原有注释、键顺序与行尾风格（LF 文件不会因一次编辑变成 CRLF）；
+- 写后热重载配置并释放缓存的模型客户端；宿主不支持热重载时返回
+  `restart_required: true`，不谎称已生效。
+
+React 前端「设置」页即该接口的图形界面。
 
 生产网关要求经过认证的租户、workspace、actor 上下文，并使用 `X-Gateway-Token`。完整的
 请求体、身份头、错误码和审批契约见
