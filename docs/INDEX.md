@@ -70,6 +70,7 @@ README 是入口文档；本页按读者角色和主题提供深入文档导航�
 ## 分析、报告与路线图
 
 - [`analysis/`](analysis/)：深度分析、项目诊断和数据依据。
+- [`analysis/project-strengths-risks-roadmap-2026-10-09.md`](analysis/project-strengths-risks-roadmap-2026-10-09.md)：基于当前代码、CI 与测试结果的优缺点分析及分阶段优化路线。
 - [`reports/`](reports/)：阶段性实施报告和问题修复报告。
 - [`roadmaps/`](roadmaps/)：路线图、下一步和阶段性规划。
 

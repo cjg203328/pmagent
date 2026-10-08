@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "ArtPM Agent React 前端 — 以 FastAPI 网关为 API，视觉与交互参考 EvoFlow/evopanel",
   "type": "module",
+  "packageManager": "pnpm@11.28.3",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
