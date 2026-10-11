@@ -12,7 +12,7 @@ still require explicit host integration before use, exactly like plugin skills.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import RLock
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Optional
@@ -32,7 +32,10 @@ class CapabilityEntry:
     name: str
     kind: str  # "tool" | "handler" | "provider" | "skill"
     factory: Any
-    metadata: Mapping[str, Any] = MappingProxyType({})
+    # ``mappingproxy`` is immutable, but dataclasses before Python 3.12 reject
+    # it as a default and demand ``default_factory``. Using a factory keeps the
+    # immutability contract while remaining importable on Python 3.10/3.11.
+    metadata: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     plugin_id: str = ""
     plugin_version: str = ""
 

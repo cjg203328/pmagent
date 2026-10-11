@@ -18,7 +18,12 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-import tomllib
+
+try:  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
+
 from typing import Any, Sequence
 
 from packaging.requirements import Requirement

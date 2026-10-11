@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import asyncio
+import importlib.util
 from io import BytesIO
 import re
 from types import SimpleNamespace
@@ -20,6 +21,19 @@ from artpm_agent.voice import (
 )
 from artpm_agent.voice.bridge import PMAgentVoiceBridge, VoiceTurnOutcome, spoken_chunks
 from artpm_agent.voice.service import _validated_wav, _wav_pcm, speakable_text
+
+
+#: The LiveKit runtime lives in the optional ``voice`` extra, which the core
+#: test environment intentionally does not install. Session creation checks for
+#: it, so the broker test must skip instead of failing on a lean install.
+def _voice_runtime_installed() -> bool:
+    try:
+        return importlib.util.find_spec("livekit.agents") is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
+
+
+VOICE_RUNTIME_INSTALLED = _voice_runtime_installed()
 
 
 def _settings(**changes):
@@ -58,6 +72,10 @@ def test_voice_status_never_exposes_secrets():
     assert status["stt"]["language"] == "zh"
 
 
+@pytest.mark.skipif(
+    not VOICE_RUNTIME_INSTALLED,
+    reason="voice optional runtime (livekit-agents) is not installed",
+)
 def test_session_broker_binds_server_owned_identity_and_short_ttl():
     captured = {}
 

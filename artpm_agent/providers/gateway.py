@@ -313,6 +313,7 @@ class ModelGateway:
         text = ModelGateway._error_chain_text(error)
         markers = (
             "does not support image",
+            "this model does not support image input",
             "image input is not supported",
             "unsupported modality",
             "image_url is not supported",

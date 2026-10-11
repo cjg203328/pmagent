@@ -316,3 +316,16 @@ def test_vision_fallback_prefers_likely_vision_model():
 def test_vision_fallback_uses_explicit_config():
     g = ModelGateway({"model": "a", "vision_model": "custom-vision"}, None)
     assert g.vision_fallback_model_ids("a") == ["custom-vision"]
+
+
+def test_image_input_capability_error_matches_model_image_input_message():
+    error = RuntimeError(
+        'Cannot read "fac2260e5c5be617b60100ff18e14f10.jpg" '
+        "(this model does not support image input)."
+    )
+    assert ModelGateway._is_vision_capability_error(error)
+
+
+def test_unrelated_image_read_error_is_not_classified_as_capability_error():
+    error = RuntimeError('Cannot read "missing.jpg" (file not found).')
+    assert not ModelGateway._is_vision_capability_error(error)
