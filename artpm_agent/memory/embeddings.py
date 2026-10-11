@@ -43,7 +43,9 @@ class DeterministicEmbeddingProvider:
 
         vector = [0.0] * self.dimension
         for ngram in self._ngrams(normalized):
-            digest = hashlib.md5(ngram.encode("utf-8")).digest()
+            # Feature hashing for the offline embedding fallback; the digest is
+            # used as a bucket index, so a non-cryptographic hash is intended.
+            digest = hashlib.md5(ngram.encode("utf-8"), usedforsecurity=False).digest()
             position, sign_value = struct.unpack("<II", digest[:8])
             index = position % self.dimension
             vector[index] += 1.0 if sign_value & 1 else -1.0

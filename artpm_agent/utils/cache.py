@@ -116,7 +116,8 @@ class DiskCache:
 
     def _get_cache_file(self, key: str) -> Path:
         """获取缓存文件路径"""
-        key_hash = hashlib.md5(key.encode()).hexdigest()
+        # Filename derivation for the cache directory, not a security control.
+        key_hash = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
         return self.cache_dir / f"{key_hash}.pkl"
 
     def cleanup_expired(self):
@@ -298,7 +299,8 @@ def _generate_cache_key(func: Callable, args: tuple, kwargs: dict, prefix: str =
     key = "|".join(filter(None, key_parts))
 
     # Hash
-    return hashlib.md5(key.encode()).hexdigest()
+    # Cache-key derivation only; not used for integrity or security.
+    return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
 
 
 # 全局缓存实例

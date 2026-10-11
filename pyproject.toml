@@ -113,7 +113,9 @@ dev = [
     "ruff>=0.15.0",
     "mypy>=1.8.0",
     "bandit>=1.7.0",
-    "safety>=3.0.0",
+    # `safety` was replaced by pip-audit: it needs network auth to resolve its
+    # advisory database, and it pulls in `nltk`, which itself carries an
+    # unfixed advisory. CI installs pip-audit directly in the security job.
     "fastapi>=0.135.1,<0.136.0",
     "uvicorn>=0.51.0,<0.52.0",
     "psycopg[binary]>=3.2.0,<4.0.0",

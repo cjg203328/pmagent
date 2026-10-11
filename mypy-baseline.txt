@@ -1,0 +1,282 @@
+# mypy incremental-gate baseline.
+# One '<file>|<code>|<message>' entry per accepted error.
+# Regenerate with: python scripts/mypy_gate.py --update-baseline
+artpm_agent/api/app.py|arg-type|Argument 1 to "asdict" has incompatible type "DataclassInstance | type[DataclassInstance]"; expected "DataclassInstance"
+artpm_agent/api/app.py|assignment|Incompatible types in assignment (expression has type "Callable[[Request[State]], RequestPrincipal]", variable has type "TrustedHeaderIdentityResolver")
+artpm_agent/api/app.py|assignment|Incompatible types in assignment (expression has type "dict[Never, Never]", variable has type "MappingProxyType[str, Parameter]")
+artpm_agent/api/app.py|assignment|Incompatible types in assignment (expression has type "tuple[Any, ...]", variable has type "list[Any]")
+artpm_agent/api/app.py|call-arg|Too many arguments
+artpm_agent/api/app.py|no-any-return|Returning Any from function declared to return "GatewayServices"
+artpm_agent/api/app.py|no-any-return|Returning Any from function declared to return "dict[str, Any]"
+artpm_agent/api/services.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "ChatAttachmentStore")
+artpm_agent/api/services.py|assignment|Incompatible types in assignment (expression has type "dict[Never, Never]", variable has type "MappingProxyType[str, Parameter]")
+artpm_agent/api/services.py|call-arg|Too many arguments
+artpm_agent/api/services.py|misc|Cannot infer type of lambda
+artpm_agent/api/services.py|no-any-return|Returning Any from function declared to return "str"
+artpm_agent/api/services.py|var-annotated|Need type annotation for "metadata"
+artpm_agent/artifacts/coordinator.py|arg-type|Argument "requested_format" to "ArtifactCoordinationResult" has incompatible type "str"; expected "Literal['xlsx', 'docx'] | None"
+artpm_agent/artifacts/coordinator.py|arg-type|Argument "rows" to "XlsxTablePlan" has incompatible type "list[list[str | int | float | bool | None]]"; expected "list[list[str | int | float | bool | None] | dict[str, str | int | float | bool | None]]"
+artpm_agent/artifacts/coordinator.py|arg-type|Argument 1 to "_edit_system_prompt" of "ArtifactCoordinator" has incompatible type "str"; expected "Literal['xlsx', 'docx']"
+artpm_agent/artifacts/coordinator.py|union-attr|Item "None" of "XlsxTablePlan | None" has no attribute "model_dump"
+artpm_agent/artifacts/coordinator.py|union-attr|Item "None" of "list[DocxParagraphPlan] | None" has no attribute "__iter__" (not iterable)
+artpm_agent/artifacts/generator.py|arg-type|Argument 1 to "save" of "Document" has incompatible type "Path"; expected "str | IO[bytes]"
+artpm_agent/artifacts/generator.py|call-overload|No overload variant of "get" of "Mapping" matches argument type "int"
+artpm_agent/artifacts/templates.py|arg-type|Argument 1 to "Document" has incompatible type "Path"; expected "str | IO[bytes] | None"
+artpm_agent/artifacts/templates.py|union-attr|Item "None" of "ParagraphStyle | None" has no attribute "name"
+artpm_agent/core/mcp_client_enhanced.py|arg-type|Argument 1 to "_resolve_path" of "EnhancedMCPClient" has incompatible type "Any | None"; expected "str"
+artpm_agent/core/mcp_client_enhanced.py|assignment|Incompatible default for parameter "allow_commands" (default has type "None", parameter has type "bool")
+artpm_agent/core/mcp_client_enhanced.py|assignment|Incompatible default for parameter "directory" (default has type "None", parameter has type "str")
+artpm_agent/core/mcp_client_enhanced.py|assignment|Incompatible default for parameter "value" (default has type "None", parameter has type "str")
+artpm_agent/core/mcp_client_enhanced.py|assignment|Incompatible default for parameter "workspace_path" (default has type "None", parameter has type "str")
+artpm_agent/core/mcp_client_enhanced.py|misc|Generator has incompatible item type "int"; expected "bool"
+artpm_agent/core/mcp_client_enhanced.py|no-any-return|Returning Any from function declared to return "dict[str, Any]"
+artpm_agent/core/mcp_client_enhanced.py|no-any-return|Returning Any from function declared to return "int"
+artpm_agent/core/mcp_client_enhanced.py|operator|"object" not callable
+artpm_agent/core/mcp_client_enhanced.py|var-annotated|Need type annotation for "matches" (hint: "matches: list[<type>] = ...")
+artpm_agent/core/mcp_client_stdio.py|assignment|Incompatible types in assignment (expression has type "ClientSession", variable has type "None")
+artpm_agent/core/mcp_client_stdio.py|misc|All conditional function variants must have identical signatures
+artpm_agent/core/mcp_client_stdio.py|no-any-return|Returning Any from function declared to return "dict[str, Any]"
+artpm_agent/core/mcp_client_stdio.py|no-any-return|Returning Any from function declared to return "list[dict[str, Any]]"
+artpm_agent/core/mcp_client_unified.py|assignment|Incompatible default for parameter "api_key" (default has type "None", parameter has type "str")
+artpm_agent/core/mcp_client_unified.py|assignment|Incompatible default for parameter "workspace_path" (default has type "None", parameter has type "str")
+artpm_agent/core/mcp_client_unified.py|no-any-return|Returning Any from function declared to return "dict[str, Any]"
+artpm_agent/core/mcp_client_unified.py|no-any-return|Returning Any from function declared to return "list[dict[str, Any]]"
+artpm_agent/core/mcp_client_unified.py|return-value|Incompatible return value type (got "UnifiedMCPClient | None", expected "UnifiedMCPClient")
+artpm_agent/core/mcp_client_unified.py|union-attr|Item "None" of "UnifiedMCPClient | None" has no attribute "_api_key"
+artpm_agent/core/mcp_client_unified.py|union-attr|Item "None" of "UnifiedMCPClient | None" has no attribute "_workspace_path"
+artpm_agent/core/mcp_skills.py|no-any-return|Returning Any from function declared to return "dict[str, Any]"
+artpm_agent/core/token_monitor.py|assignment|Incompatible default for parameter "db_path" (default has type "None", parameter has type "str")
+artpm_agent/core/token_monitor.py|assignment|Incompatible default for parameter "feature" (default has type "None", parameter has type "str")
+artpm_agent/core/token_monitor.py|assignment|Incompatible default for parameter "latency" (default has type "None", parameter has type "float")
+artpm_agent/core/token_monitor.py|assignment|Incompatible default for parameter "session_id" (default has type "None", parameter has type "str")
+artpm_agent/core/token_monitor.py|attr-defined|"object" has no attribute "update"
+artpm_agent/core/token_monitor.py|no-any-return|Returning Any from function declared to return "dict[Any, Any]"
+artpm_agent/core/token_monitor.py|no-any-return|Returning Any from function declared to return "list[dict[Any, Any]]"
+artpm_agent/database/connection_pool.py|attr-defined|"Pool" has no attribute "checkedin"
+artpm_agent/database/connection_pool.py|attr-defined|"Pool" has no attribute "checkedout"
+artpm_agent/database/connection_pool.py|attr-defined|"Pool" has no attribute "overflow"
+artpm_agent/database/connection_pool.py|attr-defined|"Pool" has no attribute "size"
+artpm_agent/database/connection_pool.py|no-any-return|Returning Any from function declared to return "Session"
+artpm_agent/database/models.py|arg-type|Argument 1 to "loads" has incompatible type "Column[str]"; expected "str | bytes | bytearray"
+artpm_agent/database/models.py|assignment|Incompatible default for parameter "client" (default has type "None", parameter has type "str")
+artpm_agent/database/models.py|assignment|Incompatible default for parameter "status" (default has type "None", parameter has type "str")
+artpm_agent/database/models.py|no-any-return|Returning Any from function declared to return "Project | None"
+artpm_agent/database/models.py|no-any-return|Returning Any from function declared to return "Task | None"
+artpm_agent/database/models.py|no-any-return|Returning Any from function declared to return "list[AssetVersion]"
+artpm_agent/database/models.py|no-any-return|Returning Any from function declared to return "list[Asset]"
+artpm_agent/database/models.py|no-any-return|Returning Any from function declared to return "list[Delivery]"
+artpm_agent/database/models.py|no-any-return|Returning Any from function declared to return "list[Document]"
+artpm_agent/database/models.py|no-any-return|Returning Any from function declared to return "list[Project]"
+artpm_agent/database/models.py|no-any-return|Returning Any from function declared to return "list[Task]"
+artpm_agent/database/models.py|no-any-return|Returning Any from function declared to return "list[TeamMember]"
+artpm_agent/editing/document_model.py|arg-type|Argument 1 to "Document" has incompatible type "Path"; expected "str | IO[bytes] | None"
+artpm_agent/editing/edit_interpreter.py|no-any-return|Returning Any from function declared to return "str"
+artpm_agent/editing/edit_tools.py|arg-type|Argument 1 to "append" of "list" has incompatible type "Any | None"; expected "str"
+artpm_agent/editing/edit_tools.py|arg-type|Argument 1 to "get" of "dict" has incompatible type "Any | None"; expected "str"
+artpm_agent/editing/rule_distiller.py|arg-type|Argument 1 to "len" has incompatible type "list[dict[str, Any]] | None"; expected "Sized"
+artpm_agent/editing/rule_distiller.py|arg-type|Argument 1 to "list" has incompatible type "list[dict[str, Any]] | None"; expected "Iterable[dict[str, Any]]"
+artpm_agent/editing/rule_distiller.py|union-attr|Item "None" of "list[dict[str, Any]] | None" has no attribute "__iter__" (not iterable)
+artpm_agent/editing/rule_distiller.py|union-attr|Item "None" of "list[dict[str, Any]] | None" has no attribute "append"
+artpm_agent/evolution/strategy_store.py|no-any-return|Returning Any from function declared to return "bool"
+artpm_agent/evolution/strategy_store.py|no-any-return|Returning Any from function declared to return "str"
+artpm_agent/harness/knowledge_handler.py|no-any-return|Returning Any from function declared to return "str | None"
+artpm_agent/harness/memory_retrieval.py|union-attr|Item "None" of "Any | FeedbackStore | None" has no attribute "add"
+artpm_agent/harness/runtime.py|no-any-return|Returning Any from function declared to return "tuple[bool, str]"
+artpm_agent/harness/skill_handler.py|assignment|Incompatible types in assignment (expression has type "Any | None", variable has type "IntentDecision")
+artpm_agent/health_check.py|assignment|Incompatible types in assignment (expression has type "str", target has type "dict[str, Any]")
+artpm_agent/memory/adaptive_vector_store.py|assignment|Incompatible types in assignment (expression has type "Index", variable has type "None")
+artpm_agent/memory/adaptive_vector_store.py|attr-defined|"None" has no attribute "add"
+artpm_agent/memory/adaptive_vector_store.py|attr-defined|"None" has no attribute "hnsw"
+artpm_agent/memory/adaptive_vector_store.py|attr-defined|"None" has no attribute "is_trained"
+artpm_agent/memory/adaptive_vector_store.py|attr-defined|"None" has no attribute "nlist"
+artpm_agent/memory/adaptive_vector_store.py|attr-defined|"None" has no attribute "reconstruct_n"
+artpm_agent/memory/adaptive_vector_store.py|attr-defined|"None" has no attribute "train"
+artpm_agent/memory/consolidation.py|assignment|Incompatible types in assignment (expression has type "float", variable has type "int")
+artpm_agent/memory/conversation_compressor.py|no-any-return|Returning Any from function declared to return "dict[str, Any]"
+artpm_agent/memory/cross_session_memory.py|no-any-return|Returning Any from function declared to return "str | None"
+artpm_agent/memory/episode_store.py|no-any-return|Returning Any from function declared to return "int"
+artpm_agent/memory/episode_store.py|no-any-return|Returning Any from function declared to return "str"
+artpm_agent/memory/faiss_vector_store.py|assignment|Incompatible types in assignment (expression has type Module, variable has type "None")
+artpm_agent/memory/faiss_vector_store.py|attr-defined|"None" has no attribute "deserialize_index"
+artpm_agent/memory/feedback_store.py|no-any-return|Returning Any from function declared to return "bool"
+artpm_agent/memory/feedback_store.py|no-any-return|Returning Any from function declared to return "str"
+artpm_agent/memory/memory_injector.py|no-any-return|Returning Any from function declared to return "list[dict[str, Any]]"
+artpm_agent/memory/memory_manager.py|no-any-return|Returning Any from function declared to return "bool"
+artpm_agent/memory/qdrant_vector_store.py|arg-type|Argument "must" to "Filter" has incompatible type "list[FieldCondition]"; expected "list[FieldCondition | IsEmptyCondition | IsNullCondition | HasIdCondition | HasVectorCondition | SliceCondition | NestedCondition | Filter] | FieldCondition | IsEmptyCondition | IsNullCondition | HasIdCondition | HasVectorCondition | SliceCondition | NestedCondition | Filter | None"
+artpm_agent/memory/qdrant_vector_store.py|arg-type|Argument "points" to "PointIdsList" has incompatible type "list[str]"; expected "list[int | str | UUID]"
+artpm_agent/memory/qdrant_vector_store.py|arg-type|Argument "timeout" to "QdrantClient" has incompatible type "float"; expected "int | None"
+artpm_agent/memory/session_store.py|no-any-return|Returning Any from function declared to return "dict[str, Any] | None"
+artpm_agent/memory/sqlite_manager.py|no-any-return|Returning Any from function declared to return "bool"
+artpm_agent/memory/sqlite_manager.py|no-any-return|Returning Any from function declared to return "list[tuple[Any, ...]]"
+artpm_agent/memory/sqlite_manager.py|no-any-return|Returning Any from function declared to return "str"
+artpm_agent/memory/vector_store.py|arg-type|Argument 1 to "VectorStore" has incompatible type "**dict[str, int | str | Path]"; expected "int"
+artpm_agent/memory/vector_store.py|arg-type|Argument 1 to "VectorStore" has incompatible type "**dict[str, int | str | Path]"; expected "str | Path"
+artpm_agent/memory/vector_store.py|arg-type|Argument 1 to "VectorStore" has incompatible type "**dict[str, int | str | Path]"; expected "str"
+artpm_agent/memory/wiki_store.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "dict[str, Any]")
+artpm_agent/memory/wiki_store.py|assignment|Incompatible types in assignment (expression has type "dict[str, Any] | None", variable has type "dict[str, Any]")
+artpm_agent/memory/wiki_store.py|no-any-return|Returning Any from function declared to return "Row | None"
+artpm_agent/parsers/excel_parser.py|assignment|Incompatible default for parameter "client_hint" (default has type "None", parameter has type "str")
+artpm_agent/parsers/excel_parser.py|assignment|Incompatible default for parameter "hint" (default has type "None", parameter has type "str")
+artpm_agent/parsers/excel_parser.py|no-any-return|Returning Any from function declared to return "int"
+artpm_agent/parsers/excel_parser.py|no-any-return|Returning Any from function declared to return "str"
+artpm_agent/parsers/excel_parser.py|operator|Unsupported operand types for * ("float" and "str")
+artpm_agent/parsers/excel_parser.py|operator|Unsupported operand types for * ("str" and "float")
+artpm_agent/parsers/excel_parser.py|operator|Unsupported operand types for * ("str" and "str")
+artpm_agent/parsers/excel_parser.py|return-value|Incompatible return value type (got "float | None", expected "float")
+artpm_agent/parsers/ocr_parser.py|arg-type|Argument 1 to "_parse_table_data" of "OCRImageParser" has incompatible type "list[dict[Any, Any]]"; expected "list[list[dict[Any, Any]]]"
+artpm_agent/parsers/ocr_parser.py|assignment|Incompatible types in assignment (expression has type "float | None", target has type "None")
+artpm_agent/parsers/ocr_parser.py|return-value|Incompatible return value type (got "list[list[dict[str, Any]]]", expected "list[dict[Any, Any]]")
+artpm_agent/parsers/ocr_parser.py|var-annotated|Need type annotation for "assets" (hint: "assets: list[<type>] = ...")
+artpm_agent/plugins/capabilities.py|assignment|Incompatible types in assignment (expression has type "PluginHandlerRegistration", variable has type "PluginSkillRegistration")
+artpm_agent/plugins/capabilities.py|assignment|Incompatible types in assignment (expression has type "PluginProviderRegistration", variable has type "PluginSkillRegistration")
+artpm_agent/plugins/capabilities.py|assignment|Incompatible types in assignment (expression has type "PluginToolRegistration", variable has type "PluginSkillRegistration")
+artpm_agent/plugins/capabilities.py|attr-defined|"PluginSkillRegistration" has no attribute "handler_class"
+artpm_agent/plugins/capabilities.py|attr-defined|"PluginSkillRegistration" has no attribute "provider_class"
+artpm_agent/plugins/capabilities.py|attr-defined|"PluginSkillRegistration" has no attribute "tool_class"
+artpm_agent/plugins/loader.py|assignment|Incompatible types in assignment (expression has type "PluginManager", variable has type "LoaderProtocol | None")
+artpm_agent/plugins/loader.py|attr-defined|"object" has no attribute "name"
+artpm_agent/presentation/skill_results.py|arg-type|Argument 1 to "get" of "dict" has incompatible type "Any | None"; expected "str"
+artpm_agent/presentation/skill_results.py|operator|Unsupported operand types for * ("None" and "int")
+artpm_agent/profiles/store.py|no-any-return|Returning Any from function declared to return "Row"
+artpm_agent/profiles/store.py|return-value|Incompatible return value type (got "AgentProfile | None", expected "AgentProfile")
+artpm_agent/providers/gateway.py|arg-type|Argument 1 to "int" has incompatible type "Any | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
+artpm_agent/providers/gateway.py|arg-type|Argument 2 to "_cache_acquire" of "ModelGateway" has incompatible type "str | None"; expected "str"
+artpm_agent/providers/gateway.py|arg-type|Argument 2 to "_cache_put" of "ModelGateway" has incompatible type "str | None"; expected "str"
+artpm_agent/providers/gateway.py|arg-type|Argument 4 to "_chat_with_vision" of "ModelGateway" has incompatible type "list[str] | None"; expected "list[str]"
+artpm_agent/providers/gateway.py|arg-type|Argument 4 to "_stream_with_vision" of "ModelGateway" has incompatible type "list[str] | None"; expected "list[str]"
+artpm_agent/providers/gateway.py|assignment|Incompatible default for parameter "client_factory" (default has type "Callable[[dict[str, Any]], BaseLLMClient]", parameter has type "Callable[[Mapping[str, Any]], Any]")
+artpm_agent/providers/gateway.py|assignment|Incompatible types in assignment (expression has type "BaseException | None", variable has type "BaseException")
+artpm_agent/providers/gateway.py|no-any-return|Returning Any from function declared to return "list[Any]"
+artpm_agent/providers/gateway.py|no-any-return|Returning Any from function declared to return "str | None"
+artpm_agent/providers/gateway.py|no-any-return|Returning Any from function declared to return "str"
+artpm_agent/providers/gateway.py|var-annotated|Need type annotation for "parts" (hint: "parts: list[<type>] = ...")
+artpm_agent/providers/model_health_tracker.py|no-any-return|Returning Any from function declared to return "float"
+artpm_agent/providers/model_health_tracker.py|var-annotated|Need type annotation for "error_distribution" (hint: "error_distribution: dict[<type>, <type>] = ...")
+artpm_agent/providers/response_cache.py|assignment|Incompatible types in assignment (expression has type "HASH", variable has type "str")
+artpm_agent/providers/response_cache.py|attr-defined|"str" has no attribute "hexdigest"
+artpm_agent/providers/response_cache.py|attr-defined|"str" has no attribute "update"
+artpm_agent/request_orchestrator.py|no-any-return|Returning Any from function declared to return "ContextManager[list[str]]"
+artpm_agent/request_orchestrator.py|no-any-return|Returning Any from function declared to return "IntentDecision"
+artpm_agent/request_orchestrator.py|no-any-return|Returning Any from function declared to return "str"
+artpm_agent/request_orchestrator.py|no-any-return|Returning Any from function declared to return "tuple[list[dict[str, Any]], str]"
+artpm_agent/routing/service.py|index|Value of type "object" is not indexable
+artpm_agent/routing/service.py|no-any-return|Returning Any from function declared to return "str | None"
+artpm_agent/runtime/agent_loop.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "ToolBatchResult")
+artpm_agent/runtime/agent_loop.py|assignment|Incompatible types in assignment (expression has type "ToolResult | None", variable has type "ToolResult")
+artpm_agent/runtime/agent_loop.py|func-returns-value|Function does not return a value (it only ever returns None)
+artpm_agent/runtime/agent_loop.py|return-value|No return value expected
+artpm_agent/runtime/subagent.py|arg-type|Argument "execute" to "AgentTool" has incompatible type "def execute(*, task: str, context: dict[str, Any] | None = ..., depth: int = ...) -> dict[str, Any]"; expected "Callable[[str, Mapping[str, Any], Event, Callable[[ToolResult], None] | None], ToolResult | Mapping[str, Any]]"
+artpm_agent/security/permission_store.py|assignment|Incompatible types in assignment (expression has type "tuple[tuple[Any, Any], ...]", variable has type "tuple[tuple[str | None, str]]")
+artpm_agent/security/permission_store.py|no-any-return|Returning Any from function declared to return "Row"
+artpm_agent/skills/base_skill.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "Logger")
+artpm_agent/skills/base_skill.py|no-any-return|Returning Any from function declared to return "dict[str, Any]"
+artpm_agent/skills/cost_control_skill.py|arg-type|Argument "project_id" to "budget" of "CostControlSkill" has incompatible type "Any | None"; expected "int"
+artpm_agent/skills/cost_control_skill.py|arg-type|Argument "project_id" to "overrun" of "CostControlSkill" has incompatible type "Any | None"; expected "int"
+artpm_agent/skills/delivery_skill.py|arg-type|Argument "asset_id" to "record_version" of "DeliverySkill" has incompatible type "Any | None"; expected "int"
+artpm_agent/skills/delivery_skill.py|arg-type|Argument "delivery_no" to "record_delivery" of "DeliverySkill" has incompatible type "Any | None"; expected "str"
+artpm_agent/skills/delivery_skill.py|arg-type|Argument "project_id" to "acceptance" of "DeliverySkill" has incompatible type "Any | None"; expected "int"
+artpm_agent/skills/delivery_skill.py|arg-type|Argument "project_id" to "manifest" of "DeliverySkill" has incompatible type "Any | None"; expected "int"
+artpm_agent/skills/delivery_skill.py|arg-type|Argument "project_id" to "record_delivery" of "DeliverySkill" has incompatible type "Any | None"; expected "int"
+artpm_agent/skills/delivery_skill.py|arg-type|Argument "version" to "record_version" of "DeliverySkill" has incompatible type "Any | None"; expected "str"
+artpm_agent/skills/mcp_skills.py|abstract|Cannot instantiate abstract class "BaseSkill" with abstract attribute "execute"
+artpm_agent/skills/mcp_skills.py|no-any-return|Returning Any from function declared to return "str | None"
+artpm_agent/skills/mcp_skills.py|override|Return type "Coroutine[Any, Any, dict[str, Any]]" of "execute" incompatible with return type "dict[str, Any]" in supertype "artpm_agent.skills.base_skill.BaseSkill"
+artpm_agent/skills/progress_management_skill.py|arg-type|Argument "project_id" to "blockers" of "ProgressManagementSkill" has incompatible type "Any | None"; expected "int"
+artpm_agent/skills/progress_management_skill.py|arg-type|Argument "project_id" to "milestone_view" of "ProgressManagementSkill" has incompatible type "Any | None"; expected "int"
+artpm_agent/skills/progress_management_skill.py|arg-type|Argument "project_id" to "standup_summary" of "ProgressManagementSkill" has incompatible type "Any | None"; expected "int"
+artpm_agent/skills/quote_scheduling_skill.py|arg-type|Argument "start_date" to "build_schedule" of "QuoteSchedulingSkill" has incompatible type "Any | None"; expected "str"
+artpm_agent/skills/quote_scheduling_skill.py|arg-type|Argument "start_date" to "milestone_plan" of "QuoteSchedulingSkill" has incompatible type "Any | None"; expected "str"
+artpm_agent/skills/requirements_assessment_skill.py|arg-type|Argument "client" to "ingest" of "RequirementsAssessmentSkill" has incompatible type "Any | None"; expected "str"
+artpm_agent/skills/requirements_assessment_skill.py|arg-type|Argument "project_name" to "ingest" of "RequirementsAssessmentSkill" has incompatible type "Any | None"; expected "str"
+artpm_agent/skills/retrospective_skill.py|arg-type|Argument "project_id" to "report" of "RetrospectiveSkill" has incompatible type "Any | None"; expected "int"
+artpm_agent/skills/retrospective_skill.py|arg-type|Argument "project_id" to "save_lessons" of "RetrospectiveSkill" has incompatible type "Any | None"; expected "int"
+artpm_agent/skills/skill_router.py|arg-type|Argument 1 to "Document" has incompatible type "Path"; expected "str | IO[bytes] | None"
+artpm_agent/skills/skill_router.py|arg-type|Argument 2 to "parse" of "ExcelQuoteParser" has incompatible type "Any | None"; expected "str"
+artpm_agent/skills/skill_router.py|index|Unsupported target for indexed assignment ("object")
+artpm_agent/skills/skill_router.py|no-any-return|Returning Any from function declared to return "dict[str, Any]"
+artpm_agent/skills/skill_router.py|union-attr|Item "None" of "Any | UnlimitedOCRClient | None" has no attribute "parse"
+artpm_agent/skills/smart_progress_tracker.py|no-any-return|Returning Any from function declared to return "list[Any]"
+artpm_agent/skills/smart_progress_tracker.py|var-annotated|Need type annotation for "status_counts" (hint: "status_counts: dict[<type>, <type>] = ...")
+artpm_agent/skills/smart_task_allocator.py|assignment|Incompatible default for parameter "constraints" (default has type "None", parameter has type "dict[str, Any]")
+artpm_agent/skills/smart_task_allocator.py|assignment|Incompatible types in assignment (expression has type "float | int", variable has type "int")
+artpm_agent/skills/smart_task_allocator.py|no-any-return|Returning Any from function declared to return "list[dict[Any, Any]]"
+artpm_agent/skills/smart_task_allocator.py|return-value|Incompatible return value type (got "dict[Any, Any] | None", expected "dict[Any, Any]")
+artpm_agent/tenancy/scope.py|var-annotated|Need type annotation for "roles"
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "Callable[[AgentProfile, AgentProfilePatch], str]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "Callable[[Any, WorkflowExecutionResult], str]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "Callable[[Any], Any]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "Callable[[Iterable[Any]], str]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "Callable[[Mapping[str, Any] | None], EmbeddingProvider]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "Callable[[str, AgentProfile], AgentProfilePatch | None]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "Callable[[str], list[str]]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "def fetch_openai_compatible_models(api_key: str, base_url: str, *, timeout: float = ...) -> list[str]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[AgentIdentityPatch]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[AgentIdentity]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[AgentProfilePatch]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[AgentProfileStore]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[ArtPMAgent]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[ArtifactCoordinator]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[Config]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[ConversationStore]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[DatabaseManager]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[PermissionStore]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[QuotePolicy]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[SessionStore]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[WorkflowCoordinator]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[WorkflowOverride]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[WorkflowStore]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[WorkspaceArtifactGenerator]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[WorkspaceKnowledgeStore]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[WorkspaceWikiStore]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "type[RuntimeError]", variable has type "type[ModelCatalogError]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "type[RuntimeError]", variable has type "type[PermissionConflictError]")
+artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "type[ValueError]", variable has type "type[ProfileChangeParseError]")
+artpm_agent/ui_state.py|misc|Cannot assign to a type
+artpm_agent/utils/cache.py|assignment|Incompatible types in assignment (expression has type "MemoryCache", variable has type "DiskCache")
+artpm_agent/utils/cache.py|var-annotated|Need type annotation for "cache" (hint: "cache: dict[<type>, <type>] = ...")
+artpm_agent/utils/llm_client.py|arg-type|Argument 1 to "OpenAI" has incompatible type "**dict[str, float | Any | None]"; expected "Client | None"
+artpm_agent/utils/llm_client.py|arg-type|Argument 1 to "OpenAI" has incompatible type "**dict[str, float | Any | None]"; expected "Mapping[str, object] | None"
+artpm_agent/utils/llm_client.py|arg-type|Argument 1 to "OpenAI" has incompatible type "**dict[str, float | Any | None]"; expected "Mapping[str, str] | None"
+artpm_agent/utils/llm_client.py|arg-type|Argument 1 to "OpenAI" has incompatible type "**dict[str, float | Any | None]"; expected "WorkloadIdentity | None"
+artpm_agent/utils/llm_client.py|arg-type|Argument 1 to "OpenAI" has incompatible type "**dict[str, float | Any | None]"; expected "_Provider | None"
+artpm_agent/utils/llm_client.py|arg-type|Argument 1 to "OpenAI" has incompatible type "**dict[str, float | Any | None]"; expected "bool"
+artpm_agent/utils/llm_client.py|arg-type|Argument 1 to "OpenAI" has incompatible type "**dict[str, float | Any | None]"; expected "int"
+artpm_agent/utils/llm_client.py|arg-type|Argument 1 to "OpenAI" has incompatible type "**dict[str, float | Any | None]"; expected "str | Callable[[], str] | None"
+artpm_agent/utils/llm_client.py|arg-type|Argument 1 to "OpenAI" has incompatible type "**dict[str, float | Any | None]"; expected "str | None"
+artpm_agent/utils/llm_client.py|arg-type|Argument 1 to "OpenAI" has incompatible type "**dict[str, float | Any | None]"; expected "str | URL | None"
+artpm_agent/utils/llm_client.py|no-any-return|Returning Any from function declared to return "BaseLLMClient"
+artpm_agent/utils/llm_client.py|no-any-return|Returning Any from function declared to return "str"
+artpm_agent/utils/logger.py|assignment|Incompatible types in assignment (expression has type "FileHandler", variable has type "TimedRotatingFileHandler")
+artpm_agent/utils/logger.py|assignment|Incompatible types in assignment (expression has type "RotatingFileHandler", variable has type "TimedRotatingFileHandler")
+artpm_agent/utils/logger.py|attr-defined|"StreamHandler[TextIO | Any]" has no attribute "_artpm_managed"
+artpm_agent/utils/logger.py|attr-defined|"TimedRotatingFileHandler" has no attribute "_artpm_managed"
+artpm_agent/utils/logger.py|call-overload|No overload variant of "int" matches argument type "object"
+artpm_agent/utils/metrics.py|var-annotated|Need type annotation for "events" (hint: "events: list[<type>] = ...")
+artpm_agent/utils/mineru_adapter.py|arg-type|Argument 1 to "int" has incompatible type "Any | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
+artpm_agent/utils/mineru_adapter.py|misc|Assignment to variable "error" outside except: block
+artpm_agent/utils/model_catalog.py|arg-type|Argument 1 to "sorted" has incompatible type "set[str | None]"; expected "Iterable[str]"
+artpm_agent/utils/model_catalog.py|assignment|Incompatible types in assignment (expression has type "Any | None", variable has type "str")
+artpm_agent/utils/multimodal_markdown.py|arg-type|Argument 1 to "Document" has incompatible type "Path"; expected "str | IO[bytes] | None"
+artpm_agent/utils/multimodal_markdown.py|union-attr|Item "None" of "ParagraphStyle | None" has no attribute "name"
+artpm_agent/utils/ocr_runtime.py|union-attr|Item "None" of "Popen[Any] | None" has no attribute "pid"
+artpm_agent/utils/validators.py|assignment|Incompatible types in assignment (expression has type "Any | None", variable has type "dict[str, Any]")
+artpm_agent/utils/validators.py|no-any-return|Returning Any from function declared to return "bool"
+artpm_agent/views/chat.py|var-annotated|Need type annotation for "metadata" (hint: "metadata: dict[<type>, <type>] = ...")
+artpm_agent/views/chat_model_selector.py|no-any-return|Returning Any from function declared to return "str"
+artpm_agent/views/observability.py|arg-type|Argument 3 to "_health_strip" has incompatible type "bool | None"; expected "bool"
+artpm_agent/views/settings.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[ArtPMAgent]")
+artpm_agent/views/settings.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "type[Config]")
+artpm_agent/views/settings.py|assignment|Incompatible types in assignment (expression has type "str | None", target has type "int | None")
+artpm_agent/views/settings.py|misc|Cannot assign to a type
+artpm_agent/views/settings.py|truthy-function|Function "AgentIdentity" could always be true in boolean context
+artpm_agent/voice/service.py|no-any-return|Returning Any from function declared to return "SpeechAudio"
+artpm_agent/voice/session.py|no-any-return|Returning Any from function declared to return "str"
+artpm_agent/workflows/designer.py|no-any-return|Returning Any from function declared to return "WorkflowDefinition"
+artpm_agent/workflows/engine.py|arg-type|Argument 1 to "_result" of "WorkflowEngine" has incompatible type "WorkflowRun | None"; expected "WorkflowRun"
+artpm_agent/workflows/engine.py|no-any-return|Returning Any from function declared to return "float"
+artpm_agent/workflows/selector.py|arg-type|Argument "reasons" to "WorkflowDecision" has incompatible type "list[str]"; expected "tuple[str, ...]"
+artpm_agent/workflows/selector.py|assignment|Incompatible types in assignment (expression has type "tuple[str, ...]", variable has type "list[str]")
+artpm_agent/workflows/task_graph.py|arg-type|Argument 1 to "int" has incompatible type "int | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
+artpm_agent/workflows/task_graph.py|assignment|Incompatible types in assignment (expression has type "list[dict[str, Any]]", target has type "Collection[str]")
+artpm_agent/workflows/task_graph.py|no-any-return|Returning Any from function declared to return "TaskGraphState"
+artpm_agent/workflows/task_graph.py|return-value|Incompatible return value type (got "dict[Any, Any]", expected "TaskGraphState")

@@ -30,10 +30,6 @@ jobs:
     - name: Lint with Ruff
       run: ruff check artpm_agent tests --output-format=github
 
-    - name: Type check with mypy
-      run: mypy artpm_agent --ignore-missing-imports
-      continue-on-error: true
-
     - name: Run offline tests
       run: pytest -q --no-cov -m "not integration and not benchmark"
 
@@ -73,6 +69,32 @@ jobs:
         file: ./artifacts/quality/coverage.xml
         flags: python-${{ matrix.python-version }}
         fail_ci_if_error: false
+
+  typecheck:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: pip install -e ".[dev]"
+
+    - name: Type check with mypy (incremental gate)
+      # The project carries a large pre-existing type-error backlog, so a plain
+      # `mypy` run cannot block PRs. scripts/mypy_gate.py compares against
+      # mypy-baseline.txt and fails only on newly introduced errors.
+      #
+      # This runs on a single pinned interpreter on purpose: mypy's output
+      # depends on the resolved dependency versions (e.g. numpy's stubs differ
+      # between the 3.10 and 3.12 resolutions), so one baseline cannot be
+      # shared across the whole test matrix.
+      run: python scripts/mypy_gate.py
 
   frontend:
     runs-on: ubuntu-latest
@@ -123,16 +145,20 @@ jobs:
       run: pip install -e .
 
     - name: Run Bandit security scan
+      # Blocking gate: HIGH-severity findings fail the job. Medium/low findings
+      # are reported as an artifact for triage but do not fail CI.
       run: |
         pip install bandit
         bandit -r artpm_agent -f json -o bandit-report.json
-      continue-on-error: true
+        bandit -r artpm_agent --severity-level high --confidence-level high
 
-    - name: Run Safety check
+    - name: Audit dependencies for known vulnerabilities
+      # pip-audit is the PyPA-maintained replacement for `safety`. It works
+      # offline against the installed environment, needs no account, and does
+      # not itself pull in vulnerable transitive dependencies.
       run: |
-        pip install safety
-        safety check --json
-      continue-on-error: true
+        pip install pip-audit
+        pip-audit --progress-spinner off
 
     - name: Upload security reports
       if: always()
@@ -142,7 +168,7 @@ jobs:
         path: bandit-report.json
 
   build:
-    needs: [test, frontend, security]
+    needs: [test, typecheck, frontend, security]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
 
