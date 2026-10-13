@@ -91,7 +91,17 @@ def _write_baseline(keys: list[str]) -> None:
     header = (
         "# mypy incremental-gate baseline.\n"
         "# One '<file>|<code>|<message>' entry per accepted error.\n"
+        "#\n"
+        "# This is the UNION of errors seen across supported environments, not a\n"
+        "# single interpreter's output. mypy resolves types from whatever is\n"
+        "# installed, so optional extras change the result: with the `voice`\n"
+        "# extra present it can check livekit's base classes and reports override\n"
+        "# errors that a lean install cannot see. A per-environment baseline would\n"
+        "# make the gate fail for whoever installed more, so the baseline accepts\n"
+        "# every environment's errors and reports the surplus as a note.\n"
+        "#\n"
         "# Regenerate with: python scripts/mypy_gate.py --update-baseline\n"
+        "# Merge in another environment's errors: --merge-baseline\n"
     )
     body = "\n".join(sorted(set(keys)))
     BASELINE_FILE.write_text(f"{header}{body}\n", encoding="utf-8")
@@ -104,14 +114,29 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Record the current errors as the accepted baseline and exit.",
     )
+    parser.add_argument(
+        "--merge-baseline",
+        action="store_true",
+        help=(
+            "Add the current errors to the existing baseline without dropping "
+            "entries. Use this to fold in an environment that resolves extra "
+            "optional dependencies."
+        ),
+    )
     args = parser.parse_args(argv)
 
     returncode, output = _run_mypy()
     keys = _parse_errors(output)
 
-    if args.update_baseline:
-        _write_baseline(keys)
-        print(f"Baseline updated: {len(set(keys))} accepted error(s) -> {BASELINE_FILE.name}")
+    if args.update_baseline or args.merge_baseline:
+        previous = _load_baseline() if args.merge_baseline else set()
+        merged = previous | set(keys)
+        _write_baseline(sorted(merged))
+        added = len(merged) - len(previous)
+        print(
+            f"Baseline updated: {len(merged)} accepted error(s) "
+            f"({added} added) -> {BASELINE_FILE.name}"
+        )
         return 0
 
     if not keys and returncode == 0:

@@ -17,6 +17,7 @@ README 是入口文档；本页按读者角色和主题提供深入文档导航�
 
 | 文档 | 用途 |
 | --- | --- |
+| [`architecture/SYSTEM_ANALYSIS.md`](architecture/SYSTEM_ANALYSIS.md) | 系统完整拆解：功能总结、设计思路、架构流程、意识编排、意图识别、检索路径 |
 | [`architecture/PROJECT_STRUCTURE.md`](architecture/PROJECT_STRUCTURE.md) | 当前仓库目录和入口文件职责 |
 | [`architecture/ARCHITECTURE.md`](architecture/ARCHITECTURE.md) | 系统总体架构和请求流程 |
 | [`architecture/EXECUTION_MAP.md`](architecture/EXECUTION_MAP.md) | 入口、上下文、记忆、工具和记录的唯一职责映射 |
