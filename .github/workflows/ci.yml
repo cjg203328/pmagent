@@ -218,12 +218,31 @@ jobs:
         path: dist/
 
     - name: Build Docker image
-      run: docker build -t "${{ secrets.DOCKER_USERNAME }}/artpm-agent:${{ github.sha }}" .
+      # Tagged locally on purpose. Building an image is a verification step and
+      # must not depend on a registry account: interpolating an unset
+      # DOCKER_USERNAME produces "/artpm-agent:<sha>", which is not a valid
+      # image reference, so `docker build` fails on the tag before it ever
+      # compiles the Dockerfile. Publishing is a separate, opt-in step below.
+      run: docker build -t artpm-agent:${{ github.sha }} .
 
     - name: Push to registry
-      if: github.event_name == 'push'
+      # Publishing requires registry credentials, which are deployment config
+      # rather than something every clone has. Skip with an explicit notice
+      # instead of failing on an empty username.
+      if: >-
+        github.event_name == 'push'
+        && secrets.DOCKER_USERNAME != ''
+        && secrets.DOCKER_PASSWORD != ''
       run: |
         echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+        docker tag artpm-agent:${{ github.sha }} "${{ secrets.DOCKER_USERNAME }}/artpm-agent:${{ github.sha }}"
         docker push "${{ secrets.DOCKER_USERNAME }}/artpm-agent:${{ github.sha }}"
-        docker tag "${{ secrets.DOCKER_USERNAME }}/artpm-agent:${{ github.sha }}" "${{ secrets.DOCKER_USERNAME }}/artpm-agent:latest"
+        docker tag artpm-agent:${{ github.sha }} "${{ secrets.DOCKER_USERNAME }}/artpm-agent:latest"
         docker push "${{ secrets.DOCKER_USERNAME }}/artpm-agent:latest"
+
+    - name: Report skipped publish
+      if: >-
+        github.event_name == 'push'
+        && (secrets.DOCKER_USERNAME == '' || secrets.DOCKER_PASSWORD == '')
+      run: |
+        echo "::notice title=Docker publish skipped::DOCKER_USERNAME/DOCKER_PASSWORD are not configured, so the image was built but not pushed. Set both repository secrets to enable publishing."
