@@ -18,7 +18,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from artpm_agent.harness.token_budget import estimate_tokens
 
@@ -32,6 +32,8 @@ DEFAULT_MIN_COMPRESS_INTERVAL_MIN = 30  # 最小压缩间隔（分钟）
 DEFAULT_MIN_NEW_MESSAGES = 10      # 间隔内新增消息触发量
 DEFAULT_KEEP_RECENT_MESSAGES = 8    # 压缩后保留的最近原始消息数
 DEFAULT_SUMMARY_MAX_TOKENS = 1500   # 摘要目标 Token 数
+DEFAULT_FALLBACK_USER_MESSAGES = 6  # 兜底摘要保留的最近用户原话条数
+DEFAULT_FALLBACK_MESSAGE_CHARS = 300  # 兜底摘要中单条原话的截断长度
 
 
 @dataclass
@@ -49,6 +51,7 @@ class CompressionResult:
     entities: List[Dict[str, str]] = field(default_factory=list)  # 提取的实体
     compressed_at: str = ""                    # ISO 时间戳
     error: Optional[str] = None               # 错误信息
+    degraded: bool = False                    # 是否走了无 LLM 的截断兜底
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -63,6 +66,7 @@ class CompressionResult:
             "entities": self.entities,
             "compressed_at": self.compressed_at,
             "error": self.error,
+            "degraded": self.degraded,
         }
 
 
@@ -73,7 +77,7 @@ class ConversationCompressor:
     - 无副作用检测（should_compress 只读不写）
     - 压缩幂等性（对同一状态多次 compress 结果一致）
     - 摘要持久化到 KnowledgeStore，跨会话可检索
-    - 降级友好：LLM 失败时退化为截断策略
+    - 降级友好：LLM 失败时退化为截断策略（见 _degraded_summary）
     """
 
     def __init__(
@@ -85,6 +89,8 @@ class ConversationCompressor:
         min_new_messages: int = DEFAULT_MIN_NEW_MESSAGES,
         keep_recent: int = DEFAULT_KEEP_RECENT_MESSAGES,
         summary_max_tokens: int = DEFAULT_SUMMARY_MAX_TOKENS,
+        fallback_user_messages: int = DEFAULT_FALLBACK_USER_MESSAGES,
+        fallback_message_chars: int = DEFAULT_FALLBACK_MESSAGE_CHARS,
     ):
         self.max_messages = max_messages
         self.max_tokens = max_tokens
@@ -92,6 +98,8 @@ class ConversationCompressor:
         self.min_new_messages = min_new_messages
         self.keep_recent = keep_recent
         self.summary_max_tokens = summary_max_tokens
+        self.fallback_user_messages = fallback_user_messages
+        self.fallback_message_chars = fallback_message_chars
 
     # ---- 公共接口 ------------------------------------------------------
 
@@ -194,8 +202,11 @@ class ConversationCompressor:
             # 2. 调用 LLM 生成结构化摘要
             raw_summary = llm_callable(compress_prompt)
             if not raw_summary or not raw_summary.strip():
-                result.error = "LLM 返回空摘要"
-                return result
+                # An empty completion is a provider failure, not a summary. Fall
+                # back like any other failure so the window is still bounded.
+                return self._degraded_summary(
+                    messages, result, "LLM 返回空摘要"
+                )
 
             # 3. 解析结构化输出
             parsed = self._parse_summary(raw_summary)
@@ -226,9 +237,72 @@ class ConversationCompressor:
             )
 
         except Exception as exc:
-            result.error = f"压缩异常: {exc}"
-            logger.exception("对话压缩失败")
+            logger.warning("对话压缩失败，回退到截断兜底: %s", exc, exc_info=True)
+            return self._degraded_summary(
+                messages, result, f"压缩异常: {exc}"
+            )
 
+        return result
+
+    @staticmethod
+    def _user_message_text(message: Mapping[str, Any]) -> str:
+        """Return the trimmed content of a user-role message, else an empty string."""
+        if not isinstance(message, Mapping):
+            return ""
+        if str(message.get("role") or "").strip().casefold() != "user":
+            return ""
+        content = message.get("content")
+        return str(content).strip() if content is not None else ""
+
+    def _degraded_summary(
+        self,
+        messages: Sequence[Dict[str, Any]],
+        result: CompressionResult,
+        reason: str,
+    ) -> CompressionResult:
+        """Build the truncation fallback promised by the class docstring.
+
+        A provider outage must not leave long conversations uncompressed.  The
+        LLM summary is unavailable, so the fallback keeps the most recent *user*
+        utterances verbatim: those carry the task and constraints, whereas
+        assistant text is prone to repetition and superseded drafts.  The result
+        is marked ``degraded`` so callers and telemetry can tell the two apart
+        without treating it as a clean summary.
+        """
+        user_lines = [
+            text
+            for text in (self._user_message_text(m) for m in messages)
+            if text
+        ][-self.fallback_user_messages:]
+
+        result.error = reason
+        if not user_lines:
+            # No user text to preserve; report the failure without inventing a
+            # summary so downstream injection stays empty rather than wrong.
+            logger.warning("对话压缩降级无可用用户原话: %s", reason)
+            return result
+
+        truncated = [
+            line if len(line) <= self.fallback_message_chars
+            else f"{line[: self.fallback_message_chars]}…"
+            for line in user_lines
+        ]
+        result.summary_text = (
+            f"（模型摘要不可用，已保留最近 {len(truncated)} 条用户原话）\n"
+            + "\n".join(f"- {line}" for line in truncated)
+        )
+        # Key points mirror the retained utterances so the fallback summary stays
+        # retrievable through the same knowledge-store path as a real summary.
+        result.key_points = list(truncated)
+        result.was_compressed = True
+        result.degraded = True
+        result.compressed_at = datetime.now(timezone.utc).isoformat()
+        result.messages_after = min(self.keep_recent, len(messages))
+        logger.warning(
+            "对话压缩降级完成: 保留 %d 条用户原话 (%s)",
+            len(truncated),
+            reason,
+        )
         return result
 
     def build_compressed_context(
@@ -334,7 +408,7 @@ class ConversationCompressor:
                 "compression": {
                     "messages_before": result.messages_before,
                     "messages_after": result.messages_after,
-                    "tokens_estimated": result.tokens_estimized if hasattr(result, 'tokens_estimized') else result.tokens_estimated,
+                    "tokens_estimated": result.tokens_estimated,
                     "key_point_count": len(result.key_points),
                     "preference_count": len(result.user_preferences),
                     "compressed_at": result.compressed_at,

@@ -555,7 +555,7 @@ def normalize_text(text: str, strip: bool = True) -> str:
     normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
     return normalized.strip() if strip else normalized
 
-# 创建: /artpm_agent/memory/vector_store_base.py
+# 提案：/artpm_agent/memory/vector_store_base.py（未采用，见下方现状更新）
 
 class VectorStoreBase(ABC):
     """Abstract vector store interface"""
@@ -572,10 +572,16 @@ class VectorStoreBase(ABC):
 **文件清单**:
 - 创建: `/artpm_agent/utils/datetime.py`
 - 创建: `/artpm_agent/utils/text.py`
-- 创建: `/artpm_agent/memory/vector_store_base.py`
 - 修改: `/artpm_agent/memory/faiss_vector_store.py` (继承基类)
 - 修改: `/artpm_agent/memory/qdrant_vector_store.py` (继承基类)
 - 修改: 所有使用旧函数的模块
+
+> **现状更新**：本任务原计划新建 `artpm_agent/memory/vector_store_base.py` 作为向量后端
+> 抽象基类。实际实现改用了 **facade + 协议** 方案，未创建该文件：
+> `artpm_agent/memory/vector_store.py` 负责后端选择与运行期回退，
+> `artpm_agent/memory/embeddings.py` 的 `EmbeddingProvider` 协议负责嵌入契约。
+> 因此"继承基类"这一步不再需要。当前文件清单见
+> [`../architecture/PROJECT_STRUCTURE.md`](../architecture/PROJECT_STRUCTURE.md)。
 
 **工作量**: 1-2 天  
 **所有者**: 后端工程师

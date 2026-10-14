@@ -962,7 +962,7 @@ for module, stats in sorted(modules.items()):
 **解决方案 - 迁移 Qdrant**
 
 ```python
-# artpm_agent/memory/vector_store_qdrant.py
+# artpm_agent/memory/qdrant_vector_store.py  （实现文件名，非 vector_store_qdrant.py）
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
@@ -1328,7 +1328,7 @@ class ArtPMAgent:
 
 - [ ] FAISS 迁移 Qdrant
   - [ ] 部署 Qdrant 容器
-  - [ ] 编写适配层 `vector_store_qdrant.py`
+  - [ ] 编写适配层 `qdrant_vector_store.py`（已实现，见 `docs/architecture/PROJECT_STRUCTURE.md`）
   - [ ] 编写迁移脚本 `migrate_faiss_to_qdrant.py`
   - [ ] 灰度切换 (`VECTOR_BACKEND=qdrant`)
 

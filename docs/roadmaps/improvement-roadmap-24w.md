@@ -134,8 +134,11 @@ meters = {
   ```
   artpm_agent/utils/datetime.py (_utc_now)
   artpm_agent/utils/converters.py (配置转换)
-  artpm_agent/memory/vector_store_base.py (基类)
   ```
+  > 向量后端的公共抽象**已通过 `artpm_agent/memory/vector_store.py` 的 facade 完成**
+  > （Qdrant 优先、FAISS 兜底、统一 `EmbeddingProvider` 契约），
+  > 不再需要单独的 `vector_store_base.py`。实际文件清单见
+  > [`../architecture/PROJECT_STRUCTURE.md`](../architecture/PROJECT_STRUCTURE.md)。
 
 - [ ] **命名规范化** (1 day)
   - 统一 ORM 字段命名
