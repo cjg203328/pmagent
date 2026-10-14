@@ -152,11 +152,14 @@ class RequestOrchestrator:
         self._model_tool_session_store: Optional[SessionStore] = None
 
         # Initialize the local vector memory backend. The provider is local and
-        # deterministic by default, so indexing never blocks on an API call.
+        # deterministic by default, so indexing never blocks on an API call. The
+        # LLM client is forwarded so an explicitly configured `remote` provider
+        # can be built; with the default provider it is unused.
         db_path = self.config.get("database.memory_db_path")
         vector_db_path = self.config.get("database.vector_db_path")
         embedding_provider = create_embedding_provider(
-            self.config.get("memory", {})
+            self.config.get("memory", {}),
+            llm_client=self.llm_client,
         )
         self.memory = MemoryManager(
             db_path,

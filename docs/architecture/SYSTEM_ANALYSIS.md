@@ -738,13 +738,15 @@ Qdrant 初始化/运行异常 → 自动降回 FAISS
 
 ## 7. 实现与文档差异
 
-诚实记录本次拆解中发现的三处**代码与文档/注释不一致**，供后续修正参考：
+本次拆解中发现三处**代码与文档/注释不一致**。三者均已修复，状态见下表；
+修复方案与验收标准见
+[`../roadmaps/memory-retrieval-optimization-plan.md`](../roadmaps/memory-retrieval-optimization-plan.md)。
 
-| # | 位置 | 差异 | 影响 |
+| # | 位置 | 差异 | 状态 |
 | --- | --- | --- | --- |
-| 1 | `artpm_agent/memory/` | 不存在 `vector_search.py`；向量检索实际由 `vector_store.py` + `faiss_vector_store.py` + `qdrant_vector_store.py` + `adaptive_vector_store.py` 承担 | 仅文档引用问题，功能正常 |
-| 2 | `memory/conversation_compressor.py:228` | 注释提到"截断降级"，但 LLM 异常时只置 `result.error`，**未实现**截断降级 | 压缩失败时该轮无摘要，不影响主流程 |
-| 3 | `memory/memory_manager.py:566-583` | `_get_embedding` 有 `llm_client` 参数与注释，但**代码未使用**该分支 | 当前始终走本地确定性嵌入，符合离线优先 |
+| 1 | `artpm_agent/memory/` | 不存在 `vector_search.py`；向量检索实际由 `vector_store.py` + `faiss_vector_store.py` + `qdrant_vector_store.py` + `adaptive_vector_store.py` 承担 | ✅ 已勘误：`PROJECT_STRUCTURE.md` 补充实际文件清单；`optimization-roadmap.md`、`TECHNICAL_DEBT_TASKS.md`、`improvement-roadmap-24w.md` 的过时文件名已修正或标注 |
+| 2 | `memory/conversation_compressor.py` | 类注释承诺"LLM 失败时退化为截断策略"，但异常分支只置 `result.error`，**未实现**截断降级 | ✅ 已修复：新增 `_degraded_summary()`，LLM 异常或返回空摘要时保留最近用户原话并标记 `degraded=True` |
+| 3 | `memory/memory_manager.py` | `_get_embedding` 文档称"设置 llm_client 就会改用真实嵌入"，但代码从未读取该参数 | ✅ 已修复：新增 `onnx`/`remote` provider 并接入 `llm_client`；默认仍为本地哈希，配置错误时可见降级 |
 
 另有一处需要留意但**不是缺陷**：`artpm_agent/plugins/capabilities.py` 的
 `CapabilityEntry.metadata` 原用 `MappingProxyType({})` 作 dataclass 默认值，

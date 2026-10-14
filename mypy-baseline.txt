@@ -119,9 +119,6 @@ artpm_agent/memory/session_store.py|no-any-return|Returning Any from function de
 artpm_agent/memory/sqlite_manager.py|no-any-return|Returning Any from function declared to return "bool"
 artpm_agent/memory/sqlite_manager.py|no-any-return|Returning Any from function declared to return "list[tuple[Any, ...]]"
 artpm_agent/memory/sqlite_manager.py|no-any-return|Returning Any from function declared to return "str"
-artpm_agent/memory/vector_store.py|arg-type|Argument 1 to "VectorStore" has incompatible type "**dict[str, int | str | Path]"; expected "int"
-artpm_agent/memory/vector_store.py|arg-type|Argument 1 to "VectorStore" has incompatible type "**dict[str, int | str | Path]"; expected "str | Path"
-artpm_agent/memory/vector_store.py|arg-type|Argument 1 to "VectorStore" has incompatible type "**dict[str, int | str | Path]"; expected "str"
 artpm_agent/memory/wiki_store.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "dict[str, Any]")
 artpm_agent/memory/wiki_store.py|assignment|Incompatible types in assignment (expression has type "dict[str, Any] | None", variable has type "dict[str, Any]")
 artpm_agent/memory/wiki_store.py|no-any-return|Returning Any from function declared to return "Row | None"
@@ -216,7 +213,6 @@ artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression 
 artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "Callable[[Any, WorkflowExecutionResult], str]")
 artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "Callable[[Any], Any]")
 artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "Callable[[Iterable[Any]], str]")
-artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "Callable[[Mapping[str, Any] | None], EmbeddingProvider]")
 artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "Callable[[str, AgentProfile], AgentProfilePatch | None]")
 artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "Callable[[str], list[str]]")
 artpm_agent/ui_state.py|assignment|Incompatible types in assignment (expression has type "None", variable has type "def fetch_openai_compatible_models(api_key: str, base_url: str, *, timeout: float = ...) -> list[str]")

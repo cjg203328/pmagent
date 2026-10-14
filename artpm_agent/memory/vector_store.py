@@ -7,10 +7,24 @@ from pathlib import Path
 from typing import Any
 
 from .faiss_vector_store import VectorStore as FaissVectorStore
+from .sharded_vector_store import ShardedVectorStore, sharding_enabled
 
 
 class VectorStore:
-    """Compatibility facade selecting a network-native vector backend."""
+    """Compatibility facade selecting a network-native vector backend.
+
+    Three backends are reachable, in priority order:
+
+    1. Qdrant, when ``QDRANT_URL`` is set — it isolates tenants through payload
+       filters server-side, so no sharding is needed.
+    2. Per-scope sharded FAISS, when ``VECTOR_SHARD_BY_SCOPE`` is on — one index
+       per tenant/workspace, so a filtered search reads only that scope.
+    3. Flat FAISS (default) — one index for everything, filtered after ranking.
+
+    Sharding is opt-in because it changes the on-disk layout: an existing flat
+    index cannot be read as sharded, so enabling it requires a rebuild. Leaving
+    the switch off preserves the current behaviour exactly.
+    """
 
     def __init__(
         self,
@@ -22,11 +36,12 @@ class VectorStore:
         self.fallback_reason: str | None = None
         self._backend: Any = None
         self._remote_backend = False
-        self._fallback_options = {
-            "store_path": store_path,
-            "dimension": dimension,
-            "embedding_fingerprint": embedding_fingerprint,
-        }
+        # Kept as named attributes rather than a dict: unpacking a dict into a
+        # constructor with typed keyword parameters defeats type checking, which
+        # is how the two local backends silently drifted apart before.
+        self._store_path = store_path
+        self._dimension = dimension
+        self._embedding_fingerprint = embedding_fingerprint
         qdrant_url = os.getenv("QDRANT_URL", "").strip()
         requested = os.getenv("VECTOR_BACKEND", "qdrant" if qdrant_url else "faiss")
         if requested.casefold() == "qdrant" and qdrant_url:
@@ -50,7 +65,12 @@ class VectorStore:
     def _activate_faiss(self, error: Exception | None = None) -> None:
         if error is not None:
             self.fallback_reason = f"Qdrant runtime failure: {error}"
-        self._backend = FaissVectorStore(**self._fallback_options)
+        backend = ShardedVectorStore if sharding_enabled() else FaissVectorStore
+        self._backend = backend(
+            store_path=self._store_path,
+            dimension=self._dimension,
+            embedding_fingerprint=self._embedding_fingerprint,
+        )
         self._remote_backend = False
 
     def _invoke(self, name: str, *args: Any, **kwargs: Any) -> Any:
@@ -130,4 +150,4 @@ class VectorStore:
         return self._invoke("clear")
 
 
-__all__ = ["VectorStore", "FaissVectorStore"]
+__all__ = ["VectorStore", "FaissVectorStore", "ShardedVectorStore"]

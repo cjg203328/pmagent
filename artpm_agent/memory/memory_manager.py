@@ -3,10 +3,11 @@ Memory Manager - Unified interface for short-term and long-term memory
 """
 from hashlib import sha256
 import json
+import os
 import re
 from typing import Dict, Any, List, Optional
 
-from artpm_agent.memory.embeddings import DeterministicEmbeddingProvider, EmbeddingProvider
+from artpm_agent.memory.embeddings import EmbeddingProvider, create_embedding_provider
 from artpm_agent.memory.sqlite_manager import SQLiteManager
 from artpm_agent.memory.vector_store import VectorStore
 from artpm_agent.tenancy import (
@@ -36,10 +37,19 @@ class MemoryManager:
         Args:
             db_path: SQLite database path
             vector_db_path: Vector store path
-            llm_client: LLM client for generating embeddings
+            llm_client: Optional embedding-capable client. It is only consulted
+                when the configured embedding provider is ``remote``; the default
+                provider is local and deterministic, so indexing never blocks on
+                an API call. Pass a provider explicitly to override the selection.
+            embedding_provider: Explicit provider instance. When omitted, one is
+                built from the ``memory`` config section.
         """
         self.embedding_provider = (
-            embedding_provider or DeterministicEmbeddingProvider()
+            embedding_provider
+            or create_embedding_provider(
+                self._embedding_config(),
+                llm_client=llm_client,
+            )
         )
         self.db = SQLiteManager(db_path)
         self.vector_db = VectorStore(
@@ -49,6 +59,28 @@ class MemoryManager:
         )
         self.llm_client = llm_client
         self._sync_vector_index()
+
+    @staticmethod
+    def _embedding_config() -> Dict[str, Any]:
+        """Read the embedding settings from the environment.
+
+        Uses the same ``EMBEDDING_*`` names as ``config.py`` rather than a second
+        prefix: two spellings for one setting is how a deployment ends up with a
+        provider nobody can explain. ``config.py`` is the canonical mapping for
+        the application runtime; this only covers direct ``MemoryManager``
+        construction (tests, scripts).
+        """
+        config: Dict[str, Any] = {}
+        for env_name, key in (
+            ("EMBEDDING_PROVIDER", "embedding_provider"),
+            ("EMBEDDING_MODEL_PATH", "embedding_model_path"),
+            ("EMBEDDING_MODEL_NAME", "embedding_model_name"),
+            ("EMBEDDING_DIMENSION", "embedding_dimension"),
+        ):
+            value = os.getenv(env_name, "").strip()
+            if value:
+                config[key] = value
+        return config
 
     def save_document(
         self,
@@ -565,14 +597,17 @@ class MemoryManager:
 
     def _get_embedding(self, text: str) -> List[float]:
         """
-        Get embedding vector for text using deterministic feature hashing.
+        Get the embedding vector for text from the configured provider.
 
-        Uses character n-gram hashing to produce a fixed-size vector (1536 dims)
-        that is deterministic (same text → same vector) and provides approximate
-        semantic similarity (similar texts share n-grams).
+        The provider is chosen once at construction time, not per call: the
+        vector index records the provider fingerprint in its manifest, and
+        vectors from different providers occupy different spaces, so switching
+        mid-life would corrupt retrieval rather than improve it.
 
-        To use real embeddings (OpenAI / local model), set llm_client and the
-        client will be used instead.
+        With the default configuration this is the offline character n-gram
+        feature-hash provider: deterministic, dependency-free, and lexical rather
+        than semantic. Set ``EMBEDDING_PROVIDER`` to select a neural provider when
+        synonym recall is required.
 
         Args:
             text: Input text

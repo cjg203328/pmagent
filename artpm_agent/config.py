@@ -336,6 +336,13 @@ class Config:
                 )
             except ValueError:
                 pass
+        # Neural embedding providers need weights that this repository does not
+        # ship, so the path is operator-supplied. Without these two mappings the
+        # `onnx` provider would be selectable but never constructible.
+        if os.getenv("EMBEDDING_MODEL_PATH"):
+            memory_config["embedding_model_path"] = os.getenv("EMBEDDING_MODEL_PATH")
+        if os.getenv("EMBEDDING_MODEL_NAME"):
+            memory_config["embedding_model_name"] = os.getenv("EMBEDDING_MODEL_NAME")
 
         tencentdb_memory = memory_config.setdefault("tencentdb_agent_memory", {})
         if os.getenv("TENCENTDB_AGENT_MEMORY_ENABLED"):

@@ -93,6 +93,13 @@ mineru-client = ["mineru==3.4.4"]
 ocr = ["paddleocr>=2.7.0", "paddlepaddle>=2.5.0"]
 # Backward-compatible extra; FAISS is also installed by the core dependency set.
 vector = ["faiss-cpu>=1.14.3,<2.0.0"]
+# Optional local neural embeddings (EMBEDDING_PROVIDER=onnx). onnxruntime runs
+# the model on CPU with no network, so this keeps the offline-first guarantee.
+# Model weights are NOT included: point EMBEDDING_MODEL_PATH at local weights
+# (for example an ONNX export of BGE-small-zh, roughly 100MB). Selecting `onnx`
+# without this extra degrades to the offline feature-hash provider and reports
+# the reason, rather than failing a turn.
+embedding-onnx = ["onnxruntime>=1.17.0,<2.0.0"]
 # Optional real-time voice stack; kept out of the core install because it adds
 # audio codecs, provider SDKs, and cloud credentials. MiniMax uses the current
 # `-ai` plugin; the older `livekit-plugins-minimax` package pins Agents 1.2.x.

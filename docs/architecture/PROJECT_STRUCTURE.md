@@ -68,6 +68,22 @@ artpm_agent/
 同步旧实现只作为隔离的兼容 fallback。业务库和记忆库分开，所有知识、缓存、向量和
 审批操作都必须携带正确的 tenant/workspace 上下文。
 
+### 向量与嵌入模块（`artpm_agent/memory/`）
+
+向量能力的文件名常被历史文档写错，以下是当前实现，作为唯一可信来源：
+
+| 文件 | 职责 |
+| --- | --- |
+| `vector_store.py` | 后端选择 facade：`QDRANT_URL` 存在则用 Qdrant，否则用本地 FAISS；运行期异常自动回退 FAISS |
+| `faiss_vector_store.py` | 本地持久化 FAISS 索引（`IndexIDMap2(IndexFlatIP)`，等价 cosine），含 manifest 校验与跨进程写锁 |
+| `qdrant_vector_store.py` | 远程 Qdrant 后端，使用 payload 过滤实现租户隔离 |
+| `adaptive_vector_store.py` | 按数据规模切换 Flat / IVF / HNSW 索引类型 |
+| `embeddings.py` | 嵌入 provider：`local_feature_hash`（默认，离线）、`onnx`（本地神经模型）、`remote`（API） |
+| `conversation_compressor.py` | 长对话摘要压缩，LLM 不可用时降级为保留最近用户原话 |
+
+不存在 `vector_search.py`、`vector_store_base.py` 或 `vector_store_qdrant.py`。早期路线图
+中出现的这些名字是当时的命名提案，实际实现采用了上表的名字。
+
 ## 文档目录
 
 ```text

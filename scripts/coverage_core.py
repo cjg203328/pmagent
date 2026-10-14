@@ -13,6 +13,10 @@ TEST_FILES = (
     "tests/test_response_cache.py",
     "tests/test_agent_runtime.py",
     "tests/test_vector_search.py",
+    "tests/test_sharded_vector_store.py",
+    "tests/test_embedding_providers.py",
+    "tests/test_onnx_embedding_provider.py",
+    "tests/test_conversation_compressor_fallback.py",
 )
 
 INCLUDE = (
@@ -20,6 +24,8 @@ INCLUDE = (
     "artpm_agent/components.py,"
     "artpm_agent/database/tenant_session.py,"
     "artpm_agent/memory/vector_store.py,"
+    "artpm_agent/memory/sharded_vector_store.py,"
+    "artpm_agent/memory/embeddings.py,"
     "artpm_agent/providers/response_cache.py"
 )
 

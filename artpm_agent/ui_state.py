@@ -57,7 +57,11 @@ except Exception as error:
     SessionStore = None
     WorkspaceKnowledgeStore = None
     WorkspaceWikiStore = None
-    create_embedding_provider = None
+    # Intentional None sentinel for the import-failure path. The explicit ignore
+    # also keeps the message stable: without it, mypy echoes the full current
+    # signature, so any change to create_embedding_provider shows up as a
+    # brand-new error here even though this line did not change.
+    create_embedding_provider = None  # type: ignore[assignment]
     logger.error("会话存储模块导入失败: %s", error)
 
 WORKFLOW_RUNTIME_AVAILABLE = False

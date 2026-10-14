@@ -253,11 +253,11 @@ def test_qdrant_runtime_failure_switches_to_faiss(monkeypatch, tmp_path):
     store.fallback_reason = None
     store._backend = FailingQdrant()
     store._remote_backend = True
-    store._fallback_options = {
-        "store_path": tmp_path,
-        "dimension": 4,
-        "embedding_fingerprint": "test:4",
-    }
+    # The fallback target is built from these named attributes; they mirror the
+    # constructor arguments the real path would have stored.
+    store._store_path = tmp_path
+    store._dimension = 4
+    store._embedding_fingerprint = "test:4"
     assert store.search([1.0, 0.0, 0.0, 0.0])[0]["id"] == "local"
     assert "network partition" in store.fallback_reason
 
