@@ -150,7 +150,15 @@ jobs:
         python-version: '3.10'
 
     - name: Install project dependencies
-      run: pip install -e .
+      # Build tools are upgraded for the same reason as in the test matrix, and
+      # for one specific to this job: pip-audit audits the whole environment,
+      # and the runner's preinstalled pip/setuptools carry known advisories. Left
+      # alone, the audit below reports the runner's own tooling — pip 25.0.1 and
+      # setuptools 70.0.0 produced 16 findings — instead of the project's
+      # dependencies.
+      run: |
+        pip install --upgrade pip setuptools wheel
+        pip install -e .
 
     - name: Run Bandit security scan
       # Two commands with different jobs, and the distinction matters:
@@ -166,9 +174,14 @@ jobs:
         bandit -r artpm_agent --severity-level high --confidence-level high
 
     - name: Audit dependencies for known vulnerabilities
-      # pip-audit is the PyPA-maintained replacement for `safety`. It works
-      # offline against the installed environment, needs no account, and does
-      # not itself pull in vulnerable transitive dependencies.
+      # pip-audit is the PyPA-maintained replacement for `safety`: no account
+      # needed, and it does not itself pull in vulnerable transitive deps.
+      #
+      # It audits the whole environment rather than just the project's declared
+      # dependencies, which is deliberate — an advisory in a transitive
+      # dependency is a real risk. That is also why the install step above
+      # upgrades pip/setuptools first; otherwise this fails on the runner's own
+      # build tooling before it ever looks at the project.
       run: |
         pip install pip-audit
         pip-audit --progress-spinner off
