@@ -25,7 +25,15 @@ jobs:
         cache: 'pip'
 
     - name: Install dependencies
-      run: pip install -e ".[dev]"
+      # The build backend is installed explicitly. `pip install -e ".[dev]"`
+      # does not pull in setuptools, and Python 3.12 stopped seeding venv with
+      # it while 3.10/3.11 still do. test_package_imports builds a wheel with
+      # --no-build-isolation, meaning it uses *this* environment's backend, so
+      # relying on a venv default makes the matrix behave differently per
+      # version — 3.12 failed while 3.10/3.11 passed.
+      run: |
+        pip install --upgrade pip setuptools wheel
+        pip install -e ".[dev]"
 
     - name: Lint with Ruff
       run: ruff check artpm_agent tests --output-format=github
@@ -145,11 +153,16 @@ jobs:
       run: pip install -e .
 
     - name: Run Bandit security scan
-      # Blocking gate: HIGH-severity findings fail the job. Medium/low findings
-      # are reported as an artifact for triage but do not fail CI.
+      # Two commands with different jobs, and the distinction matters:
+      #   * The report run must NOT fail the job. Bandit exits 1 whenever it
+      #     finds anything, and this codebase has ~160 medium/low findings that
+      #     are triaged by humans. Without --exit-zero the report step fails the
+      #     whole job and the HIGH gate below never even runs.
+      #   * The HIGH gate is the blocking check. It exits 1 on any HIGH finding
+      #     and 0 when there are none.
       run: |
         pip install bandit
-        bandit -r artpm_agent -f json -o bandit-report.json
+        bandit -r artpm_agent -f json -o bandit-report.json --exit-zero
         bandit -r artpm_agent --severity-level high --confidence-level high
 
     - name: Audit dependencies for known vulnerabilities

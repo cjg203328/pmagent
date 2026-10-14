@@ -1,7 +1,10 @@
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
 import sys
+
+import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +61,17 @@ def test_built_wheel_contains_and_imports_application_modules(tmp_path):
     wheel_dir = tmp_path / "wheel"
     install_dir = tmp_path / "installed"
     wheel_dir.mkdir()
+
+    # `--no-build-isolation` deliberately builds with this environment's
+    # backend instead of fetching one, so the backend must be installed here.
+    # Python 3.12 stopped seeding venv with setuptools (3.10/3.11 still do), and
+    # `pip install -e .` does not add it either, so check up front and explain
+    # the fix rather than surfacing pip's "Cannot import setuptools.build_meta".
+    if importlib.util.find_spec("setuptools") is None:
+        pytest.fail(
+            "setuptools is required to build the wheel with --no-build-isolation. "
+            "Install the build backend first: pip install setuptools wheel"
+        )
 
     build = subprocess.run(
         [
